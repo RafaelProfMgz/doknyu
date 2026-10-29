@@ -88,6 +88,12 @@
     Disco leitura/escrita.
   - Stats só são assinados com o container `Running`; parado → mensagem "Inicie o container para ver
     o consumo".
+  - **Fim de stream ≠ container sumiu:** o daemon encerra os streams de logs/stats quando o
+    container **para**. `LogsEnded`/`StatsEnded` sozinhos só marcam "container parado" (mantém o
+    detalhe aberto e os logs já recebidos); voltar para a lista só com evento `destroy` ou `NotFound`.
+  - `FakeClient` ganha `pub fn push_stats(&self, id: &str, raw: RawStats)` (resolve nome/prefixo,
+    como `push_log`) e, com `with_sample_data()`, os containers Running geram uma amostra por segundo
+    para a UI fake mostrar gráficos.
   - **Container sumiu:** `LogsEnded`/`StatsEnded` + evento `destroy` do id (ou `NotFound` ao recarregar)
     → `gone = true`, toast "O container não existe mais" e volta para `Screen::Containers`.
 
@@ -96,6 +102,8 @@
   `destroyed_container_returns_to_list` (Fake: `close_streams(id)` + `push_event(destroy)` →
   `screen == Containers` e 1 toast);
   `sparkline_handles_all_zero_values` (sem panic).
+  `stopped_container_keeps_detail_open` (Fake: `stop(id)` → streams terminam, `screen` continua
+  `Detail(id)`, logs preservados, nenhum toast de "não existe mais").
 - [ ] **Passo 2–4:** FAIL → implementar → PASS.
 - [ ] **Passo 5:** Manual: `docker run -d --name burn alpine sh -c 'while :; do :; done'` → CPU ~100%;
   `docker rm -f burn` com o detalhe aberto → volta para a lista com aviso.

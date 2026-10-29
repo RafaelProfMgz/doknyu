@@ -35,6 +35,9 @@ chamadas pela `Task` e testar essas funções + o `update` com as mensagens de r
   ```
   - `widgets.rs`: `status_badge(&ContainerState) -> Element`, `confirm_dialog(...)`, `toast_stack(...)`.
   - `pub fn friendly_error(e: &DockerError) -> String` em `src/views/widgets.rs` (usa `t!`).
+- `main.rs`: cria o client e passa para `App::new` — `docker::connect()` por padrão; com a feature
+  `fake` e `DOKNYU_FAKE=1`, `FakeClient::with_sample_data()`. Erro de `connect()` não dá panic: o app
+  abre e o onboarding mostra o erro (ver Tarefa 2.2).
 - i18n: `rust_i18n::i18n!("locales", fallback = "en")`; locale via `sys_locale::get_locale()`,
   normalizando `pt_BR`/`pt-BR`/`pt` → `pt-BR`.
 
@@ -118,6 +121,8 @@ chamadas pela `Task` e testar essas funções + o `update` com as mensagens de r
 - Consome: `DockerClient::events()`.
 - Produz: `Subscription` (ativa só com `Connection::Ok`) que converte o stream em
   `Message::Docker(ev)`; fim/erro do stream → `Message::EventsEnded`.
+  - A lista **não** recarrega após cada ação: quem atualiza é o evento (o daemon e o `FakeClient`
+    emitem eventos nas ações), evitando recarga dupla.
   - `Docker(ev)` com `kind == Container` → recarrega containers, com **debounce de 300 ms**
     (vários eventos seguidos = 1 recarga).
   - `EventsEnded` → novo `ping`; se falhar com erro de conexão → onboarding (reconexão da Tarefa 2.2).
