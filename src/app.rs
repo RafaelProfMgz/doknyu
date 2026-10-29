@@ -3070,7 +3070,7 @@ mod tests {
     async fn theme_action_saves_preference() {
         let dir = crate::ui::prefs::tests::unique_dir("action");
         let fake = Arc::new(FakeClient::with_sample_data());
-        let mut app = App::new_with_config(fake.clone(), Some(dir.clone())).0;
+        let mut app = App::new_with_config(fake.clone(), Some(dir.to_path_buf())).0;
         settle(&mut app, Message::Action(ActionId::ThemeDark)).await;
         assert_eq!(app.theme_mode, ThemeMode::Dark);
         assert_eq!(
@@ -3082,7 +3082,6 @@ mod tests {
             std::fs::read_to_string(dir.join("theme")).unwrap().trim(),
             "light"
         );
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[tokio::test]
@@ -3090,9 +3089,8 @@ mod tests {
         let dir = crate::ui::prefs::tests::unique_dir("startup");
         crate::ui::prefs::save_theme_mode(&dir, ThemeMode::Light).unwrap();
         let fake = Arc::new(FakeClient::with_sample_data());
-        let app = App::new_with_config(fake.clone(), Some(dir.clone())).0;
+        let app = App::new_with_config(fake.clone(), Some(dir.to_path_buf())).0;
         assert_eq!(app.theme_mode, ThemeMode::Light);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[tokio::test]
@@ -3102,12 +3100,12 @@ mod tests {
         let dir = crate::ui::prefs::tests::unique_dir("garbage");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("theme"), "azul").unwrap();
-        let app = App::new_with_config(fake.clone(), Some(dir.clone())).0;
+        let app = App::new_with_config(fake.clone(), Some(dir.to_path_buf())).0;
         assert_eq!(app.theme_mode, ThemeMode::System);
         // The config "directory" is a file: saving fails, quietly.
         let file = crate::ui::prefs::tests::unique_dir("not-a-dir");
         std::fs::write(&file, "x").unwrap();
-        let mut app = App::new_with_config(fake.clone(), Some(file.clone())).0;
+        let mut app = App::new_with_config(fake.clone(), Some(file.to_path_buf())).0;
         assert_eq!(app.theme_mode, ThemeMode::System);
         settle(&mut app, Message::Action(ActionId::ThemeDark)).await;
         assert_eq!(app.theme_mode, ThemeMode::Dark, "the choice still applies");
@@ -3116,7 +3114,5 @@ mod tests {
         let mut app = App::new_with_config(fake.clone(), None).0;
         settle(&mut app, Message::Action(ActionId::ThemeLight)).await;
         assert_eq!(app.theme_mode, ThemeMode::Light);
-        std::fs::remove_dir_all(&dir).unwrap();
-        std::fs::remove_file(&file).unwrap();
     }
 }

@@ -74,14 +74,41 @@ pub(crate) mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    /// A directory path that does not exist yet and is unique to this call.
-    pub(crate) fn unique_dir(name: &str) -> PathBuf {
+    /// A path in the temp directory, unique to this call. Whatever ends up there (a directory or
+    /// a file) is removed when the guard drops, also when the test fails.
+    pub(crate) struct TempDir(PathBuf);
+
+    impl std::ops::Deref for TempDir {
+        type Target = Path;
+
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<Path> for TempDir {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            if self.0.is_dir() {
+                let _ = std::fs::remove_dir_all(&self.0);
+            } else {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+    }
+
+    pub(crate) fn unique_dir(name: &str) -> TempDir {
         static NEXT: AtomicU32 = AtomicU32::new(0);
-        std::env::temp_dir().join(format!(
+        TempDir(std::env::temp_dir().join(format!(
             "doknyu-test-{name}-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
-        ))
+        )))
     }
 
     #[test]
@@ -114,7 +141,6 @@ pub(crate) mod tests {
         assert_eq!(load_theme_mode(&dir), ThemeMode::System);
         std::fs::write(&file, [0xff, 0xfe, 0x00]).unwrap();
         assert_eq!(load_theme_mode(&dir), ThemeMode::System, "not UTF-8");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -124,7 +150,6 @@ pub(crate) mod tests {
         std::fs::create_dir_all(dir.join("theme")).unwrap();
         assert_eq!(load_theme_mode(&dir), ThemeMode::System);
         assert!(save_theme_mode(&dir, ThemeMode::Dark).is_err());
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
