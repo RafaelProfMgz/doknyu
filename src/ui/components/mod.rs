@@ -2,22 +2,26 @@
 //! about `App`. Views compose these and never style widgets by hand.
 
 mod chip;
+mod human_bytes;
 mod icon_button;
 mod kbd;
 mod list;
 mod modal;
 mod panel_header;
 mod search_field;
+mod sparkline;
 mod status_dot;
 mod toast;
 
 pub use chip::chip;
+pub use human_bytes::human_bytes;
 pub use icon_button::icon_button;
 pub use kbd::{Shortcut, kbd};
 pub use list::{RowEvents, list_header, list_row};
 pub use modal::modal;
 pub use panel_header::panel_header;
 pub use search_field::search_field;
+pub use sparkline::sparkline;
 pub use status_dot::{dot_color, status_dot};
 pub use toast::{ToastKind, toast};
 

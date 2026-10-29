@@ -3730,4 +3730,350 @@ mod tests {
             }
         }
     }
+
+    // ---- Stats tab (task 3.3) ----
+
+    fn raw_stats(mem: u64) -> RawStats {
+        RawStats {
+            cpu_total: 0,
+            precpu_total: 0,
+            system: 0,
+            presystem: 0,
+            online_cpus: 2,
+            mem_usage: mem,
+            mem_inactive_file: 0,
+            mem_limit: 1000,
+            net_rx: 1,
+            net_tx: 2,
+            blk_read: 3,
+            blk_write: 4,
+        }
+    }
+
+    fn mem_series(app: &App) -> Vec<f64> {
+        app.detail
+            .as_ref()
+            .map(|d| d.stats.mem_series())
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn stats_samples_reach_the_history_of_the_open_container_only() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let sample = |id: &str, generation, mem| {
+            Message::Detail(detail::Msg::StatsSample {
+                id: id.into(),
+                generation,
+                raw: raw_stats(mem),
+            })
+        };
+        // The dock closed while the sample was on its way: dropped quietly.
+        let _ = app.update(sample("web-id", 0, 1));
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        let _ = app.update(sample("web-id", 0, 10));
+        let _ = app.update(sample("db-id", 0, 99));
+        let _ = app.update(sample("web-id", 5, 99));
+        assert_eq!(mem_series(&app), [10.0]);
+    }
+
+    #[tokio::test]
+    async fn stopped_container_has_no_stats_subscription() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        assert!(app.stats_source().is_none(), "no dock");
+
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        assert_eq!(
+            app.stats_source().map(|s| (s.id, s.generation)),
+            Some(("web-id".into(), 0))
+        );
+        let _ = app.subscription();
+
+        // The stream is wanted whichever tab is on screen, so the history is there when the
+        // user gets to Stats.
+        let _ = app.update(Message::DockTab(DockTab::Stats));
+        assert!(app.stats_source().is_some());
+
+        fake.stop("web-id").await.unwrap();
+        settle(&mut app, Message::ReloadContainers).await;
+        assert!(app.stats_source().is_none(), "stopped");
+        assert!(app.logs_source().is_some(), "the logs stay");
+        let _ = app.subscription();
+
+        // A container that was never running neither.
+        let _ = app.update(Message::OpenDock("worker-id".into()));
+        assert!(app.stats_source().is_none());
+
+        let _ = app.update(Message::OpenDock("db-id".into()));
+        assert!(app.stats_source().is_some());
+        app.containers.items.retain(|c| c.id != "db-id");
+        assert!(app.stats_source().is_none(), "gone from the list");
+        app.containers = containers::ContainersState::default();
+        let _ = app.update(Message::CloseDock);
+        assert!(app.stats_source().is_none());
+    }
+
+    #[tokio::test]
+    async fn no_stats_subscription_without_docker() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        app.conn = Connection::Failed(DockerError::NotRunning);
+        assert!(app.stats_source().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn restart_resubscribes_stats() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        let client: Arc<dyn DockerClient> = fake.clone();
+
+        let source = app.stats_source().expect("running");
+        let mut first = Box::pin(detail::stats::stats_messages(
+            client.clone(),
+            source.id,
+            source.generation,
+        ));
+        fake.push_stats("web-id", raw_stats(10));
+        let _ = app.update(first.next().await.unwrap());
+        assert_eq!(mem_series(&app), [10.0]);
+
+        // The container stops: the stream ends; the dock and the last numbers stay.
+        fake.stop("web-id").await.unwrap();
+        let _ = app.update(first.next().await.unwrap());
+        assert!(first.next().await.is_none());
+        assert!(app.detail.as_ref().unwrap().stats_ended);
+        assert!(app.dock.is_some());
+
+        // It runs again: a new generation and a history that starts over.
+        fake.start("web-id").await.unwrap();
+        let _ = app.update(Message::Docker(container_event("start")));
+        assert!(mem_series(&app).is_empty());
+        assert!(!app.detail.as_ref().unwrap().stats_ended);
+        settle(&mut app, Message::ReloadContainers).await;
+        let source = app.stats_source().expect("running again");
+        assert_eq!(source.generation, 1);
+        let mut second = Box::pin(detail::stats::stats_messages(
+            client,
+            source.id,
+            source.generation,
+        ));
+        fake.push_stats("web-id", raw_stats(20));
+        let _ = app.update(second.next().await.unwrap());
+        // A sample of the old stream, still on its way, is ignored.
+        let _ = app.update(Message::Detail(detail::Msg::StatsSample {
+            id: "web-id".into(),
+            generation: 0,
+            raw: raw_stats(10),
+        }));
+        assert_eq!(mem_series(&app), [20.0]);
+    }
+
+    #[tokio::test]
+    async fn stopped_container_keeps_detail_open() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        fake.push_log("web-id", log_line("kept"));
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        let _ = app.update(batch_msg("web-id", 0, &["kept"]));
+
+        fake.stop("web-id").await.unwrap();
+        // The streams end, then the daemon's events reload the list.
+        for m in [
+            detail::Msg::LogsEnded {
+                id: "web-id".into(),
+                generation: 0,
+            },
+            detail::Msg::StatsEnded {
+                id: "web-id".into(),
+                generation: 0,
+            },
+        ] {
+            let _ = app.update(Message::Detail(m));
+        }
+        settle(&mut app, Message::Docker(container_event("die"))).await;
+        settle(&mut app, Message::Docker(container_event("stop"))).await;
+
+        assert_eq!(app.screen, Screen::Containers);
+        assert!(app.dock.is_some(), "the dock stays open");
+        assert_eq!(log_texts(&app), ["kept"], "with the logs it had");
+        assert!(app.toasts.is_empty(), "nothing is said about a stop");
+        let web = app.containers.items.iter().find(|c| c.id == "web-id");
+        assert!(web.is_some_and(|c| !c.state.is_running()));
+        let _ = app.view();
+    }
+
+    #[tokio::test]
+    async fn destroyed_container_returns_to_list() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        let _ = app.update(Message::DockTab(DockTab::Stats));
+        let _ = app.update(batch_msg("web-id", 0, &["a"]));
+
+        // Removed from outside: both streams end, then the daemon says `destroy`.
+        fake.close_streams("web-id");
+        for m in [
+            detail::Msg::LogsEnded {
+                id: "web-id".into(),
+                generation: 0,
+            },
+            detail::Msg::StatsEnded {
+                id: "web-id".into(),
+                generation: 0,
+            },
+        ] {
+            let _ = app.update(Message::Detail(m));
+        }
+        let _ = app.update(Message::Docker(container_event("destroy")));
+
+        assert_eq!(app.screen, Screen::Containers);
+        assert!(app.dock.is_none() && app.detail.is_none());
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(app.toasts[0].text, t!("dock.gone"));
+        assert_eq!(app.conn, Connection::Ok, "not a connection problem");
+        // The reload that follows does not say it again.
+        settle(&mut app, Message::ReloadContainers).await;
+        assert_eq!(app.toasts.len(), 1);
+        let _ = app.view();
+    }
+
+    #[tokio::test]
+    async fn destroying_another_container_leaves_the_dock_alone() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        // Nothing is open: nothing to say.
+        let _ = app.update(Message::Docker(container_event("destroy")));
+        assert!(app.toasts.is_empty());
+
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        let other = DockerEvent {
+            id: "db-id".into(),
+            ..container_event("destroy")
+        };
+        let _ = app.update(Message::Docker(other));
+        let volume = DockerEvent {
+            kind: ResourceKind::Volume,
+            ..container_event("destroy")
+        };
+        let _ = app.update(Message::Docker(volume));
+        assert!(app.dock.is_some() && app.toasts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn not_found_on_reload_with_the_dock_open_says_the_container_is_gone() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        app.load_seq += 1;
+        let seq = app.load_seq;
+        let _ = app.update(Message::Containers(containers::Msg::Loaded(
+            seq,
+            Err(DockerError::NotFound("No such container: web-id".into())),
+        )));
+        assert!(app.dock.is_none());
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(app.toasts[0].text, t!("dock.gone"));
+        assert_eq!(app.conn, Connection::Ok);
+    }
+
+    #[tokio::test]
+    async fn not_found_on_reload_without_a_dock_keeps_the_usual_error() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        app.load_seq += 1;
+        let seq = app.load_seq;
+        let _ = app.update(Message::Containers(containers::Msg::Loaded(
+            seq,
+            Err(DockerError::NotFound("x".into())),
+        )));
+        assert_eq!(app.toasts.len(), 1);
+        assert_ne!(app.toasts[0].text, t!("dock.gone"));
+    }
+
+    #[tokio::test]
+    async fn dock_stats_opens_the_selected_container_on_the_stats_tab() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        app.containers.selected = None;
+        assert!(!actions::available(&app, ActionId::DockStats));
+
+        app.containers.selected = Some("web-id".into());
+        assert!(actions::available(&app, ActionId::DockStats));
+        let _ = app.run_action(ActionId::DockStats);
+        assert_eq!(app.dock.as_ref().map(|d| d.tab), Some(DockTab::Stats));
+        assert_eq!(app.detail.as_ref().map(|d| d.id.as_str()), Some("web-id"));
+
+        // Already open on the logs: it goes to Stats; another selection: the dock follows.
+        let _ = app.update(Message::DockTab(DockTab::Logs));
+        let _ = app.run_action(ActionId::DockStats);
+        assert_eq!(app.dock.as_ref().map(|d| d.tab), Some(DockTab::Stats));
+        app.containers.selected = Some("db-id".into());
+        let _ = app.run_action(ActionId::DockStats);
+        assert_eq!(app.detail.as_ref().map(|d| d.id.as_str()), Some("db-id"));
+        assert_eq!(app.dock.as_ref().map(|d| d.tab), Some(DockTab::Stats));
+
+        // The shortcut reaches it.
+        let _ = app.update(Message::CloseDock);
+        let _ = app.update(char_key(
+            "S",
+            iced::keyboard::Modifiers::CTRL | iced::keyboard::Modifiers::SHIFT,
+            false,
+        ));
+        assert_eq!(app.dock.as_ref().map(|d| d.tab), Some(DockTab::Stats));
+
+        app.set_failed(DockerError::NotRunning);
+        assert!(!actions::available(&app, ActionId::DockStats));
+    }
+
+    #[tokio::test]
+    async fn view_builds_the_stats_tab_running_stopped_and_empty() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        for id in ["web-id", "worker-id"] {
+            let _ = app.update(Message::OpenDock(id.into()));
+            let _ = app.update(Message::DockTab(DockTab::Stats));
+            let _ = app.view(); // waiting for the first sample (or stopped)
+            for mem in [0, 100, 900] {
+                let _ = app.update(Message::Detail(detail::Msg::StatsSample {
+                    id: id.into(),
+                    generation: 0,
+                    raw: raw_stats(mem),
+                }));
+                for _ in 0..2 {
+                    let _ = app.view();
+                    let _ = app.update(Message::ToggleMaximize);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn stats_texts_are_translated() {
+        for key in [
+            "dock.gone",
+            "actions.dock_stats",
+            "stats.cpu",
+            "stats.memory",
+            "stats.network",
+            "stats.disk",
+            "stats.rx",
+            "stats.tx",
+            "stats.read",
+            "stats.write",
+            "stats.of_limit",
+            "stats.stopped",
+            "stats.waiting",
+        ] {
+            for locale in ["en", "pt-BR"] {
+                assert_ne!(
+                    t!(key, locale = locale, used = 1, limit = 2, cpus = 3),
+                    key,
+                    "missing {locale} translation for {key}"
+                );
+            }
+        }
+    }
 }

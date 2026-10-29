@@ -31,6 +31,8 @@ struct State {
     log_history: HashMap<String, Vec<LogLine>>,
     log_subs: HashMap<String, Vec<UnboundedSender<LogLine>>>,
     stats_subs: HashMap<String, Vec<UnboundedSender<RawStats>>>,
+    /// Running containers stream one made-up sample per second (see `with_sample_data`).
+    synthetic_stats: bool,
     event_subs: Vec<UnboundedSender<DockerEvent>>,
 }
 
@@ -53,6 +55,57 @@ fn into_stream<T: Send + 'static>(rx: UnboundedReceiver<T>) -> DockerStream<T> {
         rx.recv().await.map(|item| (Ok(item), rx))
     })
     .boxed()
+}
+
+/// Pushed samples, plus a made-up one every second until the stream is closed. The first
+/// one comes after a second, so a pushed sample is never preceded by an invented one.
+fn with_synthetic_samples(rx: UnboundedReceiver<RawStats>, id: &str) -> DockerStream<RawStats> {
+    use tokio::time::{Duration, Interval, MissedTickBehavior, interval_at};
+
+    let seed: u64 = id.bytes().map(u64::from).sum();
+    let state: (UnboundedReceiver<RawStats>, Option<Interval>, u64) = (rx, None, 0);
+    futures::stream::unfold(state, move |(mut rx, tick, n)| async move {
+        // Created here, not above: an interval needs the runtime that polls the stream.
+        let mut tick = tick.unwrap_or_else(|| {
+            let mut i = interval_at(
+                tokio::time::Instant::now() + Duration::from_secs(1),
+                Duration::from_secs(1),
+            );
+            i.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            i
+        });
+        let (item, n) = tokio::select! {
+            biased;
+            pushed = rx.recv() => (pushed?, n),
+            _ = tick.tick() => (synthetic_sample(seed, n + 1), n + 1),
+        };
+        Some((Ok(item), (rx, Some(tick), n)))
+    })
+    .boxed()
+}
+
+/// The `n`th made-up reading of a container: CPU and memory wave up and down, the counters grow.
+fn synthetic_sample(seed: u64, n: u64) -> RawStats {
+    const CPUS: u64 = 4;
+    const SYSTEM_TICK: u64 = 1_000_000_000;
+    const MIB: u64 = 1024 * 1024;
+    let phase = (n + seed) % 20;
+    let wave = if phase < 10 { phase } else { 20 - phase };
+    let cpu_percent = 5 + wave * 7;
+    RawStats {
+        cpu_total: n * SYSTEM_TICK + cpu_percent * SYSTEM_TICK / 100 / CPUS,
+        precpu_total: n * SYSTEM_TICK,
+        system: (n + 1) * SYSTEM_TICK,
+        presystem: n * SYSTEM_TICK,
+        online_cpus: CPUS as u32,
+        mem_usage: (100 + wave * 6) * MIB,
+        mem_inactive_file: 10 * MIB,
+        mem_limit: 512 * MIB,
+        net_rx: n * 20_480,
+        net_tx: n * 8_192,
+        blk_read: n * 4_096,
+        blk_write: n * 12_288,
+    }
 }
 
 fn container(
@@ -92,7 +145,8 @@ impl FakeClient {
         Self::default()
     }
 
-    /// Daemon with 3 containers, 2 volumes (1 in use) and 4 networks.
+    /// Daemon with 3 containers, 2 volumes (1 in use) and 4 networks. Its running containers
+    /// stream a stats sample per second, so the fake UI has charts to show.
     pub fn with_sample_data() -> Self {
         let state = State {
             containers: vec![
@@ -150,6 +204,7 @@ impl FakeClient {
                     &["web", "db", "worker"],
                 ),
             ],
+            synthetic_stats: true,
             ..State::default()
         };
         Self {
@@ -236,6 +291,15 @@ impl FakeClient {
             .push(line.clone());
         if let Some(subs) = st.log_subs.get_mut(&id) {
             subs.retain(|tx| tx.send(line.clone()).is_ok());
+        }
+    }
+
+    /// Delivers a stats sample to the open stats streams of the container.
+    pub fn push_stats(&self, id: &str, raw: RawStats) {
+        let mut st = self.lock();
+        let id = canonical_id(&st, id);
+        if let Some(subs) = st.stats_subs.get_mut(&id) {
+            subs.retain(|tx| tx.send(raw.clone()).is_ok());
         }
     }
 
@@ -416,10 +480,19 @@ impl DockerClient for FakeClient {
             Err(err) => return futures::stream::once(async move { Err(err) }).boxed(),
         };
         let (tx, rx) = unbounded_channel();
-        let subs = st.stats_subs.entry(cid).or_default();
+        let synthetic = st.synthetic_stats
+            && st
+                .containers
+                .iter()
+                .any(|c| c.id == cid && c.state.is_running());
+        let subs = st.stats_subs.entry(cid.clone()).or_default();
         subs.retain(|tx| !tx.is_closed());
         subs.push(tx);
-        into_stream(rx)
+        if synthetic {
+            with_synthetic_samples(rx, &cid)
+        } else {
+            into_stream(rx)
+        }
     }
 
     fn events(&self) -> DockerStream<DockerEvent> {
@@ -887,5 +960,74 @@ mod tests {
         assert!(stats.next().await.is_none());
         c.push_log("db-id", line("still"));
         assert_eq!(other.next().await.unwrap().unwrap().text, "still");
+    }
+
+    /// One running container and no sample data: nothing happens unless the test pushes it.
+    fn quiet_web() -> FakeClient {
+        let c = FakeClient::new();
+        c.lock().containers.push(container(
+            "web-id",
+            "web",
+            "nginx",
+            ContainerState::Running,
+            "Up",
+            vec![],
+        ));
+        c
+    }
+
+    fn raw_stats(mem: u64) -> RawStats {
+        RawStats {
+            cpu_total: 0,
+            precpu_total: 0,
+            system: 0,
+            presystem: 0,
+            online_cpus: 1,
+            mem_usage: mem,
+            mem_inactive_file: 0,
+            mem_limit: 1000,
+            net_rx: 0,
+            net_tx: 0,
+            blk_read: 0,
+            blk_write: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn push_stats_reaches_open_streams_by_id_or_name() {
+        let c = quiet_web();
+        let mut s = c.stats("web-id");
+        c.push_stats("web-id", raw_stats(1));
+        c.push_stats("web", raw_stats(2));
+        assert_eq!(s.next().await.unwrap().unwrap().mem_usage, 1);
+        assert_eq!(s.next().await.unwrap().unwrap().mem_usage, 2);
+        c.close_streams("web");
+        assert!(s.next().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sample_data_streams_one_stats_sample_per_second_for_running_containers() {
+        let c = FakeClient::with_sample_data();
+        let mut s = c.stats("web-id");
+        let start = tokio::time::Instant::now();
+        let first = s.next().await.unwrap().unwrap();
+        let second = s.next().await.unwrap().unwrap();
+        assert_eq!(start.elapsed(), std::time::Duration::from_secs(2));
+        assert!(second.net_rx > first.net_rx, "the counters grow");
+        let sample = crate::stats::sample_from_raw(&second);
+        assert!(sample.cpu_percent > 0.0 && sample.mem_used > 0);
+        // A pushed sample still goes first, and closing ends the stream.
+        c.push_stats("web-id", raw_stats(7));
+        assert_eq!(s.next().await.unwrap().unwrap().mem_usage, 7);
+        c.close_streams("web-id");
+        assert!(s.next().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_daemon_without_sample_data_makes_no_samples_by_itself() {
+        let c = quiet_web();
+        let mut s = c.stats("web-id");
+        let waited = tokio::time::timeout(std::time::Duration::from_secs(5), s.next()).await;
+        assert!(waited.is_err(), "nothing arrives unless pushed");
     }
 }

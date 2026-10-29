@@ -241,7 +241,7 @@ pub fn scroll_list_to(from_bottom: f32) -> Task<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{LogLine, LogStream};
+    use crate::model::{LogLine, LogStream, RawStats};
 
     fn line(text: &str) -> LogLine {
         LogLine {
@@ -434,5 +434,69 @@ mod tests {
         let mut d = DetailState::new("web-id".into());
         let _ = d.update(Msg::Resized(240.0));
         assert_eq!(d.viewport_h, 240.0);
+    }
+
+    fn raw(mem: u64) -> RawStats {
+        RawStats {
+            cpu_total: 0,
+            precpu_total: 0,
+            system: 0,
+            presystem: 0,
+            online_cpus: 4,
+            mem_usage: mem,
+            mem_inactive_file: 0,
+            mem_limit: 1000,
+            net_rx: 0,
+            net_tx: 0,
+            blk_read: 0,
+            blk_write: 0,
+        }
+    }
+
+    fn sample(id: &str, generation: u64, mem: u64) -> Msg {
+        Msg::StatsSample {
+            id: id.into(),
+            generation,
+            raw: raw(mem),
+        }
+    }
+
+    #[test]
+    fn stats_sample_pushed_to_history() {
+        let mut d = DetailState::new("web-id".into());
+        let _ = d.update(sample("web-id", 0, 10));
+        let _ = d.update(sample("web-id", 0, 20));
+        assert_eq!(d.stats.mem_series(), [10.0, 20.0]);
+        assert_eq!(d.stats.latest().map(|s| s.mem_limit), Some(1000));
+        assert_eq!(d.cpus, 4, "the chart of the CPU scales with the CPU count");
+    }
+
+    #[test]
+    fn stale_stats_are_dropped() {
+        let mut d = DetailState::new("web-id".into());
+        d.resubscribe();
+        let _ = d.update(sample("web-id", 0, 1));
+        let _ = d.update(sample("other-id", 1, 2));
+        assert!(d.stats.latest().is_none());
+        let _ = d.update(sample("web-id", 1, 3));
+        assert!(d.stats.latest().is_some());
+    }
+
+    #[test]
+    fn stats_end_is_per_generation_and_resubscribing_starts_the_history_over() {
+        let mut d = DetailState::new("web-id".into());
+        let _ = d.update(sample("web-id", 0, 1));
+        let _ = d.update(Msg::StatsEnded {
+            id: "web-id".into(),
+            generation: 0,
+        });
+        assert!(d.stats_ended);
+        d.resubscribe();
+        assert!(d.stats.latest().is_none() && !d.stats_ended);
+        let _ = d.update(Msg::StatsEnded {
+            id: "web-id".into(),
+            generation: 0,
+        });
+        assert!(!d.stats_ended, "the end of an older stream is ignored");
     }
 }

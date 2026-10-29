@@ -261,6 +261,12 @@ mod tests {
     }
 
     #[test]
+    fn dock_stats_is_in_the_palette_with_its_shortcut() {
+        assert!(def(ActionId::DockStats).in_palette);
+        assert_eq!(tip(ActionId::DockStats, "Stats"), "Stats (Ctrl ⇧ S)");
+    }
+
+    #[test]
     fn tip_appends_the_shortcut() {
         assert_eq!(tip(ActionId::ToggleDock, "Panel"), "Panel (Ctrl J)");
         assert_eq!(tip(ActionId::Retry, "Retry"), "Retry");
