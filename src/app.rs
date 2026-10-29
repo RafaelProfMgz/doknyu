@@ -4,12 +4,13 @@ use std::time::Duration;
 
 use futures::{Stream, StreamExt};
 use iced::widget::{center, column, container, row, stack, text};
-use iced::{Element, Length, Subscription, Task};
+use iced::{Element, Length, Subscription, Task, Theme};
 use rust_i18n::t;
 
 use crate::docker::DockerClient;
 use crate::error::DockerError;
 use crate::model::{ContainerInfo, DockerEvent, ResourceKind};
+use crate::ui::theme::{ThemeMode, resolve};
 use crate::views::containers::{self, ContainersState};
 use crate::views::onboarding;
 use crate::views::sidebar;
@@ -57,6 +58,8 @@ pub enum Message {
     EventsRetry,
     /// The debounce window after a container event is over: reload the list.
     ReloadContainers,
+    /// The system theme (light/dark) was read or changed.
+    SystemTheme(iced::theme::Mode),
 }
 
 pub struct App {
@@ -65,6 +68,9 @@ pub struct App {
     pub screen: Screen,
     pub containers: ContainersState,
     pub toasts: Vec<Toast>,
+    pub theme_mode: ThemeMode,
+    /// Last theme reported by the system; `Mode::None` until it answers or has no preference.
+    pub system_mode: iced::theme::Mode,
     /// A ping is in flight; further `Retry` messages are ignored until it resolves.
     pinging: bool,
     /// Bumped on every successful ping so each (re)connection gets a fresh events subscription.
@@ -149,6 +155,8 @@ impl App {
             screen: Screen::Containers,
             containers: ContainersState::default(),
             toasts: Vec::new(),
+            theme_mode: ThemeMode::default(),
+            system_mode: iced::theme::Mode::None,
             pinging: false,
             events_generation: 0,
             reload_scheduled: false,
@@ -156,8 +164,16 @@ impl App {
             events_started: None,
             events_backoff: EVENTS_BACKOFF_MIN,
         };
-        let task = app.start_ping();
+        let task = Task::batch([
+            app.start_ping(),
+            iced::system::theme().map(Message::SystemTheme),
+        ]);
         (app, task)
+    }
+
+    /// The iced theme for the chosen mode and the system preference.
+    pub fn theme(&self) -> Theme {
+        crate::ui::theme::theme(resolve(self.theme_mode, self.system_mode))
     }
 
     /// Pings the daemon unless a ping is already in flight.
@@ -225,6 +241,10 @@ impl App {
             // first, so a stream that fails right away does not turn this into a busy loop.
             Message::EventsEnded => self.on_events_ended(),
             Message::EventsRetry => self.start_ping(),
+            Message::SystemTheme(mode) => {
+                self.system_mode = mode;
+                Task::none()
+            }
         }
     }
 
@@ -393,13 +413,15 @@ impl App {
     /// While Docker is reachable, listen to its events; while it is not, ping again every few
     /// seconds.
     pub fn subscription(&self) -> Subscription<Message> {
-        match self.conn {
+        let system_theme = iced::system::theme_changes().map(Message::SystemTheme);
+        let conn = match self.conn {
             Connection::Ok => Subscription::run_with(EventsSource::new(self), |source| {
                 event_messages(source.client.clone())
             }),
             Connection::Failed(_) => iced::time::every(RETRY_INTERVAL).map(|_| Message::Retry),
             Connection::Checking => Subscription::none(),
-        }
+        };
+        Subscription::batch([system_theme, conn])
     }
 }
 
@@ -509,6 +531,20 @@ mod tests {
         assert_eq!(app.screen, Screen::Volumes);
         let _ = app.update(Message::Navigate(Screen::Detail("web-id".into())));
         assert_eq!(app.screen, Screen::Detail("web-id".into()));
+    }
+
+    #[test]
+    fn system_theme_change_updates_app_theme() {
+        use crate::ui::theme::palette;
+        use crate::ui::tokens::{DARK, LIGHT};
+        let fake = Arc::new(FakeClient::new());
+        let mut app = app_with(&fake);
+        // No system preference yet: dark.
+        assert_eq!(palette(&app.theme()), &DARK);
+        let _ = app.update(Message::SystemTheme(iced::theme::Mode::Light));
+        assert_eq!(palette(&app.theme()), &LIGHT);
+        let _ = app.update(Message::SystemTheme(iced::theme::Mode::None));
+        assert_eq!(palette(&app.theme()), &DARK);
     }
 
     #[test]
@@ -637,7 +673,7 @@ mod tests {
         assert_eq!(app.events_generation, before, "no events subscription");
         assert!(fake.calls().is_empty(), "{:?}", fake.calls());
         // It is retried every few seconds like any other connection failure.
-        assert_eq!(app.subscription().units(), 1);
+        assert_eq!(app.subscription().units(), 2);
     }
 
     #[tokio::test]
@@ -658,9 +694,9 @@ mod tests {
         let fake = Arc::new(FakeClient::new());
         let mut app = app_with(&fake);
         app.conn = Connection::Checking;
-        assert_eq!(app.subscription().units(), 0);
-        app.conn = Connection::Failed(DockerError::NotRunning);
         assert_eq!(app.subscription().units(), 1);
+        app.conn = Connection::Failed(DockerError::NotRunning);
+        assert_eq!(app.subscription().units(), 2);
     }
 
     #[tokio::test]
@@ -1248,9 +1284,10 @@ mod tests {
         let fake = Arc::new(FakeClient::new());
         let mut app = app_with(&fake);
         app.conn = Connection::Ok;
-        assert_eq!(app.subscription().units(), 1);
+        // The system theme subscription is always there; the events one only while connected.
+        assert_eq!(app.subscription().units(), 2);
         app.conn = Connection::Checking;
-        assert_eq!(app.subscription().units(), 0);
+        assert_eq!(app.subscription().units(), 1);
     }
 
     #[tokio::test]
