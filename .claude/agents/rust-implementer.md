@@ -1,6 +1,6 @@
 ---
 name: rust-implementer
-description: Implementa UMA tarefa de core/lógica (sem UI iced) do plano em docs/plans/, com TDD. Use para Tarefas 1.1–1.5, 3.1, 5.1, 6.1 e 6.2.
+description: Implementa UMA tarefa de core/lógica (sem UI iced) do plano em docs/plans/, com TDD. Use para Tarefas 1.1–1.5, 3.1, 5.1 e 6.1.
 model: sonnet
 effort: medium
 maxTurns: 40

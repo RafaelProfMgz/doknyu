@@ -153,8 +153,10 @@ doknyu/
 ## 6. Empacotamento e release
 
 - `cargo-dist` ou workflow próprio gerando **AppImage** e **.deb** em tags `v*`.
-- **Flatpak** depois do MVP (acesso ao socket exige `--filesystem=/run/docker.sock`; documentar).
-- Arquivo `.desktop` + ícone.
+- **Flatpak (Flathub), AUR, COPR e nixpkgs** depois do MVP (Fase 7). O Flatpak exige
+  `--filesystem=/run/docker.sock`, a ser validado num spike.
+- Identidade: App ID `io.github.rafaelprofmgz.Doknyu`, ícone monograma "d", `.desktop` e
+  AppStream metainfo.
 - Licença: MIT OR Apache-2.0.
 
 ## 7. Riscos

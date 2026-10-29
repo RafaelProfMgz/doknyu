@@ -34,8 +34,11 @@ de outros plugins (frontend-design, vercel:*, …) não se aplicam a um app iced
 | 4 | 4.1 – 4.2 Volumes/Redes | `ui-implementer` | `task-reviewer` |
 | 5 | 5.1 Terminal externo | `rust-implementer` | `task-reviewer` |
 | 5 | 5.2 Terminal embutido | `ui-implementer` | `task-reviewer` |
-| 6 | 6.1 – 6.2 i18n + ícone | `rust-implementer` | `task-reviewer` |
+| 6 | 6.1 i18n | `rust-implementer` | `task-reviewer` |
+| 6 | 6.2 Identidade (ícone, .desktop, metainfo) | `research-implementer` | `task-reviewer` |
 | 6 | 6.3 Release | `research-implementer` | `task-reviewer` |
+| 7 | 7.1 Spike Flatpak | `research-implementer` | — (o humano lê o ADR) |
+| 7 | 7.2 – 7.4 Flatpak, AUR, COPR/Nix | `research-implementer` | `task-reviewer` |
 | todas | fim de fase | — | `phase-reviewer` |
 
 ## Regras de orçamento (o que de fato limita o gasto)
@@ -51,7 +54,7 @@ mesmo limite de uso da sessão. O controle é feito por estas regras:
    corrige → revisa). Se a tarefa ainda não for aprovada no 3º review, ela é escalada ao humano.
 4. **Parada obrigatória ao fim de cada fase:** o `phase-reviewer` roda, o humano faz a verificação
    manual e aprova antes da próxima fase começar. Assim o gasto máximo de uma vez é o de uma fase.
-5. **Opus só no `phase-reviewer`** (9 execuções no total). Todo o resto roda em Sonnet.
+5. **Opus só no `phase-reviewer`** (10 execuções no total). Todo o resto roda em Sonnet.
 6. **Contexto enxuto:** cada agente lê o README do plano e a sua tarefa, não a spec inteira. As
    respostas finais têm tamanho limitado (15 a 25 linhas).
 7. **Web só no `research-implementer`**, com no máximo 8 buscas por tarefa.
@@ -69,7 +72,8 @@ mesmo limite de uso da sessão. O controle é feito por estas regras:
 | 4 | 2 | 2 | 1 | 5 | 13 |
 | 5 | 2 | 2 | 1 | 5 | 13 |
 | 6 | 3 | 3 | 1 | 7 | 19 |
-| **Total** | **27** | **26** | **9** | **62** | **166** |
+| 7 | 4 | 3 | 1 | 8 | 20 |
+| **Total** | **31** | **29** | **10** | **70** | **186** |
 
 ## Fluxo do orquestrador por tarefa
 

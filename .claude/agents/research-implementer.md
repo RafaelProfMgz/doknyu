@@ -1,6 +1,6 @@
 ---
 name: research-implementer
-description: Executa tarefas do plano do doknyu que exigem pesquisa externa (versões de crates, spikes, empacotamento). Use para a Tarefa 0.1 (projeto + fixar versões), Tarefa 0.2 (spike do iced_term), Tarefa 2.5.1 (fontes, ícones e tema) e Tarefa 6.3 (AppImage/.deb/release).
+description: Executa tarefas do plano do doknyu que exigem pesquisa externa (versões de crates, spikes, empacotamento). Use para a Tarefa 0.1 (projeto + fixar versões), Tarefa 0.2 (spike do iced_term), Tarefa 2.5.1 (fontes, ícones e tema), Tarefas 6.2 e 6.3 (identidade, empacotamento) (AppImage/.deb/release) e Fase 7 (Flatpak, AUR, COPR, Nix).
 model: sonnet
 effort: high
 maxTurns: 35
