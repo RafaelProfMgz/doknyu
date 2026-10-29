@@ -46,7 +46,9 @@ fn state_from(s: &ContainerSummary) -> ContainerState {
         Some(S::EXITED) => ContainerState::Exited {
             code: exit_code_from_status(s.status.as_deref().unwrap_or_default()),
         },
-        Some(S::DEAD | S::REMOVING) => ContainerState::Dead,
+        // Shown as stopped (not as an error) while the removal is in progress.
+        Some(S::REMOVING) => ContainerState::Exited { code: 0 },
+        Some(S::DEAD) => ContainerState::Dead,
         Some(S::CREATED | S::EMPTY) | None => ContainerState::Created,
     }
 }
