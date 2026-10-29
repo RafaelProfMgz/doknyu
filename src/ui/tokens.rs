@@ -75,3 +75,29 @@ pub const ROW_HEIGHT: f32 = 28.0;
 pub const STATUS_BAR_HEIGHT: f32 = 24.0;
 pub const SIDEBAR_WIDTH: f32 = 200.0;
 pub const SIDEBAR_COLLAPSED: f32 = 40.0;
+
+pub const BORDER_WIDTH: f32 = 1.0;
+pub const NO_BORDER: f32 = 0.0;
+/// Left bar of the selected row and of toasts.
+pub const ACCENT_BAR_WIDTH: f32 = 2.0;
+/// Container status dot.
+pub const DOT_SIZE: f32 = 8.0;
+/// Square icon button.
+pub const ICON_BUTTON_SIZE: f32 = 24.0;
+pub const MODAL_WIDTH: f32 = 420.0;
+pub const TOAST_WIDTH: f32 = 360.0;
+pub const SCROLLBAR_WIDTH: f32 = 6.0;
+
+/// Tint of an accent/status color used as a soft background (active chip, selection).
+pub const ALPHA_SOFT: f32 = 0.15;
+/// Filled buttons while hovered / pressed.
+pub const ALPHA_HOVER: f32 = 0.85;
+pub const ALPHA_PRESSED: f32 = 0.7;
+/// Text selection highlight.
+pub const ALPHA_SELECTION: f32 = 0.3;
+/// Dimming behind a modal.
+pub const ALPHA_SCRIM: f32 = 0.5;
+/// Drop shadow of elevated surfaces.
+pub const SHADOW_ALPHA: f32 = 0.3;
+pub const SHADOW_BLUR: f32 = 12.0;
+pub const SHADOW_OFFSET_Y: f32 = 4.0;

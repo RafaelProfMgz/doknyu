@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use iced::widget::{
-    Column, button, checkbox, column, container, row, scrollable, stack, text, text_input,
+    Column, button, checkbox, column, container, row, scrollable, space, text, text_input,
 };
 use iced::{Alignment, Element, Length};
 use rust_i18n::t;
@@ -11,7 +11,11 @@ use rust_i18n::t;
 use crate::app::Message;
 use crate::error::DockerError;
 use crate::model::{ContainerInfo, ContainerState};
-use crate::views::widgets::{confirm_dialog, status_badge};
+use crate::ui::components::{modal, status_dot};
+use crate::ui::fonts::{MONO, SANS_MEDIUM, SANS_SEMIBOLD};
+use crate::ui::style;
+use crate::ui::tokens::{SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_6, TEXT, TEXT_LG, TEXT_SM};
+use crate::views::widgets::state_label;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContainersState {
@@ -87,8 +91,8 @@ fn msg(m: Msg) -> Message {
 }
 
 fn action_button<'a>(label: String, on_press: Option<Message>) -> Element<'a, Message> {
-    button(text(label).size(13))
-        .style(button::secondary)
+    button(text(label).size(TEXT))
+        .style(style::button::ghost)
         .on_press_maybe(on_press)
         .into()
 }
@@ -97,18 +101,18 @@ fn row_view<'a>(c: &'a ContainerInfo, busy: bool) -> Element<'a, Message> {
     let id = &c.id;
     let enabled = |m: Msg| (!busy).then(|| msg(m));
 
-    let mut ports = row![].spacing(4);
+    let mut ports = row![].spacing(SPACE_1);
     for p in c.ports.iter().filter_map(|p| p.public) {
         ports = ports.push(
-            button(text(format!("localhost:{p}")).size(13))
-                .style(button::text)
+            button(text(format!("localhost:{p}")).size(TEXT).font(MONO))
+                .style(style::button::link)
                 .on_press(msg(Msg::OpenPort(p))),
         );
     }
 
-    let mut actions = row![].spacing(6).align_y(Alignment::Center);
+    let mut actions = row![].spacing(SPACE_2).align_y(Alignment::Center);
     if busy {
-        actions = actions.push(text(t!("containers.working").into_owned()).size(13));
+        actions = actions.push(text(t!("containers.working").into_owned()).size(TEXT));
     }
     if c.state.is_running() {
         actions = actions
@@ -127,8 +131,8 @@ fn row_view<'a>(c: &'a ContainerInfo, busy: bool) -> Element<'a, Message> {
         ));
     }
     actions = actions.push(
-        button(text(t!("containers.remove").into_owned()).size(13))
-            .style(button::danger)
+        button(text(t!("containers.remove").into_owned()).size(TEXT))
+            .style(style::button::danger)
             .on_press_maybe(enabled(Msg::AskRemove(id.clone()))),
     );
 
@@ -136,32 +140,40 @@ fn row_view<'a>(c: &'a ContainerInfo, busy: bool) -> Element<'a, Message> {
         row![
             button(
                 column![
-                    text(c.name.as_str()).size(16),
-                    text(c.image.as_str()).size(12).style(text::secondary),
+                    text(c.name.as_str()).size(TEXT_LG).font(SANS_MEDIUM),
+                    text(c.image.as_str())
+                        .size(TEXT_SM)
+                        .font(MONO)
+                        .style(style::text::muted),
                 ]
-                .spacing(2)
+                .spacing(SPACE_1)
             )
-            .style(button::text)
+            .style(style::button::ghost)
             .width(Length::FillPortion(3))
             .on_press(msg(Msg::Open(id.clone()))),
             column![
-                status_badge(&c.state),
-                text(c.status_text.as_str()).size(12).style(text::secondary),
+                row![status_dot(&c.state), text(state_label(&c.state))]
+                    .spacing(SPACE_2)
+                    .align_y(Alignment::Center),
+                text(c.status_text.as_str())
+                    .size(TEXT_SM)
+                    .style(style::text::faint),
             ]
-            .spacing(2)
+            .spacing(SPACE_1)
             .width(Length::FillPortion(2)),
             container(ports).width(Length::FillPortion(2)),
             actions,
         ]
-        .spacing(12)
+        .spacing(SPACE_3)
         .align_y(Alignment::Center),
     )
-    .padding(8)
-    .style(container::bordered_box)
+    .padding(SPACE_2)
+    .style(style::container::bordered)
     .into()
 }
 
-fn remove_dialog(state: &ContainersState, id: &str) -> Element<'static, Message> {
+/// The content of the removal dialog; [`modal`] frames it.
+fn remove_card(state: &ContainersState, id: &str) -> Element<'static, Message> {
     let found = state.items.iter().find(|c| c.id == id);
     let name = found.map_or(id, |c| c.name.as_str());
     let running = found.is_some_and(|c| c.state.is_running());
@@ -176,13 +188,24 @@ fn remove_dialog(state: &ContainersState, id: &str) -> Element<'static, Message>
             t!("containers.remove_dialog.confirm"),
         )
     };
-    confirm_dialog(
-        t!("containers.remove_dialog.title").into_owned(),
-        body.into_owned(),
-        label.into_owned(),
-        msg(Msg::ConfirmRemove { force: running }),
-        msg(Msg::CancelRemove),
-    )
+    let card = column![
+        text(t!("containers.remove_dialog.title").into_owned())
+            .size(TEXT_LG)
+            .font(SANS_SEMIBOLD),
+        text(body.into_owned()),
+        row![
+            space().width(Length::Fill),
+            button(text(t!("common.cancel").into_owned()))
+                .style(style::button::ghost)
+                .on_press(msg(Msg::CancelRemove)),
+            button(text(label.into_owned()))
+                .style(style::button::danger)
+                .on_press(msg(Msg::ConfirmRemove { force: running })),
+        ]
+        .spacing(SPACE_2),
+    ]
+    .spacing(SPACE_4);
+    card.into()
 }
 
 /// The Containers screen.
@@ -190,12 +213,13 @@ pub fn view(state: &ContainersState) -> Element<'_, Message> {
     let toolbar = row![
         text_input(&t!("containers.search"), &state.query)
             .on_input(|q| msg(Msg::Query(q)))
+            .style(style::text_input_field)
             .width(Length::Fill),
         checkbox(state.show_stopped)
             .label(t!("containers.show_stopped").into_owned())
             .on_toggle(|v| msg(Msg::ToggleStopped(v))),
     ]
-    .spacing(16)
+    .spacing(SPACE_4)
     .align_y(Alignment::Center);
 
     let visible = state.visible();
@@ -205,9 +229,9 @@ pub fn view(state: &ContainersState) -> Element<'_, Message> {
         } else {
             t!("containers.no_match")
         };
-        container(text(key.into_owned()).style(text::secondary))
+        container(text(key.into_owned()).style(style::text::muted))
             .center_x(Length::Fill)
-            .padding(32)
+            .padding(SPACE_6)
             .into()
     } else {
         scrollable(
@@ -216,27 +240,31 @@ pub fn view(state: &ContainersState) -> Element<'_, Message> {
                     .into_iter()
                     .map(|c| row_view(c, state.pending.contains(&c.id))),
             )
-            .spacing(6)
-            .padding([0, 12]),
+            .spacing(SPACE_2)
+            .padding([0.0, SPACE_3]),
         )
+        .direction(style::thin_scrollbar())
+        .style(style::scrollable_thin)
         .height(Length::Fill)
         .into()
     };
 
     let page = container(
         column![
-            text(t!("containers.title").into_owned()).size(24),
+            text(t!("containers.title").into_owned())
+                .size(TEXT_LG)
+                .font(SANS_SEMIBOLD),
             toolbar,
             list,
         ]
-        .spacing(12),
+        .spacing(SPACE_3),
     )
-    .padding(24)
+    .padding(SPACE_6)
     .width(Length::Fill)
     .height(Length::Fill);
 
     match &state.confirm_remove {
-        Some(id) => stack![page, remove_dialog(state, id)].into(),
+        Some(id) => modal(page.into(), remove_card(state, id), msg(Msg::CancelRemove)),
         None => page.into(),
     }
 }

@@ -10,6 +10,7 @@ use rust_i18n::t;
 use crate::docker::DockerClient;
 use crate::error::DockerError;
 use crate::model::{ContainerInfo, DockerEvent, ResourceKind};
+use crate::ui::components::ToastKind;
 use crate::ui::theme::{ThemeMode, resolve};
 use crate::views::containers::{self, ContainersState};
 use crate::views::onboarding;
@@ -33,6 +34,7 @@ pub enum Connection {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Toast {
+    pub kind: ToastKind,
     pub text: String,
     pub details: Option<String>,
     /// The technical details are shown.
@@ -358,8 +360,8 @@ impl App {
         })
     }
 
-    /// Shows a toast, unless one with the same text is already visible. At most `MAX_TOASTS`
-    /// stay on screen; the oldest are dropped.
+    /// Shows an error toast, unless one with the same text is already visible. At most
+    /// `MAX_TOASTS` stay on screen; the oldest are dropped.
     pub fn push_toast(&mut self, text: String, details: Option<String>) {
         if self.toasts.iter().any(|t| t.text == text) {
             return;
@@ -368,6 +370,7 @@ impl App {
             self.toasts.remove(0);
         }
         self.toasts.push(Toast {
+            kind: ToastKind::Error,
             text,
             details,
             expanded: false,
@@ -958,6 +961,7 @@ mod tests {
         .await;
         assert_eq!(app.toasts.len(), 1);
         assert!(!app.toasts[0].text.contains("409"));
+        assert_eq!(app.toasts[0].kind, ToastKind::Error);
         assert_eq!(
             app.toasts[0].details.as_deref(),
             Some("Conflict(\"409 in use\")")
