@@ -233,6 +233,9 @@ pub fn api_error_from(e: bollard::errors::Error) -> DockerError {
             std::path::Path::new(&docker_socket_path()).exists(),
             docker_cli_installed(),
         ),
+        Error::SocketNotFoundError(_) => {
+            classify_connect_error(std::io::ErrorKind::NotFound, false, docker_cli_installed())
+        }
         other => DockerError::Other(other.to_string()),
     }
 }
