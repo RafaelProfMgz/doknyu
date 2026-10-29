@@ -151,6 +151,8 @@ impl ContainersState {
         if self.hovered.as_deref().is_some_and(|id| !exists(id)) {
             self.hovered = None;
         }
+        // A container that is still there may have changed state and now be filtered out.
+        self.keep_selection_visible();
     }
 }
 

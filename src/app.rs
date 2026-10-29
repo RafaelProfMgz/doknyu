@@ -1949,6 +1949,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reload_moves_a_selection_that_a_filter_now_hides() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::Containers(containers::Msg::ToggleStopped));
+        let _ = app.update(Message::Containers(containers::Msg::Select(
+            "web-id".into(),
+        )));
+        // `web` stops while the Stopped chip is off: it still exists, but is hidden.
+        fake.stop("web-id").await.unwrap();
+        settle(&mut app, Message::ReloadContainers).await;
+        assert!(app.containers.items.iter().any(|c| c.id == "web-id"));
+        assert_eq!(app.containers.selected.as_deref(), Some("db-id"));
+    }
+
+    #[tokio::test]
     async fn hover_is_cleared_on_navigation_failure_and_maximize() {
         let fake = Arc::new(FakeClient::with_sample_data());
         let mut app = loaded_app(&fake).await;
