@@ -24,6 +24,8 @@ struct State {
     volumes: Vec<VolumeInfo>,
     networks: Vec<NetworkEntry>,
     ping_error: Option<DockerError>,
+    /// Makes `events()` fail at once while everything else keeps working.
+    events_error: Option<DockerError>,
     next_error: Option<DockerError>,
     calls: Vec<String>,
     log_history: HashMap<String, Vec<LogLine>>,
@@ -200,6 +202,12 @@ impl FakeClient {
             st.event_subs.clear();
         }
         st.ping_error = e;
+    }
+
+    /// While set, `events()` yields `e` as its only item (the daemon answers pings and lists,
+    /// but cannot stream events). `None` restores normal behavior.
+    pub fn set_events_error(&self, e: Option<DockerError>) {
+        self.lock().events_error = e;
     }
 
     /// The next fallible call returns `e`, then behavior returns to normal.
@@ -416,7 +424,8 @@ impl DockerClient for FakeClient {
 
     fn events(&self) -> DockerStream<DockerEvent> {
         let mut st = self.lock();
-        if let Some(e) = Self::begin_stream(&mut st, "events".into()) {
+        let events_error = st.events_error.clone();
+        if let Some(e) = Self::begin_stream(&mut st, "events".into()).or(events_error) {
             return futures::stream::once(async move { Err(e) }).boxed();
         }
         st.event_subs.retain(|tx| !tx.is_closed());
@@ -840,6 +849,23 @@ mod tests {
         c.set_ping_error(None);
         assert!(c.list_containers(true).await.is_ok());
         assert!(c.start("worker-id").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn events_error_makes_the_stream_fail_at_once() {
+        let c = FakeClient::with_sample_data();
+        c.set_events_error(Some(DockerError::Other("boom".into())));
+        let mut s = c.events();
+        assert_eq!(
+            s.next().await.unwrap(),
+            Err(DockerError::Other("boom".into()))
+        );
+        assert!(c.ping().await.is_ok());
+        assert!(c.list_containers(true).await.is_ok());
+        c.set_events_error(None);
+        let calls_before = c.calls().len();
+        let _open = c.events();
+        assert_eq!(c.calls().len(), calls_before + 1);
     }
 
     #[tokio::test]

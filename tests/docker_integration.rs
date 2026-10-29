@@ -99,7 +99,7 @@ async fn lifecycle() {
     let docker = raw().await;
     let mut cleanup = Cleanup::new();
     let name = create(&docker, &mut cleanup, "echo hello; sleep 300", None).await;
-    let client = connect().unwrap();
+    let client = connect();
     client.ping().await.unwrap();
 
     client.start(&name).await.unwrap();
@@ -142,7 +142,7 @@ async fn lifecycle() {
 #[tokio::test]
 #[ignore]
 async fn remove_missing_is_not_found() {
-    let client = connect().unwrap();
+    let client = connect();
     let err = client
         .remove("doknyu-it-nao-existe", false)
         .await
@@ -156,7 +156,7 @@ async fn events_see_start() {
     let docker = raw().await;
     let mut cleanup = Cleanup::new();
     let name = create(&docker, &mut cleanup, "sleep 300", None).await;
-    let client = connect().unwrap();
+    let client = connect();
 
     // Streams are lazy: drive it in a task so the subscription is live before `start`.
     let mut events = client.events();
@@ -207,7 +207,7 @@ async fn volume_in_use_conflict() {
         Some(vec![format!("{vol}:/data")]),
     )
     .await;
-    let client = connect().unwrap();
+    let client = connect();
     client.start(&name).await.unwrap();
 
     let vols = client.list_volumes().await.unwrap();
@@ -224,7 +224,7 @@ async fn start_running_is_ok() {
     let docker = raw().await;
     let mut cleanup = Cleanup::new();
     let name = create(&docker, &mut cleanup, "sleep 300", None).await;
-    let client = connect().unwrap();
+    let client = connect();
     client.start(&name).await.unwrap();
     client.start(&name).await.unwrap();
     client.stop(&name).await.unwrap();

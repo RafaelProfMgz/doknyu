@@ -38,9 +38,7 @@ fn state_color(theme: &Theme, state: &ContainerState) -> Color {
     let p = theme.extended_palette();
     match state {
         ContainerState::Running => p.success.base.color,
-        ContainerState::Paused | ContainerState::Restarting | ContainerState::Created => {
-            p.warning.base.color
-        }
+        ContainerState::Paused | ContainerState::Restarting => p.warning.base.color,
         s if s.is_error() => p.danger.base.color,
         _ => p.secondary.strong.color,
     }
@@ -143,6 +141,17 @@ pub fn toast_stack(toasts: &[Toast]) -> Element<'_, Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn created_looks_stopped_not_like_a_warning() {
+        let theme = Theme::Light;
+        let created = state_color(&theme, &ContainerState::Created);
+        assert_eq!(
+            created,
+            state_color(&theme, &ContainerState::Exited { code: 0 })
+        );
+        assert_ne!(created, state_color(&theme, &ContainerState::Paused));
+    }
 
     #[test]
     fn badge_and_dialog_build_for_every_state() {

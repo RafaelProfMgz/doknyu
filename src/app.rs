@@ -53,9 +53,10 @@ pub enum Message {
     Containers(containers::Msg),
     Docker(DockerEvent),
     EventsEnded,
+    /// The wait after the events stream ended is over: check the daemon again.
+    EventsRetry,
     /// The debounce window after a container event is over: reload the list.
     ReloadContainers,
-    Tick,
 }
 
 pub struct App {
@@ -70,6 +71,12 @@ pub struct App {
     events_generation: u64,
     /// A reload is waiting for the debounce window to end; further events join it.
     reload_scheduled: bool,
+    /// Number of the latest list reload; answers from older ones are discarded.
+    load_seq: u64,
+    /// When the current events subscription was opened.
+    events_started: Option<tokio::time::Instant>,
+    /// How long to wait the next time the events stream ends.
+    events_backoff: Duration,
 }
 
 /// Maps a system locale (`pt_BR.UTF-8`, `en_US`, `fr`...) to a supported locale.
@@ -123,6 +130,16 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(3);
 /// Container events closer together than this share a single list reload.
 const RELOAD_DEBOUNCE: Duration = Duration::from_millis(300);
 
+/// First wait after the events stream ends; it doubles each time up to `EVENTS_BACKOFF_MAX`.
+const EVENTS_BACKOFF_MIN: Duration = Duration::from_secs(1);
+const EVENTS_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// A stream that stayed open this long counts as healthy and resets the backoff.
+const EVENTS_STABLE: Duration = Duration::from_secs(30);
+
+/// Most toasts on screen at once; the oldest go first.
+const MAX_TOASTS: usize = 5;
+
 impl App {
     /// Builds the app and starts the first connectivity check.
     pub fn new(client: Arc<dyn DockerClient>) -> (Self, Task<Message>) {
@@ -135,6 +152,9 @@ impl App {
             pinging: false,
             events_generation: 0,
             reload_scheduled: false,
+            load_seq: 0,
+            events_started: None,
+            events_backoff: EVENTS_BACKOFF_MIN,
         };
         let task = app.start_ping();
         (app, task)
@@ -161,18 +181,14 @@ impl App {
             Message::Pinged(Ok(())) => {
                 self.conn = Connection::Ok;
                 self.events_generation += 1;
+                self.events_started = Some(tokio::time::Instant::now());
                 self.load_containers()
             }
-            Message::Pinged(Err(e)) if e.is_connection() => {
-                self.conn = Connection::Failed(e);
-                Task::none()
-            }
+            // Whatever the error, the daemon is not usable: the onboarding explains it and the
+            // retry timer checks again. Carrying on would reopen the events stream in a loop.
             Message::Pinged(Err(e)) => {
-                // The daemon answered, just not with a pong: report it and carry on.
-                self.push_toast(friendly_error(&e), Some(format!("{e:?}")));
-                self.conn = Connection::Ok;
-                self.events_generation += 1;
-                self.load_containers()
+                self.set_failed(e);
+                Task::none()
             }
             Message::Retry => self.start_ping(),
             Message::Copy(text) => iced::clipboard::write(text),
@@ -205,21 +221,23 @@ impl App {
                 }
             }
             // The stream is gone: either the daemon stopped (the ping fails and the onboarding
-            // takes over) or it is still there and the new ping renews the subscription.
-            Message::EventsEnded => self.start_ping(),
-            // Reserved.
-            Message::Tick => Task::none(),
+            // takes over) or it is still there and the new ping renews the subscription. Wait
+            // first, so a stream that fails right away does not turn this into a busy loop.
+            Message::EventsEnded => self.on_events_ended(),
+            Message::EventsRetry => self.start_ping(),
         }
     }
 
     fn update_containers(&mut self, m: containers::Msg) -> Task<Message> {
         use containers::Msg;
         match m {
-            Msg::Loaded(Ok(items)) => {
+            // Reloads can overlap: only the latest one counts.
+            Msg::Loaded(seq, _) if seq != self.load_seq => Task::none(),
+            Msg::Loaded(_, Ok(items)) => {
                 self.containers.items = items;
                 Task::none()
             }
-            Msg::Loaded(Err(e)) => self.fail(e),
+            Msg::Loaded(_, Err(e)) => self.fail(e),
             Msg::Query(query) => {
                 self.containers.query = query;
                 Task::none()
@@ -261,6 +279,8 @@ impl App {
     /// Container events refresh the list, debounced so a burst causes a single reload.
     /// Volume and network events are handled in phase 4.
     fn on_docker_event(&mut self, ev: DockerEvent) -> Task<Message> {
+        // The stream is alive.
+        self.events_backoff = EVENTS_BACKOFF_MIN;
         if ev.kind != ResourceKind::Container || self.reload_scheduled {
             return Task::none();
         }
@@ -270,10 +290,29 @@ impl App {
         })
     }
 
+    /// Waits (with backoff) before checking the daemon again after the events stream ended.
+    fn on_events_ended(&mut self) -> Task<Message> {
+        let lived = self
+            .events_started
+            .map_or(Duration::ZERO, |started| started.elapsed());
+        if lived >= EVENTS_STABLE {
+            self.events_backoff = EVENTS_BACKOFF_MIN;
+        }
+        let wait = self.events_backoff;
+        self.events_backoff = (wait * 2).min(EVENTS_BACKOFF_MAX);
+        Task::perform(tokio::time::sleep(wait), |()| Message::EventsRetry)
+    }
+
+    /// Docker is unusable: shows the onboarding and drops anything tied to the old connection.
+    fn set_failed(&mut self, e: DockerError) {
+        self.conn = Connection::Failed(e);
+        self.containers.confirm_remove = None;
+    }
+
     /// Connection problems send the user to the onboarding; anything else becomes a toast.
     fn fail(&mut self, e: DockerError) -> Task<Message> {
         if e.is_connection() {
-            self.conn = Connection::Failed(e);
+            self.set_failed(e);
         } else {
             self.push_toast(friendly_error(&e), Some(format!("{e:?}")));
         }
@@ -291,13 +330,23 @@ impl App {
         })
     }
 
-    fn load_containers(&self) -> Task<Message> {
-        Task::perform(list_all(self.client.clone()), |r| {
-            Message::Containers(containers::Msg::Loaded(r))
+    fn load_containers(&mut self) -> Task<Message> {
+        self.load_seq += 1;
+        let seq = self.load_seq;
+        Task::perform(list_all(self.client.clone()), move |r| {
+            Message::Containers(containers::Msg::Loaded(seq, r))
         })
     }
 
+    /// Shows a toast, unless one with the same text is already visible. At most `MAX_TOASTS`
+    /// stay on screen; the oldest are dropped.
     pub fn push_toast(&mut self, text: String, details: Option<String>) {
+        if self.toasts.iter().any(|t| t.text == text) {
+            return;
+        }
+        if self.toasts.len() >= MAX_TOASTS {
+            self.toasts.remove(0);
+        }
         self.toasts.push(Toast {
             text,
             details,
@@ -576,15 +625,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_connection_ping_error_toasts_and_loads_anyway() {
+    async fn non_connection_ping_error_goes_to_onboarding_without_loading() {
         let fake = Arc::new(FakeClient::with_sample_data());
         let mut app = app_with(&fake);
+        let before = app.events_generation;
         let e = DockerError::Other("boom".into());
-        settle(&mut app, Message::Pinged(Err(e))).await;
-        assert_eq!(app.conn, Connection::Ok);
-        assert_eq!(app.toasts.len(), 1);
-        assert_eq!(app.toasts[0].details.as_deref(), Some("Other(\"boom\")"));
-        assert!(fake.calls().contains(&"list_containers:true".to_string()));
+        let handled = settle(&mut app, Message::Pinged(Err(e.clone()))).await;
+        assert_eq!(app.conn, Connection::Failed(e));
+        assert_eq!(handled.len(), 1, "nothing follows the failed ping");
+        assert!(app.toasts.is_empty());
+        assert_eq!(app.events_generation, before, "no events subscription");
+        assert!(fake.calls().is_empty(), "{:?}", fake.calls());
+        // It is retried every few seconds like any other connection failure.
+        assert_eq!(app.subscription().units(), 1);
     }
 
     #[tokio::test]
@@ -592,9 +645,11 @@ mod tests {
         let fake = Arc::new(FakeClient::with_sample_data());
         let mut app = app_with(&fake);
         let _ = app.update(Message::Pinged(Ok(())));
-        let _ = app.update(Message::Containers(containers::Msg::Loaded(Err(
-            DockerError::NotRunning,
-        ))));
+        let seq = app.load_seq;
+        let _ = app.update(Message::Containers(containers::Msg::Loaded(
+            seq,
+            Err(DockerError::NotRunning),
+        )));
         assert_eq!(app.conn, Connection::Failed(DockerError::NotRunning));
     }
 
@@ -1059,7 +1114,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn events_ended_with_daemon_down_goes_to_onboarding() {
         let fake = Arc::new(FakeClient::with_sample_data());
         let mut app = loaded_app(&fake).await;
@@ -1068,12 +1123,16 @@ mod tests {
         assert_eq!(app.conn, Connection::Failed(DockerError::NotRunning));
         assert!(matches!(
             handled[..],
-            [Message::EventsEnded, Message::Pinged(Err(_))]
+            [
+                Message::EventsEnded,
+                Message::EventsRetry,
+                Message::Pinged(Err(_))
+            ]
         ));
         assert!(app.toasts.is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn events_ended_with_daemon_up_resubscribes() {
         let fake = Arc::new(FakeClient::with_sample_data());
         let mut app = loaded_app(&fake).await;
@@ -1081,6 +1140,88 @@ mod tests {
         settle(&mut app, Message::EventsEnded).await;
         assert_eq!(app.conn, Connection::Ok);
         assert_eq!(app.events_generation, before + 1);
+    }
+
+    /// The events stream ends, as the real subscription would report, and the app reacts.
+    /// Returns how long the app waited before pinging again.
+    async fn end_events(app: &mut App) -> Duration {
+        let started = tokio::time::Instant::now();
+        let handled = settle(app, Message::EventsEnded).await;
+        assert!(
+            matches!(handled[1], Message::EventsRetry),
+            "the ping must wait: {handled:?}"
+        );
+        started.elapsed()
+    }
+
+    fn secs(n: u64) -> Duration {
+        Duration::from_secs(n)
+    }
+
+    fn assert_about(got: Duration, want: Duration) {
+        assert!(
+            got >= want && got < want + Duration::from_millis(100),
+            "waited {got:?}, expected {want:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn events_that_fail_at_once_do_not_make_the_app_spin() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        fake.set_events_error(Some(DockerError::Other("boom".into())));
+        let ping_count = |fake: &FakeClient| fake.calls().iter().filter(|c| *c == "ping").count();
+        let before = ping_count(&fake);
+        let started = tokio::time::Instant::now();
+        let mut rounds = 0;
+        while started.elapsed() < secs(60) && rounds < 200 {
+            // What the subscription does when `events()` fails right away.
+            let first = Box::pin(event_messages(fake.clone())).next().await;
+            assert!(matches!(first, Some(Message::EventsEnded)));
+            settle(&mut app, Message::EventsEnded).await;
+            rounds += 1;
+        }
+        let pings = ping_count(&fake) - before;
+        assert!(pings <= 8, "{pings} pings in a minute");
+        assert_eq!(app.conn, Connection::Ok);
+        assert!(app.toasts.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn events_backoff_doubles_up_to_thirty_seconds() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        for want in [1, 2, 4, 8, 16, 30, 30] {
+            assert_about(end_events(&mut app).await, secs(want));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn events_backoff_restarts_after_an_event() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        for want in [1, 2, 4] {
+            assert_about(end_events(&mut app).await, secs(want));
+        }
+        let volume_event = DockerEvent {
+            kind: ResourceKind::Volume,
+            action: "create".into(),
+            id: "v".into(),
+        };
+        let _ = app.update(Message::Docker(volume_event));
+        assert_about(end_events(&mut app).await, secs(1));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn events_backoff_restarts_after_a_stable_stream() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        for want in [1, 2, 4] {
+            assert_about(end_events(&mut app).await, secs(want));
+        }
+        tokio::time::advance(secs(60)).await;
+        assert_about(end_events(&mut app).await, secs(1));
+        assert_about(end_events(&mut app).await, secs(2));
     }
 
     #[tokio::test]
@@ -1169,6 +1310,90 @@ mod tests {
             web.map(|c| &c.state),
             Some(ContainerState::Exited { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn an_older_load_cannot_overwrite_a_newer_one() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let older = run(app.update(Message::ReloadContainers)).await;
+        fake.stop("web-id").await.unwrap();
+        let newer = run(app.update(Message::ReloadContainers)).await;
+        assert_eq!((older.len(), newer.len()), (1, 1));
+        // The newer answer arrives first, the older one afterwards.
+        for m in newer.into_iter().chain(older) {
+            let _ = app.update(m);
+        }
+        let web = app.containers.items.iter().find(|c| c.id == "web-id");
+        assert!(matches!(
+            web.map(|c| &c.state),
+            Some(ContainerState::Exited { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_older_load_error_is_ignored_too() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let stale = app.load_seq;
+        let _ = app.update(Message::ReloadContainers);
+        let _ = app.update(Message::Containers(containers::Msg::Loaded(
+            stale,
+            Err(DockerError::NotRunning),
+        )));
+        assert_eq!(app.conn, Connection::Ok);
+    }
+
+    #[test]
+    fn toasts_are_capped_dropping_the_oldest() {
+        let fake = Arc::new(FakeClient::new());
+        let mut app = app_with(&fake);
+        for i in 0..8 {
+            app.push_toast(format!("toast {i}"), None);
+        }
+        let texts: Vec<_> = app.toasts.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            ["toast 3", "toast 4", "toast 5", "toast 6", "toast 7"]
+        );
+    }
+
+    #[test]
+    fn a_toast_with_the_same_text_is_not_duplicated() {
+        let fake = Arc::new(FakeClient::new());
+        let mut app = app_with(&fake);
+        app.push_toast("same".into(), Some("first".into()));
+        app.push_toast("other".into(), None);
+        app.push_toast("same".into(), Some("second".into()));
+        assert_eq!(app.toasts.len(), 2);
+        // Once dismissed, it can show up again.
+        let _ = app.update(Message::DismissToast(0));
+        app.push_toast("same".into(), None);
+        assert_eq!(app.toasts.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn losing_the_connection_closes_the_remove_dialog() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::Containers(containers::Msg::AskRemove(
+            "web-id".into(),
+        )));
+        fake.set_ping_error(Some(DockerError::NotRunning));
+        settle(&mut app, Message::Retry).await;
+        assert_eq!(app.conn, Connection::Failed(DockerError::NotRunning));
+        assert!(app.containers.confirm_remove.is_none());
+
+        let _ = app.update(Message::Containers(containers::Msg::AskRemove(
+            "web-id".into(),
+        )));
+        app.conn = Connection::Ok;
+        let seq = app.load_seq;
+        let _ = app.update(Message::Containers(containers::Msg::Loaded(
+            seq,
+            Err(DockerError::NotRunning),
+        )));
+        assert!(app.containers.confirm_remove.is_none());
     }
 
     #[test]

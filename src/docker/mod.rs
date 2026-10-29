@@ -34,6 +34,6 @@ pub trait DockerClient: Send + Sync + 'static {
 
 /// Creates a client for the local daemon (`DOCKER_HOST` if `unix://`, else the
 /// default socket). Does not fail when the daemon is down; `ping` reports that.
-pub fn connect() -> Result<Arc<dyn DockerClient>, DockerError> {
-    Ok(Arc::new(BollardClient::new()))
+pub fn connect() -> Arc<dyn DockerClient> {
+    Arc::new(BollardClient::new())
 }

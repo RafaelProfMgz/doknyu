@@ -37,14 +37,17 @@ impl Default for ContainersState {
 /// Messages of the container list.
 #[derive(Debug, Clone)]
 pub enum Msg {
-    Loaded(Result<Vec<ContainerInfo>, DockerError>),
+    /// A list reload finished; the number identifies which reload it answers.
+    Loaded(u64, Result<Vec<ContainerInfo>, DockerError>),
     Query(String),
     ToggleStopped(bool),
     Start(String),
     Stop(String),
     Restart(String),
     AskRemove(String),
-    ConfirmRemove { force: bool },
+    ConfirmRemove {
+        force: bool,
+    },
     CancelRemove,
     ActionDone(String, Result<(), DockerError>),
     OpenPort(u16),
