@@ -59,7 +59,8 @@ fn item<'a>(id: ActionId, highlighted: bool) -> Element<'a, Message> {
     if let Some(shortcut) = &actions::def(id).shortcut {
         content = content.push(kbd(shortcut));
     }
-    button(content)
+    // A fixed-height button keeps its content at the top.
+    button(container(content).center_y(Length::Fill))
         .on_press(Message::PaletteRun(Some(id)))
         .width(Length::Fill)
         .height(ROW_HEIGHT)

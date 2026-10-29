@@ -41,7 +41,8 @@ fn entry(
                     .style(style::text::faint),
             );
         }
-        line.into()
+        // A fixed-height button keeps its content at the top; center it like the collapsed icon.
+        container(line).center_y(Length::Fill).into()
     };
     let item = button(content)
         .width(Length::Fill)
