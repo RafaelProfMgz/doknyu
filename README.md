@@ -19,3 +19,4 @@ Docs: [spec](docs/specs/2026-10-29-doknyu-design.md) e [plano](docs/plans/README
 ## Licença
 
 Licenciado sob `MIT OR Apache-2.0`, à sua escolha.
+# doknyu
