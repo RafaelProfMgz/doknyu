@@ -14,7 +14,8 @@ da UI; a UI iced segue a arquitetura Elm e conversa com o core via a trait `Dock
 **Stack:** Rust 1.95 (edition 2024), iced, bollard, tokio, futures, async-trait, iced_term,
 thiserror, anyhow, rust-i18n, sys-locale, tracing.
 
-**Spec:** [`docs/specs/2026-10-29-doknyu-design.md`](../specs/2026-10-29-doknyu-design.md)
+**Spec:** [`docs/specs/2026-10-29-doknyu-design.md`](../specs/2026-10-29-doknyu-design.md) e, para a
+interface, [`docs/specs/2026-10-29-ui-zed-design.md`](../specs/2026-10-29-ui-zed-design.md)
 
 ## Fases
 
@@ -23,6 +24,8 @@ thiserror, anyhow, rust-i18n, sys-locale, tracing.
 | 0 | [fase-0-fundacao.md](fase-0-fundacao.md) | Repo, Cargo, CI, versões fixadas, spike do `iced_term` |
 | 1 | [fase-1-core-docker.md](fase-1-core-docker.md) | `model`, `error`, trait `DockerClient`, `BollardClient`, `FakeClient` |
 | 2 | [fase-2-shell-containers.md](fase-2-shell-containers.md) | Janela, sidebar, onboarding, lista de containers + ações + eventos |
+| 2.5 | [fase-2.5-visual-layout.md](fase-2.5-visual-layout.md) | Tema Zed (claro/escuro do sistema), fontes, ícones, componentes, sidebar + dock + barra de status |
+| 2.6 | [fase-2.6-teclado-palette.md](fase-2.6-teclado-palette.md) | Registro de ações, atalhos, navegação por teclado, command palette, tema salvo |
 | 3 | [fase-3-logs-stats.md](fase-3-logs-stats.md) | Detalhe do container: abas Logs e Stats |
 | 4 | [fase-4-volumes-redes.md](fase-4-volumes-redes.md) | Telas de Volumes e Redes |
 | 5 | [fase-5-terminal.md](fase-5-terminal.md) | Aba Terminal (`iced_term` ou terminal externo) |

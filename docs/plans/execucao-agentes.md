@@ -26,6 +26,9 @@ de outros plugins (frontend-design, vercel:*, …) não se aplicam a um app iced
 | 0 | 0.2 Spike iced_term | `research-implementer` | — (é descartável; o humano lê a decisão) |
 | 1 | 1.1 – 1.5 Core | `rust-implementer` | `task-reviewer` |
 | 2 | 2.1 – 2.4 Shell + containers | `ui-implementer` | `task-reviewer` |
+| 2.5 | 2.5.1 Tokens, tema, fontes, ícones | `research-implementer` (baixa fontes, fixa Lucide) | `task-reviewer` |
+| 2.5 | 2.5.2 – 2.5.4 Componentes, shell, Containers | `ui-implementer` | `task-reviewer` |
+| 2.6 | 2.6.1 – 2.6.2 Ações/atalhos, palette | `ui-implementer` | `task-reviewer` |
 | 3 | 3.1 LogBuffer | `rust-implementer` | `task-reviewer` |
 | 3 | 3.2 – 3.3 Logs/Stats | `ui-implementer` | `task-reviewer` |
 | 4 | 4.1 – 4.2 Volumes/Redes | `ui-implementer` | `task-reviewer` |
@@ -48,7 +51,7 @@ mesmo limite de uso da sessão. O controle é feito por estas regras:
    corrige → revisa). Se a tarefa ainda não for aprovada no 3º review, ela é escalada ao humano.
 4. **Parada obrigatória ao fim de cada fase:** o `phase-reviewer` roda, o humano faz a verificação
    manual e aprova antes da próxima fase começar. Assim o gasto máximo de uma vez é o de uma fase.
-5. **Opus só no `phase-reviewer`** (7 execuções no total). Todo o resto roda em Sonnet.
+5. **Opus só no `phase-reviewer`** (9 execuções no total). Todo o resto roda em Sonnet.
 6. **Contexto enxuto:** cada agente lê o README do plano e a sua tarefa, não a spec inteira. As
    respostas finais têm tamanho limitado (15 a 25 linhas).
 7. **Web só no `research-implementer`**, com no máximo 8 buscas por tarefa.
@@ -60,11 +63,13 @@ mesmo limite de uso da sessão. O controle é feito por estas regras:
 | 0 | 2 | 1 | 1 | 4 | 8 |
 | 1 | 5 | 5 | 1 | 11 | 31 |
 | 2 | 4 | 4 | 1 | 9 | 25 |
+| 2.5 | 4 | 4 | 1 | 9 | 25 |
+| 2.6 | 2 | 2 | 1 | 5 | 13 |
 | 3 | 3 | 3 | 1 | 7 | 19 |
 | 4 | 2 | 2 | 1 | 5 | 13 |
 | 5 | 2 | 2 | 1 | 5 | 13 |
 | 6 | 3 | 3 | 1 | 7 | 19 |
-| **Total** | **21** | **20** | **7** | **48** | **128** |
+| **Total** | **27** | **26** | **9** | **62** | **166** |
 
 ## Fluxo do orquestrador por tarefa
 

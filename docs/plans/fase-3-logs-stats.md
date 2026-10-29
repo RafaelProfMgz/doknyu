@@ -1,8 +1,27 @@
 # Fase 3 — Detalhe do container: Logs e Stats
 
-> Ver [README.md](README.md). Consome Fases 1 e 2 (`Screen::Detail(id)`, `StatsHistory`, `DockerClient::logs/stats`).
+> Ver [README.md](README.md). Consome Fases 1, 2, 2.5 e 2.6 (dock, `StatsHistory`, `DockerClient::logs/stats`).
 
 **Entrega:** clicar num container abre o detalhe com abas Logs e Stats funcionando ao vivo.
+
+## Adaptação às Fases 2.5 e 2.6 (vale sobre o texto abaixo)
+
+- Não existe mais `Screen::Detail`: o detalhe é o **dock inferior** (`App::dock: Option<Dock>`,
+  Fase 2.5). Use `DockTab` da Fase 2.5 no lugar de `Tab`; `DetailState` fica guardado junto do
+  dock (ex.: `App::detail: Option<DetailState>`, criado em `OpenDock` e descartado ao fechar).
+  `Msg::Back` vira `CloseDock`. "Volta para `Screen::Containers`" significa "fecha o dock".
+- O dock já fecha sozinho quando o container some da lista (Fase 2.5, sem toast). A Fase 3
+  acrescenta o toast "O container não existe mais" só quando o fechamento veio de `destroy`
+  ou `NotFound` com o dock aberto; `stopped_container_keeps_detail_open` verifica `dock.is_some()`.
+- Visual: logs em `fonts::MONO` tamanho `TEXT_SM`, `Stderr` em `warning`, destaque da busca em
+  `accent`; barra da aba com `search_field`, `chip` (timestamps) e `icon_button(Copy)`; cartões de
+  Stats com `container::surface` e bordas de 1px; sparkline em `accent`. Nada de cor literal.
+- Cabeçalho do dock é o `panel_header` da Fase 2.5 (nome + abas + ações); não criar outro.
+- Ações registradas em `actions.rs` (com rótulos nos dois locales): `DockLogs`, `DockStats`
+  (Ctrl+Shift+L / Ctrl+Shift+S, abrem o dock do selecionado na aba), `ToggleTimestamps`,
+  `CopyLogs`, `FocusLogSearch` (Ctrl+F quando o foco lógico está no dock: o dock está aberto e
+  a aba é Logs).
+- `sparkline` e `human_bytes` vão para `src/ui/components/` (não para `views/widgets.rs`).
 
 ---
 

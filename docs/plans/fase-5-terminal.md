@@ -5,6 +5,17 @@
 
 **Entrega:** aba Terminal no detalhe do container + botão "Abrir no terminal do sistema".
 
+## Adaptação às Fases 2.5 e 2.6 (vale sobre o texto abaixo)
+
+- "Detalhe" é o dock inferior da Fase 2.5; `src/views/detail/` é o da Fase 3 (conteúdo das abas).
+  "Sair do detalhe" = fechar o dock (`CloseDock`) ou trocar o container do dock.
+- O `iced_term` usa `fonts::MONO` e cores derivadas da paleta ativa (fundo `bg`, texto `text`,
+  cursor `accent`); ao trocar o tema, o terminal acompanha.
+- Com o terminal focado, os atalhos de uma letra e as setas são do terminal: o `keymap` só trata
+  teclas com Ctrl+Shift (palette, `DockTerminal`) e Esc **não** fecha o dock quando o terminal tem
+  foco (Esc é do shell). Fechar o dock pelo teclado: Ctrl+J.
+- Ações registradas: `DockTerminal` (Ctrl+Shift+T) e `OpenExternalTerminal` (palette).
+
 ---
 
 ### Tarefa 5.1: Terminal externo (sempre)

@@ -1,9 +1,20 @@
 # Fase 4 — Volumes e Redes
 
 > Ver [README.md](README.md). Consome `DockerClient::{list,remove,prune}_volumes`, `list_networks`,
-> `remove_network`, `confirm_dialog`, `friendly_error` e a Subscription de eventos da Fase 2.
+> `remove_network`, `modal` (Fase 2.5), `friendly_error` e a Subscription de eventos da Fase 2.
 
 **Entrega:** telas Volumes e Redes completas, substituindo o "em breve".
+
+## Adaptação às Fases 2.5 e 2.6 (vale sobre o texto abaixo)
+
+- Telas montadas como a de Containers da Fase 2.5: `toolbar` (busca + contagem),
+  `list_header`, `list_row` com seleção e ações só no hover/seleção, `modal` no lugar de
+  `confirm_dialog`. Nome em `SANS_MEDIUM`, driver/mountpoint/subnet em `MONO` `muted`.
+- Remover desabilitado mostra o motivo no tooltip do `icon_button`.
+- A sidebar passa a mostrar a contagem de volumes e redes.
+- `SelectNext/Prev`, `OpenSelected` (sem efeito aqui), `RemoveSelected` e `Escape` passam a
+  valer nas telas Volumes e Redes (`available` olha a tela atual). Nova ação `PruneVolumes` na
+  palette (sem atalho).
 
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: ui-implementer
-description: Implementa UMA tarefa de interface iced do plano em docs/plans/ (telas, Messages, Subscriptions), com TDD sobre o update usando FakeClient. Use para Tarefas 2.1–2.4, 3.2, 3.3, 4.1, 4.2 e 5.2.
+description: Implementa UMA tarefa de interface iced do plano em docs/plans/ (telas, Messages, Subscriptions), com TDD sobre o update usando FakeClient. Use para Tarefas 2.1–2.4, 2.5.2–2.5.4, 2.6.1–2.6.2, 3.2, 3.3, 4.1, 4.2 e 5.2.
 model: sonnet
 effort: high
 maxTurns: 50
