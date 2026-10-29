@@ -1,5 +1,7 @@
 pub mod bollard;
 pub mod convert;
+#[cfg(any(test, feature = "fake"))]
+pub mod fake;
 
 use std::sync::Arc;
 
@@ -7,6 +9,8 @@ use crate::error::DockerError;
 use crate::model::*;
 
 pub use self::bollard::BollardClient;
+#[cfg(any(test, feature = "fake"))]
+pub use self::fake::FakeClient;
 
 pub type DockerStream<T> = futures::stream::BoxStream<'static, Result<T, DockerError>>;
 
