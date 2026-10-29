@@ -3,8 +3,10 @@
 use std::collections::HashSet;
 
 use iced::widget::text::Wrapping;
-use iced::widget::{Column, Id, button, center, column, container, row, scrollable, space, text};
-use iced::{Alignment, Element, Length};
+use iced::widget::{
+    Column, Id, button, center, column, container, row, scrollable, space, text, tooltip,
+};
+use iced::{Alignment, Element, Length, Padding};
 use rust_i18n::t;
 
 use crate::app::Message;
@@ -173,6 +175,28 @@ fn public_ports(c: &ContainerInfo) -> Vec<u16> {
     ports
 }
 
+/// Most ports drawn in a row; the rest are summed up as "+K".
+const MAX_PORTS_SHOWN: usize = 3;
+
+/// The ports drawn and how many were left out.
+fn split_ports(ports: &[u16]) -> (&[u16], usize) {
+    let shown = ports.len().min(MAX_PORTS_SHOWN);
+    (&ports[..shown], ports.len() - shown)
+}
+
+fn more_label(more: usize) -> Option<String> {
+    (more > 0).then(|| format!("+{more}"))
+}
+
+/// Every port, for the tooltip of the "+K" text.
+fn all_ports_tip(ports: &[u16]) -> String {
+    ports
+        .iter()
+        .map(u16::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// A single line of text that is cut, not wrapped, when the column is too narrow.
 fn cell<'a>(content: impl Into<Element<'a, Message>>, width: Length) -> Element<'a, Message> {
     container(content).width(width).clip(true).into()
@@ -220,13 +244,25 @@ fn row_view<'a>(
     let one_line = |t: iced::widget::Text<'a>| t.wrapping(Wrapping::None);
 
     let mut ports = row![].spacing(SPACE_2);
-    for p in public_ports(c) {
+    let all_ports = public_ports(c);
+    let (shown, more) = split_ports(&all_ports);
+    for &p in shown {
         ports = ports.push(
             button(one_line(text(p.to_string()).size(TEXT_SM).font(MONO)))
                 .padding(0)
                 .style(style::button::link)
                 .on_press(msg(Msg::OpenPort(p))),
         );
+    }
+    if let Some(label) = more_label(more) {
+        let tip = container(text(all_ports_tip(&all_ports)).size(TEXT_SM).font(MONO))
+            .padding(Padding::from([SPACE_1, SPACE_2]))
+            .style(style::container::elevated);
+        ports = ports.push(tooltip(
+            one_line(text(label).size(TEXT_SM).style(style::text::faint)),
+            tip,
+            tooltip::Position::Bottom,
+        ));
     }
 
     let status = if busy {
@@ -561,6 +597,18 @@ mod tests {
             s.pending = busy.then(|| "long".to_string()).into_iter().collect();
             let _ = view(&s);
         }
+    }
+
+    #[test]
+    fn forty_ports_show_three_and_plus_thirty_seven() {
+        let ports: Vec<u16> = (8001..=8040).collect();
+        let (shown, more) = split_ports(&ports);
+        assert_eq!(shown, &[8001, 8002, 8003]);
+        assert_eq!(more_label(more), Some("+37".to_string()));
+        let (shown, more) = split_ports(&ports[..3]);
+        assert_eq!(shown.len(), 3);
+        assert_eq!(more_label(more), None);
+        assert_eq!(all_ports_tip(&ports[..4]), "8001, 8002, 8003, 8004");
     }
 
     #[test]

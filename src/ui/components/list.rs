@@ -5,6 +5,24 @@ use crate::ui::style;
 use crate::ui::theme::palette;
 use crate::ui::tokens::{ACCENT_BAR_WIDTH, BORDER_WIDTH, ROW_HEIGHT, SPACE_2, TEXT_SM};
 
+/// Distance from the left edge of a row to where its content starts: the accent bar and the
+/// padding. The column titles of [`list_header`] start at the same place.
+#[cfg(test)]
+const CONTENT_OFFSET: f32 = ACCENT_BAR_WIDTH + SPACE_2;
+
+/// `bar` and then `content`, laid out so that `content` starts at [`CONTENT_OFFSET`].
+fn framed<'a, M: 'a>(bar: Element<'a, M>, content: Element<'a, M>) -> Element<'a, M> {
+    row![
+        bar,
+        container(content)
+            .padding(Padding::from([0.0, SPACE_2]))
+            .align_y(Alignment::Center)
+            .width(Length::Fill)
+            .height(Length::Fill),
+    ]
+    .into()
+}
+
 /// What a row reports to the app.
 #[derive(Debug, Clone)]
 pub struct RowEvents<M> {
@@ -41,14 +59,7 @@ pub fn list_row<'a, M: Clone + 'a>(
     {
         content = content.push(actions);
     }
-    let body = row![
-        bar,
-        container(content)
-            .padding(Padding::from([0.0, SPACE_2]))
-            .align_y(Alignment::Center)
-            .width(Length::Fill)
-            .height(Length::Fill),
-    ];
+    let body = framed(bar.into(), content.into());
     mouse_area(
         container(body)
             .width(Length::Fill)
@@ -64,10 +75,10 @@ pub fn list_row<'a, M: Clone + 'a>(
 
 /// Discreet column titles above the rows.
 pub fn list_header<'a, M: 'a>(columns: Vec<(String, Length)>) -> Element<'a, M> {
-    let mut titles = row![space().width(ACCENT_BAR_WIDTH)]
+    let mut titles = row![]
         .spacing(SPACE_2)
-        .padding(Padding::from([0.0, SPACE_2]))
-        .align_y(Alignment::Center);
+        .align_y(Alignment::Center)
+        .width(Length::Fill);
     for (title, width) in columns {
         titles = titles.push(
             text(title)
@@ -76,11 +87,26 @@ pub fn list_header<'a, M: 'a>(columns: Vec<(String, Length)>) -> Element<'a, M> 
                 .width(width),
         );
     }
+    let bar = space().width(ACCENT_BAR_WIDTH).into();
     column![
-        container(titles)
-            .height(ROW_HEIGHT)
-            .align_y(Alignment::Center),
+        container(framed(bar, titles.into()))
+            .width(Length::Fill)
+            .height(ROW_HEIGHT),
         rule::horizontal(BORDER_WIDTH).style(style::rule_border),
     ]
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_starts_after_the_bar_and_padding_in_rows_and_header() {
+        // Both are built by `framed`, so the titles line up with the cells.
+        assert_eq!(CONTENT_OFFSET, ACCENT_BAR_WIDTH + SPACE_2);
+        let bar = || space().width(ACCENT_BAR_WIDTH).into();
+        let _: Element<'_, ()> = framed(bar(), text("x").into());
+        let _: Element<'_, ()> = list_header(vec![("a".into(), Length::Fill)]);
+    }
 }

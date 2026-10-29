@@ -6,7 +6,6 @@ use rust_i18n::t;
 
 use crate::app::{Message, Toast};
 use crate::error::DockerError;
-use crate::model::ContainerState;
 use crate::ui::components::toast;
 use crate::ui::tokens::{SPACE_2, SPACE_4, STATUS_BAR_HEIGHT};
 
@@ -20,19 +19,6 @@ pub fn friendly_error(e: &DockerError) -> String {
         DockerError::Conflict(_) => t!("error.conflict"),
         DockerError::Api { .. } => t!("error.api"),
         DockerError::Other(_) => t!("error.other"),
-    }
-    .into_owned()
-}
-
-/// Translated state name, for example "Exited (137)".
-pub fn state_label(state: &ContainerState) -> String {
-    match state {
-        ContainerState::Running => t!("state.running"),
-        ContainerState::Paused => t!("state.paused"),
-        ContainerState::Restarting => t!("state.restarting"),
-        ContainerState::Created => t!("state.created"),
-        ContainerState::Exited { code } => t!("state.exited", code = code),
-        ContainerState::Dead => t!("state.dead"),
     }
     .into_owned()
 }
@@ -75,10 +61,5 @@ mod tests {
             })
             .collect();
         let _: Element<'_, Message> = toast_stack(&toasts);
-    }
-
-    #[test]
-    fn exited_label_includes_the_exit_code() {
-        assert!(state_label(&ContainerState::Exited { code: 137 }).contains("137"));
     }
 }
