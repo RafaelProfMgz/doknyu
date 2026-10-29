@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use iced::widget::text::Wrapping;
 use iced::widget::{
-    Column, Id, button, center, column, container, row, scrollable, space, text, tooltip,
+    Column, Id, button, center, column, container, row, scrollable, sensor, space, text, tooltip,
 };
 use iced::{Alignment, Element, Length, Padding};
 use rust_i18n::t;
@@ -14,7 +14,7 @@ use crate::app::Message;
 use crate::error::DockerError;
 use crate::model::{ContainerInfo, ContainerState};
 use crate::ui::components::{
-    RowEvents, chip, icon_button, list_header, list_row, search_field, status_dot,
+    RowEvents, Shortcut, chip, icon_button, kbd, list_header, list_row, search_field, status_dot,
 };
 use crate::ui::fonts::{MONO, SANS_MEDIUM, SANS_SEMIBOLD};
 use crate::ui::icons::Icon;
@@ -41,6 +41,9 @@ pub struct ContainersState {
     pub hovered: Option<String>,
     pub pending: HashSet<String>,
     pub confirm_remove: Option<String>,
+    /// Scroll position of the rows and the height of the area showing them, as last reported.
+    pub scroll_y: f32,
+    pub viewport_h: f32,
 }
 
 impl Default for ContainersState {
@@ -54,6 +57,8 @@ impl Default for ContainersState {
             hovered: None,
             pending: HashSet::new(),
             confirm_remove: None,
+            scroll_y: 0.0,
+            viewport_h: 0.0,
         }
     }
 }
@@ -85,6 +90,47 @@ pub enum Msg {
     OpenPort(u16),
     /// A double click on a row: shows the container in the dock.
     Open(String),
+    /// The rows were scrolled: new offset and height of the visible area.
+    Scrolled {
+        offset: f32,
+        height: f32,
+    },
+    /// The area showing the rows changed its height.
+    Resized(f32),
+}
+
+/// Widget id of the scrollable with the rows, so the keyboard selection can scroll it.
+pub const LIST_ID: &str = "containers-list";
+
+/// Where to scroll so that row `index` is fully visible, or `None` if it already is (or the
+/// height of the window is not known yet). Rows are `row_h` tall and start at the top of the
+/// scrollable; `current_y` is its offset and `viewport_h` the height of its visible area.
+pub fn scroll_offset(index: usize, row_h: f32, viewport_h: f32, current_y: f32) -> Option<f32> {
+    if viewport_h <= 0.0 {
+        return None;
+    }
+    let top = index as f32 * row_h;
+    let bottom = top + row_h;
+    if top < current_y {
+        Some(top)
+    } else if bottom > current_y + viewport_h {
+        Some(bottom - viewport_h)
+    } else {
+        None
+    }
+}
+
+/// Whether confirming the pending removal forces it (the container is running); `None` if no
+/// removal is being confirmed. The dialog's main button and the Enter key both use it.
+pub fn remove_force(state: &ContainersState) -> Option<bool> {
+    let id = state.confirm_remove.as_deref()?;
+    Some(
+        state
+            .items
+            .iter()
+            .find(|c| c.id == id)
+            .is_some_and(|c| c.state.is_running()),
+    )
 }
 
 /// Containers that count for the "Stopped" chip: everything the "Running" chip does not take.
@@ -349,7 +395,7 @@ pub fn remove_dialog(state: &ContainersState) -> Option<Element<'static, Message
     let id = state.confirm_remove.as_deref()?;
     let found = state.items.iter().find(|c| c.id == id);
     let name = found.map_or(id, |c| c.name.as_str());
-    let running = found.is_some_and(|c| c.state.is_running());
+    let running = remove_force(state).unwrap_or(false);
     let (body, label) = if running {
         (
             t!("containers.remove_running.body", name = name),
@@ -371,9 +417,20 @@ pub fn remove_dialog(state: &ContainersState) -> Option<Element<'static, Message
             button(text(t!("common.cancel").into_owned()))
                 .style(style::button::ghost)
                 .on_press(msg(Msg::CancelRemove)),
-            button(text(label.into_owned()))
-                .style(style::button::danger)
-                .on_press(msg(Msg::ConfirmRemove { force: running })),
+            button(
+                row![
+                    text(label.into_owned()),
+                    kbd(&Shortcut {
+                        ctrl: false,
+                        shift: false,
+                        key: "Enter",
+                    }),
+                ]
+                .spacing(SPACE_2)
+                .align_y(Alignment::Center)
+            )
+            .style(style::button::danger)
+            .on_press(msg(Msg::ConfirmRemove { force: running })),
         ]
         .spacing(SPACE_2),
     ]
@@ -434,14 +491,23 @@ pub fn view(state: &ContainersState) -> Element<'_, Message> {
                     state.pending.contains(&c.id),
                 )
             }));
-            column![
-                header,
+            // The sensor reports the height of the area the rows scroll in.
+            let list = sensor(
                 scrollable(rows)
+                    .id(Id::new(LIST_ID))
                     .direction(style::thin_scrollbar())
                     .style(style::scrollable_thin)
+                    .on_scroll(|v| {
+                        msg(Msg::Scrolled {
+                            offset: v.absolute_offset().y,
+                            height: v.bounds().height,
+                        })
+                    })
                     .height(Length::Fill),
-            ]
-            .into()
+            )
+            .on_show(|size| msg(Msg::Resized(size.height)))
+            .on_resize(|size| msg(Msg::Resized(size.height)));
+            column![header, list].into()
         }
     };
 
@@ -682,5 +748,34 @@ mod tests {
             info("4", "Charlie", "c", ContainerState::Created),
         ]);
         assert_eq!(names(&s), vec!["beta", "zeta", "alpha", "Charlie"]);
+    }
+
+    #[test]
+    fn scroll_offset_only_when_the_row_leaves_the_window() {
+        let (row, window) = (28.0, 100.0);
+        // Row 2 spans 56..84, inside a window showing 0..100.
+        assert_eq!(scroll_offset(2, row, window, 0.0), None);
+        // Row 1 (28..56) is above a window that starts at 40.
+        assert_eq!(scroll_offset(1, row, window, 40.0), Some(28.0));
+        // Row 5 (140..168) is below a window showing 0..100.
+        assert_eq!(scroll_offset(5, row, window, 0.0), Some(68.0));
+        // Exactly at the edges still counts as inside.
+        assert_eq!(scroll_offset(0, row, window, 0.0), None);
+        assert_eq!(scroll_offset(3, row, 112.0, 0.0), None);
+        // Unknown window height: leave the list alone.
+        assert_eq!(scroll_offset(5, row, 0.0, 0.0), None);
+    }
+
+    #[test]
+    fn remove_force_follows_the_state_of_the_container() {
+        let mut s = state_with(vec![
+            info("1", "web", "nginx", ContainerState::Running),
+            info("2", "off", "x", ContainerState::Created),
+        ]);
+        assert_eq!(remove_force(&s), None);
+        s.confirm_remove = Some("1".into());
+        assert_eq!(remove_force(&s), Some(true));
+        s.confirm_remove = Some("2".into());
+        assert_eq!(remove_force(&s), Some(false));
     }
 }

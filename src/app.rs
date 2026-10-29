@@ -16,7 +16,7 @@ use crate::ui::components::{ToastKind, modal};
 use crate::ui::fonts::SANS_SEMIBOLD;
 use crate::ui::style;
 use crate::ui::theme::{ThemeMode, resolve};
-use crate::ui::tokens::{BORDER_WIDTH, SPACE_1, SPACE_2, SPACE_6, TEXT_LG};
+use crate::ui::tokens::{BORDER_WIDTH, ROW_HEIGHT, SPACE_1, SPACE_2, SPACE_6, TEXT_LG};
 use crate::views::containers::{self, ContainersState};
 use crate::views::widgets::{friendly_error, toast_stack};
 use crate::views::{dock, onboarding, sidebar, status_bar};
@@ -401,14 +401,8 @@ impl App {
             FocusSearch => iced::widget::operation::focus(Id::new(containers::SEARCH_ID)),
             // The palette arrives in task 2.6.2.
             OpenPalette => Task::none(),
-            SelectNext => {
-                self.select_step(true);
-                Task::none()
-            }
-            SelectPrev => {
-                self.select_step(false);
-                Task::none()
-            }
+            SelectNext => self.select_step(true),
+            SelectPrev => self.select_step(false),
             OpenSelected => on_selected(self, Msg::Open),
             StartStopSelected => {
                 let running = self
@@ -437,11 +431,12 @@ impl App {
     }
 
     /// Moves the selection one row down or up the visible list, stopping at its ends. Without a
-    /// selection, down picks the first row and up the last.
-    fn select_step(&mut self, forward: bool) {
+    /// selection, down picks the first row and up the last. Scrolls the list if the new row is
+    /// not fully on screen.
+    fn select_step(&mut self, forward: bool) -> Task<Message> {
         let visible = self.containers.visible();
         let Some(last) = visible.len().checked_sub(1) else {
-            return;
+            return Task::none();
         };
         let current = self
             .containers
@@ -456,6 +451,23 @@ impl App {
         };
         let id = visible[target].id.clone();
         self.containers.selected = Some(id);
+        let Some(y) = containers::scroll_offset(
+            target,
+            ROW_HEIGHT,
+            self.containers.viewport_h,
+            self.containers.scroll_y,
+        ) else {
+            return Task::none();
+        };
+        // Programmatic scrolling is not reported back, so remember where it went.
+        self.containers.scroll_y = y;
+        iced::widget::operation::scroll_to(
+            Id::new(containers::LIST_ID),
+            iced::widget::operation::AbsoluteOffset {
+                x: None,
+                y: Some(y),
+            },
+        )
     }
 
     /// Esc closes one layer, the topmost: the removal dialog, then the dock, then the search.
@@ -482,6 +494,14 @@ impl App {
         mods: iced::keyboard::Modifiers,
         captured: bool,
     ) -> Task<Message> {
+        // With the removal dialog open, Enter presses its main button, even if a text input
+        // still holds the event. Esc is left to the keymap and cancels.
+        if let Some(force) = containers::remove_force(&self.containers)
+            && *key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter)
+            && mods.is_empty()
+        {
+            return self.update_containers(containers::Msg::ConfirmRemove { force });
+        }
         // The palette (task 2.6.2) will take arrows and Enter here, before the keymap.
         match keymap::resolve(key, mods, captured) {
             Some(id) => self.run_action(id),
@@ -573,6 +593,15 @@ impl App {
             Msg::Open(id) => {
                 self.containers.selected = Some(id.clone());
                 self.update(Message::OpenDock(id))
+            }
+            Msg::Scrolled { offset, height } => {
+                self.containers.scroll_y = offset;
+                self.containers.viewport_h = height;
+                Task::none()
+            }
+            Msg::Resized(height) => {
+                self.containers.viewport_h = height;
+                Task::none()
             }
         }
     }
@@ -2635,5 +2664,66 @@ mod tests {
         let released =
             Event::Keyboard(keyboard::Event::ModifiersChanged(keyboard::Modifiers::CTRL));
         assert!(key_event(released, Status::Ignored, id).is_none());
+    }
+
+    #[tokio::test]
+    async fn enter_confirms_the_removal_dialog() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        // A stopped container: plain removal.
+        app.containers.selected = Some("worker-id".into());
+        settle(&mut app, Message::Action(ActionId::RemoveSelected)).await;
+        assert_eq!(app.containers.confirm_remove.as_deref(), Some("worker-id"));
+        settle(&mut app, enter_key(true)).await;
+        assert_eq!(app.containers.confirm_remove, None);
+        assert!(fake.calls().contains(&"remove:worker-id".to_string()));
+    }
+
+    #[tokio::test]
+    async fn enter_forces_the_removal_of_a_running_container() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        app.containers.selected = Some("web-id".into());
+        settle(&mut app, Message::Action(ActionId::RemoveSelected)).await;
+        settle(&mut app, enter_key(false)).await;
+        assert_eq!(app.containers.confirm_remove, None);
+        assert!(fake.calls().contains(&"remove:web-id:force".to_string()));
+    }
+
+    #[tokio::test]
+    async fn enter_without_the_dialog_does_not_remove() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        app.containers.selected = Some("web-id".into());
+        settle(&mut app, enter_key(false)).await;
+        assert!(!fake.calls().iter().any(|c| c.starts_with("remove")));
+        assert!(app.dock.is_some(), "Enter still opens the dock");
+    }
+
+    fn enter_key(captured: bool) -> Message {
+        Message::Key {
+            key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter),
+            mods: iced::keyboard::Modifiers::empty(),
+            captured,
+        }
+    }
+
+    #[tokio::test]
+    async fn selecting_by_key_scrolls_the_row_into_view() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        // Room for one row only: the list is db, web, worker.
+        let row = crate::ui::tokens::ROW_HEIGHT;
+        app.containers.selected = Some("db-id".into());
+        let _ = app.update(Message::Containers(containers::Msg::Scrolled {
+            offset: 0.0,
+            height: row,
+        }));
+        let _ = app.run_action(ActionId::SelectNext);
+        assert_eq!(app.containers.scroll_y, row, "web is the second row");
+        let _ = app.run_action(ActionId::SelectNext);
+        assert_eq!(app.containers.scroll_y, 2.0 * row);
+        let _ = app.run_action(ActionId::SelectPrev);
+        assert_eq!(app.containers.scroll_y, row);
     }
 }
