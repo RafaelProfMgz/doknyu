@@ -205,7 +205,7 @@ pub fn event_from(m: &EventMessage) -> Option<DockerEvent> {
     })
 }
 
-fn docker_socket_path() -> String {
+pub(super) fn docker_socket_path() -> String {
     match std::env::var("DOCKER_HOST") {
         Ok(h) if h.starts_with("unix://") => h["unix://".len()..].to_string(),
         _ => "/var/run/docker.sock".to_string(),
@@ -218,6 +218,11 @@ fn docker_cli_installed() -> bool {
 }
 
 pub fn api_error_from(e: bollard::errors::Error) -> DockerError {
+    api_error_with_socket(e, &docker_socket_path())
+}
+
+/// Like `api_error_from`, using `socket` to tell "no daemon" from "no socket".
+pub fn api_error_with_socket(e: bollard::errors::Error, socket: &str) -> DockerError {
     use bollard::errors::Error;
     match e {
         Error::DockerResponseServerError {
@@ -230,14 +235,35 @@ pub fn api_error_from(e: bollard::errors::Error) -> DockerError {
         },
         Error::IOError { err } => classify_connect_error(
             err.kind(),
-            std::path::Path::new(&docker_socket_path()).exists(),
+            std::path::Path::new(socket).exists(),
             docker_cli_installed(),
         ),
         Error::SocketNotFoundError(_) => {
             classify_connect_error(std::io::ErrorKind::NotFound, false, docker_cli_installed())
         }
-        other => DockerError::Other(other.to_string()),
+        other => match io_kind_in_chain(&other) {
+            // bollard 0.21 wraps socket connect failures in a hyper error whose
+            // `source()` chain holds the underlying `std::io::Error`.
+            Some(kind) => classify_connect_error(
+                kind,
+                std::path::Path::new(socket).exists(),
+                docker_cli_installed(),
+            ),
+            None => DockerError::Other(other.to_string()),
+        },
     }
+}
+
+/// First `std::io::Error` kind found walking the `source()` chain.
+fn io_kind_in_chain(e: &(dyn std::error::Error + 'static)) -> Option<std::io::ErrorKind> {
+    let mut cur = Some(e);
+    while let Some(err) = cur {
+        if let Some(io) = err.downcast_ref::<std::io::Error>() {
+            return Some(io.kind());
+        }
+        cur = err.source();
+    }
+    None
 }
 
 #[cfg(test)]
@@ -414,13 +440,5 @@ mod tests {
                 message: "boom".into()
             }
         );
-    }
-
-    #[test]
-    fn api_error_io_permission_denied() {
-        let e = bollard::errors::Error::IOError {
-            err: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
-        };
-        assert_eq!(api_error_from(e), DockerError::PermissionDenied);
     }
 }

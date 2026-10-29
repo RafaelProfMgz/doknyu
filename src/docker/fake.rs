@@ -161,12 +161,24 @@ impl FakeClient {
 
     /// Records the call and returns the pending injected error, if any.
     fn begin(&self, call: String) -> Result<MutexGuard<'_, State>, DockerError> {
-        let mut st = self.lock();
+        Self::begin_locked(self.lock(), call)
+    }
+
+    /// Like `begin`, for callers that already hold the lock (e.g. to build the
+    /// call name from the canonical id). A connection-level ping error makes
+    /// every operation fail, as with a stopped daemon.
+    fn begin_locked(
+        mut st: MutexGuard<'_, State>,
+        call: String,
+    ) -> Result<MutexGuard<'_, State>, DockerError> {
         st.calls.push(call);
-        match st.next_error.take() {
-            Some(e) => Err(e),
-            None => Ok(st),
+        if let Some(e) = st.next_error.take() {
+            return Err(e);
         }
+        if let Some(e) = st.ping_error.clone().filter(DockerError::is_connection) {
+            return Err(e);
+        }
+        Ok(st)
     }
 
     /// For stream constructors: records the call and returns an error to emit
@@ -178,8 +190,16 @@ impl FakeClient {
             .or_else(|| st.ping_error.clone().filter(DockerError::is_connection))
     }
 
+    /// A connection-level error simulates a stopped daemon: every operation
+    /// fails and open streams end. `None` restores normal behavior.
     pub fn set_ping_error(&self, e: Option<DockerError>) {
-        self.lock().ping_error = e;
+        let mut st = self.lock();
+        if e.as_ref().is_some_and(DockerError::is_connection) {
+            st.log_subs.clear();
+            st.stats_subs.clear();
+            st.event_subs.clear();
+        }
+        st.ping_error = e;
     }
 
     /// The next fallible call returns `e`, then behavior returns to normal.
@@ -219,18 +239,46 @@ impl FakeClient {
         st.stats_subs.remove(&id);
     }
 
-    fn set_state(&self, call: String, id: &str, new: ContainerState) -> Result<(), DockerError> {
-        let mut st = self.begin(call)?;
-        let c = find_container(&mut st, id)?;
-        if c.state != new {
-            c.status_text = match new {
-                ContainerState::Running => "Up less than a second".into(),
-                _ => "Exited (0) just now".into(),
-            };
-            c.state = new;
+    /// start / stop / restart with the events the real daemon emits.
+    fn lifecycle(&self, verb: &str, id: &str) -> Result<(), DockerError> {
+        let mut st = self.begin(format!("{verb}:{id}"))?;
+        let i = container_index(&st, id)?;
+        let cid = st.containers[i].id.clone();
+        let was_active = is_active(&st.containers[i].state);
+        let (actions, new): (&[&str], ContainerState) = match verb {
+            "start" if st.containers[i].state == ContainerState::Running => return Ok(()),
+            "start" => (&["start"], ContainerState::Running),
+            "stop" if !was_active => return Ok(()),
+            "stop" => (&["die", "stop"], ContainerState::Exited { code: 0 }),
+            _ if was_active => (&["die", "start", "restart"], ContainerState::Running),
+            _ => (&["start", "restart"], ContainerState::Running),
+        };
+        let c = &mut st.containers[i];
+        c.status_text = match new {
+            ContainerState::Running => "Up less than a second".into(),
+            _ => "Exited (0) just now".into(),
+        };
+        c.state = new;
+        for action in actions {
+            if *action == "die" {
+                // Followed logs/stats end when the container stops running.
+                st.log_subs.remove(&cid);
+                st.stats_subs.remove(&cid);
+            }
+            emit(&mut st, ResourceKind::Container, action, &cid);
         }
         Ok(())
     }
+}
+
+/// Sends an event to every live subscriber.
+fn emit(st: &mut State, kind: ResourceKind, action: &str, id: &str) {
+    let e = DockerEvent {
+        kind,
+        action: action.into(),
+        id: id.into(),
+    };
+    st.event_subs.retain(|tx| tx.send(e.clone()).is_ok());
 }
 
 /// Resolves an exact id, an exact name, or a unique id prefix (like Docker).
@@ -288,19 +336,25 @@ impl DockerClient for FakeClient {
     }
 
     async fn start(&self, id: &str) -> Result<(), DockerError> {
-        self.set_state(format!("start:{id}"), id, ContainerState::Running)
+        self.lifecycle("start", id)
     }
 
     async fn stop(&self, id: &str) -> Result<(), DockerError> {
-        self.set_state(format!("stop:{id}"), id, ContainerState::Exited { code: 0 })
+        self.lifecycle("stop", id)
     }
 
     async fn restart(&self, id: &str) -> Result<(), DockerError> {
-        self.set_state(format!("restart:{id}"), id, ContainerState::Running)
+        self.lifecycle("restart", id)
     }
 
     async fn remove(&self, id: &str, force: bool) -> Result<(), DockerError> {
-        let mut st = self.begin(format!("remove:{id}"))?;
+        let st = self.lock();
+        let call = format!(
+            "remove:{}{}",
+            canonical_id(&st, id),
+            if force { ":force" } else { "" }
+        );
+        let mut st = Self::begin_locked(st, call)?;
         let c = find_container(&mut st, id)?;
         let (cid, name, active) = (c.id.clone(), c.name.clone(), is_active(&c.state));
         if active && !force {
@@ -318,6 +372,7 @@ impl DockerClient for FakeClient {
         st.log_subs.remove(&cid);
         st.stats_subs.remove(&cid);
         st.log_history.remove(&cid);
+        emit(&mut st, ResourceKind::Container, "destroy", &cid);
         Ok(())
     }
 
@@ -387,18 +442,22 @@ impl DockerClient for FakeClient {
             )));
         }
         st.volumes.retain(|v| v.name != name);
+        emit(&mut st, ResourceKind::Volume, "destroy", name);
         Ok(())
     }
 
     async fn prune_volumes(&self) -> Result<Vec<String>, DockerError> {
         let mut st = self.begin("prune_volumes".into())?;
-        let removed = st
+        let removed: Vec<String> = st
             .volumes
             .iter()
             .filter(|v| v.used_by.is_empty())
             .map(|v| v.name.clone())
             .collect();
         st.volumes.retain(|v| !v.used_by.is_empty());
+        for name in &removed {
+            emit(&mut st, ResourceKind::Volume, "destroy", name);
+        }
         Ok(removed)
     }
 
@@ -446,6 +505,7 @@ impl DockerClient for FakeClient {
             )));
         }
         st.networks.retain(|n| n.info.id != id);
+        emit(&mut st, ResourceKind::Network, "destroy", id);
         Ok(())
     }
 }
@@ -652,5 +712,154 @@ mod tests {
         assert_eq!(s.next().await.unwrap().unwrap().text, "y");
         c.close_streams("web");
         assert!(s.next().await.is_none());
+    }
+
+    async fn drain(
+        s: &mut DockerStream<DockerEvent>,
+        n: usize,
+    ) -> Vec<(ResourceKind, String, String)> {
+        let mut out = vec![];
+        for _ in 0..n {
+            let ev = tokio::time::timeout(std::time::Duration::from_millis(200), s.next())
+                .await
+                .expect("event expected")
+                .unwrap()
+                .unwrap();
+            out.push((ev.kind, ev.action, ev.id));
+        }
+        out
+    }
+
+    async fn assert_quiet(s: &mut DockerStream<DockerEvent>) {
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), s.next())
+                .await
+                .is_err(),
+            "no event expected"
+        );
+    }
+
+    fn ev(kind: ResourceKind, action: &str, id: &str) -> (ResourceKind, String, String) {
+        (kind, action.into(), id.into())
+    }
+
+    #[tokio::test]
+    async fn remove_records_canonical_id_and_force() {
+        let c = FakeClient::with_sample_data();
+        c.remove("worker", false).await.unwrap();
+        c.remove("web", true).await.unwrap();
+        let calls = c.calls();
+        assert!(calls.contains(&"remove:worker-id".to_string()), "{calls:?}");
+        assert!(
+            calls.contains(&"remove:web-id:force".to_string()),
+            "{calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_emits_start_event_only_when_changed() {
+        let c = FakeClient::with_sample_data();
+        let mut e = c.events();
+        c.start("web-id").await.unwrap();
+        assert_quiet(&mut e).await;
+        c.start("worker").await.unwrap();
+        assert_eq!(
+            drain(&mut e, 1).await,
+            vec![ev(ResourceKind::Container, "start", "worker-id")]
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_emits_die_then_stop() {
+        let c = FakeClient::with_sample_data();
+        let mut e = c.events();
+        c.stop("web").await.unwrap();
+        assert_eq!(
+            drain(&mut e, 2).await,
+            vec![
+                ev(ResourceKind::Container, "die", "web-id"),
+                ev(ResourceKind::Container, "stop", "web-id")
+            ]
+        );
+        c.stop("web").await.unwrap();
+        assert_quiet(&mut e).await;
+    }
+
+    #[tokio::test]
+    async fn restart_emits_die_start_restart() {
+        let c = FakeClient::with_sample_data();
+        let mut e = c.events();
+        c.restart("web-id").await.unwrap();
+        let a = |x: &str| ev(ResourceKind::Container, x, "web-id");
+        assert_eq!(
+            drain(&mut e, 3).await,
+            vec![a("die"), a("start"), a("restart")]
+        );
+    }
+
+    #[tokio::test]
+    async fn removals_and_prune_emit_destroy() {
+        let c = FakeClient::with_sample_data();
+        let mut e = c.events();
+        c.remove("worker", false).await.unwrap();
+        c.remove_volume("cache").await.unwrap();
+        let net = c.list_networks().await.unwrap();
+        assert!(net.iter().any(|n| n.name == "app_net"));
+        c.stop("web").await.unwrap();
+        c.stop("db").await.unwrap();
+        c.remove("web", false).await.unwrap();
+        c.remove("db", false).await.unwrap();
+        c.remove_network("app_net-id").await.unwrap();
+        let all = drain(&mut e, 1 + 1 + 4 + 2 + 1).await;
+        assert_eq!(all[0], ev(ResourceKind::Container, "destroy", "worker-id"));
+        assert_eq!(all[1], ev(ResourceKind::Volume, "destroy", "cache"));
+        assert_eq!(all[8], ev(ResourceKind::Network, "destroy", "app_net-id"));
+        let c = FakeClient::with_sample_data();
+        let mut e = c.events();
+        c.prune_volumes().await.unwrap();
+        assert_eq!(
+            drain(&mut e, 1).await,
+            vec![ev(ResourceKind::Volume, "destroy", "cache")]
+        );
+    }
+
+    #[tokio::test]
+    async fn connection_ping_error_simulates_stopped_daemon() {
+        let c = FakeClient::with_sample_data();
+        let mut ev_s = c.events();
+        let mut logs = c.logs("web-id", 0);
+        let mut stats = c.stats("web-id");
+        c.set_ping_error(Some(DockerError::NotRunning));
+        assert_eq!(c.list_containers(true).await, Err(DockerError::NotRunning));
+        assert_eq!(c.start("web-id").await, Err(DockerError::NotRunning));
+        assert_eq!(c.list_volumes().await, Err(DockerError::NotRunning));
+        assert_eq!(c.list_networks().await, Err(DockerError::NotRunning));
+        assert!(ev_s.next().await.is_none());
+        assert!(logs.next().await.is_none());
+        assert!(stats.next().await.is_none());
+        c.set_ping_error(None);
+        assert!(c.list_containers(true).await.is_ok());
+        assert!(c.start("worker-id").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn non_connection_ping_error_only_affects_ping() {
+        let c = FakeClient::with_sample_data();
+        c.set_ping_error(Some(DockerError::Other("x".into())));
+        assert!(c.list_containers(true).await.is_ok());
+        assert!(c.ping().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn stop_ends_logs_and_stats_streams() {
+        let c = FakeClient::with_sample_data();
+        let mut logs = c.logs("web-id", 0);
+        let mut stats = c.stats("web-id");
+        let mut other = c.logs("db-id", 0);
+        c.stop("web-id").await.unwrap();
+        assert!(logs.next().await.is_none());
+        assert!(stats.next().await.is_none());
+        c.push_log("db-id", line("still"));
+        assert_eq!(other.next().await.unwrap().unwrap().text, "still");
     }
 }

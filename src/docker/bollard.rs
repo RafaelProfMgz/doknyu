@@ -10,23 +10,50 @@ use ::bollard::query_parameters::{
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
 
-use super::convert::{self, api_error_from};
+use super::convert::{self, api_error_with_socket};
 use super::{DockerClient, DockerStream};
 use crate::error::DockerError;
 use crate::model::*;
 
-pub struct BollardClient;
+pub struct BollardClient {
+    /// Explicit socket path; `None` follows `DOCKER_HOST` / the default socket.
+    socket: Option<String>,
+}
 
 impl BollardClient {
     pub fn new() -> Self {
-        Self
+        Self { socket: None }
+    }
+
+    /// Client bound to a specific unix socket, ignoring `DOCKER_HOST`.
+    pub fn with_socket(path: impl Into<String>) -> Self {
+        Self {
+            socket: Some(path.into()),
+        }
+    }
+
+    /// Socket path used for classifying connection errors.
+    fn socket_path(&self) -> String {
+        self.socket
+            .clone()
+            .unwrap_or_else(convert::docker_socket_path)
+    }
+
+    /// Error mapper bound to this client's socket.
+    fn err(&self) -> impl Fn(::bollard::errors::Error) -> DockerError + Clone + Send + 'static {
+        let sock = self.socket_path();
+        move |e| api_error_with_socket(e, &sock)
     }
 
     /// Builds a handle to the daemon. Done per call so that a daemon (and its
     /// socket) appearing after startup is picked up, and a missing socket
     /// surfaces as a `DockerError` from the first operation, not from `connect`.
     fn docker(&self) -> Result<Docker, DockerError> {
-        Docker::connect_with_unix_defaults().map_err(api_error_from)
+        match &self.socket {
+            Some(p) => Docker::connect_with_unix(p, 120, ::bollard::API_DEFAULT_VERSION),
+            None => Docker::connect_with_unix_defaults(),
+        }
+        .map_err(self.err())
     }
 
     /// Wraps a stream builder so a connection failure becomes a one-item error stream.
@@ -45,13 +72,24 @@ impl BollardClient {
 
 /// Docker answers 304 when the container is already in the requested state;
 /// treat that as success so start/stop are idempotent.
-fn ignore_not_modified(r: Result<(), ::bollard::errors::Error>) -> Result<(), DockerError> {
+fn ignore_not_modified(
+    r: Result<(), ::bollard::errors::Error>,
+    err: impl Fn(::bollard::errors::Error) -> DockerError,
+) -> Result<(), DockerError> {
     match r {
         Err(::bollard::errors::Error::DockerResponseServerError {
             status_code: 304, ..
         }) => Ok(()),
-        other => other.map_err(api_error_from),
+        other => other.map_err(err),
     }
+}
+
+/// API >= 1.42 prunes only anonymous volumes unless `all=true` is given.
+fn prune_volumes_options() -> ::bollard::query_parameters::PruneVolumesOptions {
+    let filters = HashMap::from([("all".to_string(), vec!["true".to_string()])]);
+    ::bollard::query_parameters::PruneVolumesOptionsBuilder::new()
+        .filters(&filters)
+        .build()
 }
 
 impl Default for BollardClient {
@@ -63,7 +101,7 @@ impl Default for BollardClient {
 #[async_trait]
 impl DockerClient for BollardClient {
     async fn ping(&self) -> Result<(), DockerError> {
-        self.docker()?.ping().await.map_err(api_error_from)?;
+        self.docker()?.ping().await.map_err(self.err())?;
         Ok(())
     }
 
@@ -73,21 +111,24 @@ impl DockerClient for BollardClient {
             .docker()?
             .list_containers(Some(opts))
             .await
-            .map_err(api_error_from)?;
+            .map_err(self.err())?;
         Ok(list.iter().map(convert::container_from_summary).collect())
     }
 
     async fn start(&self, id: &str) -> Result<(), DockerError> {
-        ignore_not_modified(self.docker()?.start_container(id, None).await)
+        ignore_not_modified(self.docker()?.start_container(id, None).await, self.err())
     }
 
     async fn stop(&self, id: &str) -> Result<(), DockerError> {
         let opts = StopContainerOptionsBuilder::new().t(10).build();
-        ignore_not_modified(self.docker()?.stop_container(id, Some(opts)).await)
+        ignore_not_modified(
+            self.docker()?.stop_container(id, Some(opts)).await,
+            self.err(),
+        )
     }
 
     async fn restart(&self, id: &str) -> Result<(), DockerError> {
-        ignore_not_modified(self.docker()?.restart_container(id, None).await)
+        ignore_not_modified(self.docker()?.restart_container(id, None).await, self.err())
     }
 
     async fn remove(&self, id: &str, force: bool) -> Result<(), DockerError> {
@@ -95,11 +136,12 @@ impl DockerClient for BollardClient {
         self.docker()?
             .remove_container(id, Some(opts))
             .await
-            .map_err(api_error_from)
+            .map_err(self.err())
     }
 
     fn logs(&self, id: &str, tail: usize) -> DockerStream<LogLine> {
         let id = id.to_string();
+        let err = self.err();
         self.stream_of(move |d| {
             let opts = LogsOptionsBuilder::new()
                 .follow(true)
@@ -108,36 +150,35 @@ impl DockerClient for BollardClient {
                 .timestamps(true)
                 .tail(&tail.to_string())
                 .build();
-            d.logs(&id, Some(opts)).map(|r| {
-                r.map(|o| convert::log_line_from(o, true))
-                    .map_err(api_error_from)
-            })
+            d.logs(&id, Some(opts))
+                .map(move |r| r.map(|o| convert::log_line_from(o, true)).map_err(&err))
         })
     }
 
     fn stats(&self, id: &str) -> DockerStream<RawStats> {
         let id = id.to_string();
+        let err = self.err();
         self.stream_of(move |d| {
             let opts = StatsOptionsBuilder::new().stream(true).build();
-            d.stats(&id, Some(opts)).map(|r| {
-                r.map(|s| convert::raw_stats_from(&s))
-                    .map_err(api_error_from)
-            })
+            d.stats(&id, Some(opts))
+                .map(move |r| r.map(|s| convert::raw_stats_from(&s)).map_err(&err))
         })
     }
 
     fn events(&self) -> DockerStream<DockerEvent> {
-        self.stream_of(|d| {
+        let err = self.err();
+        self.stream_of(move |d| {
             let filters: HashMap<String, Vec<String>> = HashMap::from([(
                 "type".to_string(),
                 vec!["container".into(), "volume".into(), "network".into()],
             )]);
             let opts = EventsOptionsBuilder::new().filters(&filters).build();
-            d.events(Some(opts)).filter_map(|r| async move {
-                match r {
+            d.events(Some(opts)).filter_map(move |r| {
+                let item = match r {
                     Ok(m) => convert::event_from(&m).map(Ok),
-                    Err(e) => Some(Err(api_error_from(e))),
-                }
+                    Err(e) => Some(Err(err(e))),
+                };
+                async move { item }
             })
         })
     }
@@ -147,7 +188,7 @@ impl DockerClient for BollardClient {
         let volumes = docker
             .list_volumes(None::<::bollard::query_parameters::ListVolumesOptions>)
             .await
-            .map_err(api_error_from)?
+            .map_err(self.err())?
             .volumes
             .unwrap_or_default();
         let containers = self.list_containers_raw(&docker).await?;
@@ -176,15 +217,15 @@ impl DockerClient for BollardClient {
                 None::<::bollard::query_parameters::RemoveVolumeOptions>,
             )
             .await
-            .map_err(api_error_from)
+            .map_err(self.err())
     }
 
     async fn prune_volumes(&self) -> Result<Vec<String>, DockerError> {
         let resp = self
             .docker()?
-            .prune_volumes(None::<::bollard::query_parameters::PruneVolumesOptions>)
+            .prune_volumes(Some(prune_volumes_options()))
             .await
-            .map_err(api_error_from)?;
+            .map_err(self.err())?;
         Ok(resp.volumes_deleted.unwrap_or_default())
     }
 
@@ -194,7 +235,7 @@ impl DockerClient for BollardClient {
     /// only running/paused/restarting containers count as connected.
     async fn list_networks(&self) -> Result<Vec<NetworkInfo>, DockerError> {
         let docker = self.docker()?;
-        let networks = docker.list_networks(None).await.map_err(api_error_from)?;
+        let networks = docker.list_networks(None).await.map_err(self.err())?;
         let containers = self.list_containers_raw(&docker).await?;
         Ok(networks
             .iter()
@@ -230,10 +271,7 @@ impl DockerClient for BollardClient {
     }
 
     async fn remove_network(&self, id: &str) -> Result<(), DockerError> {
-        self.docker()?
-            .remove_network(id)
-            .await
-            .map_err(api_error_from)
+        self.docker()?.remove_network(id).await.map_err(self.err())
     }
 }
 
@@ -243,9 +281,18 @@ impl BollardClient {
         docker: &Docker,
     ) -> Result<Vec<::bollard::models::ContainerSummary>, DockerError> {
         let opts = ListContainersOptionsBuilder::new().all(true).build();
-        docker
-            .list_containers(Some(opts))
-            .await
-            .map_err(api_error_from)
+        docker.list_containers(Some(opts)).await.map_err(self.err())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prune_volumes_options_include_all_filter() {
+        let opts = prune_volumes_options();
+        let filters = opts.filters.expect("filters set");
+        assert_eq!(filters.get("all"), Some(&vec!["true".to_string()]));
     }
 }

@@ -6,7 +6,7 @@ use std::time::Duration;
 use bollard::Docker;
 use bollard::models::{ContainerCreateBody, HostConfig, VolumeCreateRequest};
 use bollard::query_parameters::{CreateContainerOptionsBuilder, CreateImageOptionsBuilder};
-use doknyu::docker::connect;
+use doknyu::docker::{BollardClient, DockerClient, connect};
 use doknyu::error::DockerError;
 use doknyu::model::{ContainerState, ResourceKind};
 use futures::StreamExt;
@@ -20,7 +20,9 @@ fn unique(kind: &str) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .subsec_nanos();
-    format!("doknyu-it-{kind}-{id:x}{nanos:x}")
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("doknyu-it-{kind}-{id:x}{nanos:x}{seq}")
 }
 
 /// Removes the named container and volume on drop, even if the test panics.
@@ -227,4 +229,66 @@ async fn start_running_is_ok() {
     client.start(&name).await.unwrap();
     client.stop(&name).await.unwrap();
     client.stop(&name).await.unwrap();
+}
+
+/// Temporary directory removed on drop (sockets live inside it).
+struct TmpDir(std::path::PathBuf);
+
+impl TmpDir {
+    fn new() -> Self {
+        let dir = std::env::temp_dir().join(unique("sock"));
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+
+    fn sock(&self) -> String {
+        self.0.join("docker.sock").to_string_lossy().into_owned()
+    }
+}
+
+impl Drop for TmpDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn missing_socket_is_not_running_or_not_installed() {
+    let tmp = TmpDir::new();
+    let client = BollardClient::with_socket(tmp.sock());
+    let cli = std::env::var_os("PATH")
+        .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("docker").is_file()));
+    let expected = if cli {
+        DockerError::NotRunning
+    } else {
+        DockerError::NotInstalled
+    };
+    assert_eq!(client.ping().await, Err(expected));
+}
+
+#[tokio::test]
+#[ignore]
+async fn orphan_socket_file_is_not_running() {
+    let tmp = TmpDir::new();
+    let path = tmp.sock();
+    // Bind then drop: the socket file stays behind with nobody listening.
+    drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+    assert!(std::path::Path::new(&path).exists());
+    let client = BollardClient::with_socket(path);
+    assert_eq!(client.ping().await, Err(DockerError::NotRunning));
+    let mut events = client.events();
+    assert_eq!(events.next().await, Some(Err(DockerError::NotRunning)));
+}
+
+#[tokio::test]
+#[ignore]
+async fn unreadable_socket_is_permission_denied() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TmpDir::new();
+    let path = tmp.sock();
+    let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let client = BollardClient::with_socket(path);
+    assert_eq!(client.ping().await, Err(DockerError::PermissionDenied));
 }
