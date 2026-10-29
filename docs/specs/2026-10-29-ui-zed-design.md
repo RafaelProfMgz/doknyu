@@ -65,7 +65,7 @@ Fase 3.
 - Cor forte só para estado (bolinha), foco/seleção (`accent`) e links.
 - Fontes: IBM Plex Sans (Regular, Medium, SemiBold) para a UI e IBM Plex Mono para IDs,
   imagens, portas e logs. Ícones: fonte Lucide. Licenças (OFL e ISC) ficam em
-  `assets/fonts/LICENSES.md`. Peso total embutido ≈ 700 KB.
+  `assets/fonts/LICENSES.md`. Peso total embutido ≈ 1,7 MB (o `lucide.ttf` completo tem ~970 KB; subset é opcional).
 
 ### Componentes (`src/ui/components/`)
 Cada um é uma função pura que devolve `Element`; nenhum guarda estado.
