@@ -1,80 +1,112 @@
 //! Screens shown while Docker cannot be reached (not installed, stopped, no permission).
 
 use iced::widget::{button, column, container, row, text};
-use iced::{Alignment, Element, Length};
+use iced::{Alignment, Element, Length, Padding};
 use rust_i18n::t;
 
 use crate::app::Message;
 use crate::error::DockerError;
+use crate::ui::fonts::{MONO, SANS_SEMIBOLD};
+use crate::ui::style;
+use crate::ui::tokens::{CARD_MAX_WIDTH, SPACE_2, SPACE_3, SPACE_6, TEXT, TEXT_LG, TEXT_SM};
 use crate::views::widgets::friendly_error;
 
 pub const INSTALL_URL: &str = "https://docs.docker.com/engine/install/";
 pub const START_COMMAND: &str = "sudo systemctl start docker";
 pub const GROUP_COMMAND: &str = "sudo usermod -aG docker $USER";
 
+fn title<'a>(key: String) -> Element<'a, Message> {
+    text(key).size(TEXT_LG).font(SANS_SEMIBOLD).into()
+}
+
+fn body<'a>(content: String) -> Element<'a, Message> {
+    text(content).size(TEXT).into()
+}
+
+/// A button with the label sized like the rest of the card.
+fn action<'a>(
+    label: String,
+    on_press: Message,
+    look: fn(&iced::Theme, button::Status) -> button::Style,
+) -> Element<'a, Message> {
+    button(text(label).size(TEXT))
+        .padding(Padding::from([SPACE_2, SPACE_3]))
+        .style(look)
+        .on_press(on_press)
+        .into()
+}
+
 /// A shell command in a monospace box with a "Copy" button.
 fn command_block(command: &'static str) -> Element<'static, Message> {
-    container(
-        row![
-            container(text(command).font(iced::Font::MONOSPACE))
-                .padding(8)
-                .width(Length::Fill)
-                .style(container::bordered_box),
-            button(text(t!("onboarding.copy").into_owned()))
-                .style(button::secondary)
-                .on_press(Message::Copy(command.to_owned())),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center),
-    )
-    .max_width(560)
+    row![
+        container(text(command).size(TEXT).font(MONO))
+            .padding(SPACE_2)
+            .width(Length::Fill)
+            .style(style::container::bordered),
+        action(
+            t!("onboarding.copy").into_owned(),
+            Message::Copy(command.to_owned()),
+            style::button::ghost,
+        ),
+    ]
+    .spacing(SPACE_2)
+    .align_y(Alignment::Center)
     .into()
 }
 
-/// Explains the connection problem and how to fix it.
+/// Explains the connection problem and how to fix it, on a card in the middle of the area.
 pub fn view(err: &DockerError) -> Element<'_, Message> {
-    let mut body = column![].spacing(12).max_width(560);
+    let mut card = column![].spacing(SPACE_3);
     match err {
         DockerError::NotInstalled => {
-            body = body
-                .push(text(t!("onboarding.not_installed.title").into_owned()).size(24))
-                .push(text(t!("onboarding.not_installed.body").into_owned()))
-                .push(
-                    button(text(t!("onboarding.not_installed.button").into_owned()))
-                        .on_press(Message::OpenUrl(INSTALL_URL.to_owned())),
-                );
+            card = card
+                .push(title(t!("onboarding.not_installed.title").into_owned()))
+                .push(body(t!("onboarding.not_installed.body").into_owned()))
+                .push(action(
+                    t!("onboarding.not_installed.button").into_owned(),
+                    Message::OpenUrl(INSTALL_URL.to_owned()),
+                    style::button::ghost,
+                ));
         }
         DockerError::NotRunning => {
-            body = body
-                .push(text(t!("onboarding.not_running.title").into_owned()).size(24))
-                .push(text(t!("onboarding.not_running.body").into_owned()))
+            card = card
+                .push(title(t!("onboarding.not_running.title").into_owned()))
+                .push(body(t!("onboarding.not_running.body").into_owned()))
                 .push(command_block(START_COMMAND));
         }
         DockerError::PermissionDenied => {
-            body = body
-                .push(text(t!("onboarding.permission.title").into_owned()).size(24))
-                .push(text(t!("onboarding.permission.body").into_owned()))
+            card = card
+                .push(title(t!("onboarding.permission.title").into_owned()))
+                .push(body(t!("onboarding.permission.body").into_owned()))
                 .push(command_block(GROUP_COMMAND))
-                .push(text(t!("onboarding.permission.warning").into_owned()));
+                .push(body(t!("onboarding.permission.warning").into_owned()));
         }
         other => {
-            body = body
-                .push(text(t!("onboarding.other.title").into_owned()).size(24))
-                .push(text(friendly_error(other)));
+            card = card
+                .push(title(t!("onboarding.other.title").into_owned()))
+                .push(body(friendly_error(other)));
         }
     }
-    body = body
-        .push(
-            button(text(t!("onboarding.retry").into_owned()))
-                .style(button::primary)
-                .on_press(Message::Retry),
-        )
+    card = card
+        .push(action(
+            t!("onboarding.retry").into_owned(),
+            Message::Retry,
+            style::button::primary,
+        ))
         .push(
             text(t!("onboarding.auto_retry").into_owned())
-                .size(12)
-                .style(text::secondary),
+                .size(TEXT_SM)
+                .style(style::text::faint),
         );
-    container(body).center(Length::Fill).padding(24).into()
+    container(
+        container(card)
+            .padding(SPACE_6)
+            .max_width(CARD_MAX_WIDTH)
+            .style(style::container::elevated),
+    )
+    .center(Length::Fill)
+    .padding(SPACE_6)
+    .into()
 }
 
 #[cfg(test)]

@@ -1,14 +1,14 @@
 //! Pieces tied to the app messages: toast stack, state names and friendly error texts.
 
 use iced::widget::{column, container};
-use iced::{Element, Length};
+use iced::{Element, Length, Padding};
 use rust_i18n::t;
 
 use crate::app::{Message, Toast};
 use crate::error::DockerError;
 use crate::model::ContainerState;
 use crate::ui::components::toast;
-use crate::ui::tokens::{SPACE_2, SPACE_4};
+use crate::ui::tokens::{SPACE_2, SPACE_4, STATUS_BAR_HEIGHT};
 
 /// Plain-language text for an error; the technical details go in `Toast::details`.
 pub fn friendly_error(e: &DockerError) -> String {
@@ -37,7 +37,7 @@ pub fn state_label(state: &ContainerState) -> String {
     .into_owned()
 }
 
-/// Toasts stacked in the bottom-right corner; each one can be dismissed.
+/// Toasts stacked in the bottom-right corner, above the status bar; each one can be dismissed.
 pub fn toast_stack(toasts: &[Toast]) -> Element<'_, Message> {
     let items = toasts.iter().enumerate().map(|(i, t)| {
         toast(
@@ -49,7 +49,10 @@ pub fn toast_stack(toasts: &[Toast]) -> Element<'_, Message> {
         )
     });
     container(column(items).spacing(SPACE_2))
-        .padding(SPACE_4)
+        .padding(Padding {
+            bottom: SPACE_4 + STATUS_BAR_HEIGHT,
+            ..Padding::from(SPACE_4)
+        })
         .align_right(Length::Fill)
         .align_bottom(Length::Fill)
         .into()

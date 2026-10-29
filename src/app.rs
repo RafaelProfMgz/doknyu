@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::{Stream, StreamExt};
-use iced::widget::{center, column, container, row, stack, text};
+use iced::widget::{center, column, container, pane_grid, row, rule, stack, text};
 use iced::{Element, Length, Subscription, Task, Theme};
 use rust_i18n::t;
 
@@ -11,18 +11,56 @@ use crate::docker::DockerClient;
 use crate::error::DockerError;
 use crate::model::{ContainerInfo, DockerEvent, ResourceKind};
 use crate::ui::components::ToastKind;
+use crate::ui::fonts::SANS_SEMIBOLD;
+use crate::ui::style;
 use crate::ui::theme::{ThemeMode, resolve};
+use crate::ui::tokens::{BORDER_WIDTH, SPACE_1, SPACE_2, SPACE_6, TEXT_LG};
 use crate::views::containers::{self, ContainersState};
-use crate::views::onboarding;
-use crate::views::sidebar;
 use crate::views::widgets::{friendly_error, toast_stack};
+use crate::views::{dock, onboarding, sidebar, status_bar};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Screen {
     Containers,
     Volumes,
     Networks,
-    Detail(String),
+}
+
+/// Tabs of the bottom dock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DockTab {
+    Logs,
+    Stats,
+    Terminal,
+}
+
+/// The bottom dock: which container it shows and how.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dock {
+    pub container_id: String,
+    pub tab: DockTab,
+    /// The dock takes the whole main area.
+    pub maximized: bool,
+}
+
+/// The two areas of the main column, divided by the draggable split.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pane {
+    List,
+    Dock,
+}
+
+/// Share of the main column the list takes while the dock is open (list above, dock below).
+const DOCK_SPLIT_RATIO: f32 = 0.6;
+
+/// The list above and the dock below; the dock is only drawn while `App::dock` is set.
+fn initial_panes() -> pane_grid::State<Pane> {
+    pane_grid::State::with_configuration(pane_grid::Configuration::Split {
+        axis: pane_grid::Axis::Horizontal,
+        ratio: DOCK_SPLIT_RATIO,
+        a: Box::new(pane_grid::Configuration::Pane(Pane::List)),
+        b: Box::new(pane_grid::Configuration::Pane(Pane::Dock)),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -62,6 +100,16 @@ pub enum Message {
     ReloadContainers,
     /// The system theme (light/dark) was read or changed.
     SystemTheme(iced::theme::Mode),
+    ToggleSidebar,
+    /// Shows a container in the dock, on the Logs tab.
+    OpenDock(String),
+    CloseDock,
+    /// Closes the dock if it is open. Opening it needs a selection (task 2.5.4).
+    ToggleDock,
+    DockTab(DockTab),
+    ToggleMaximize,
+    /// The user dragged the divider between the list and the dock.
+    PaneResized(pane_grid::ResizeEvent),
 }
 
 pub struct App {
@@ -73,6 +121,10 @@ pub struct App {
     pub theme_mode: ThemeMode,
     /// Last theme reported by the system; `Mode::None` until it answers or has no preference.
     pub system_mode: iced::theme::Mode,
+    pub sidebar_collapsed: bool,
+    pub dock: Option<Dock>,
+    /// Keeps the position of the divider between list and dock, also while the dock is closed.
+    panes: pane_grid::State<Pane>,
     /// A ping is in flight; further `Retry` messages are ignored until it resolves.
     pinging: bool,
     /// Bumped on every successful ping so each (re)connection gets a fresh events subscription.
@@ -159,6 +211,9 @@ impl App {
             toasts: Vec::new(),
             theme_mode: ThemeMode::default(),
             system_mode: iced::theme::Mode::None,
+            sidebar_collapsed: false,
+            dock: None,
+            panes: initial_panes(),
             pinging: false,
             events_generation: 0,
             reload_scheduled: false,
@@ -247,6 +302,45 @@ impl App {
                 self.system_mode = mode;
                 Task::none()
             }
+            Message::ToggleSidebar => {
+                self.sidebar_collapsed = !self.sidebar_collapsed;
+                Task::none()
+            }
+            Message::OpenDock(id) => {
+                // Opening what is already shown keeps its tab and size.
+                if self.dock.as_ref().is_none_or(|d| d.container_id != id) {
+                    self.dock = Some(Dock {
+                        container_id: id,
+                        tab: DockTab::Logs,
+                        maximized: false,
+                    });
+                }
+                Task::none()
+            }
+            Message::CloseDock => {
+                self.dock = None;
+                Task::none()
+            }
+            Message::ToggleDock => {
+                self.dock = None;
+                Task::none()
+            }
+            Message::DockTab(tab) => {
+                if let Some(dock) = &mut self.dock {
+                    dock.tab = tab;
+                }
+                Task::none()
+            }
+            Message::ToggleMaximize => {
+                if let Some(dock) = &mut self.dock {
+                    dock.maximized = !dock.maximized;
+                }
+                Task::none()
+            }
+            Message::PaneResized(event) => {
+                self.panes.resize(event.split, event.ratio);
+                Task::none()
+            }
         }
     }
 
@@ -257,6 +351,16 @@ impl App {
             Msg::Loaded(seq, _) if seq != self.load_seq => Task::none(),
             Msg::Loaded(_, Ok(items)) => {
                 self.containers.items = items;
+                // The container is gone (removed here or elsewhere): close the dock quietly.
+                if let Some(dock) = &self.dock
+                    && !self
+                        .containers
+                        .items
+                        .iter()
+                        .any(|c| c.id == dock.container_id)
+                {
+                    self.dock = None;
+                }
                 Task::none()
             }
             Msg::Loaded(_, Err(e)) => self.fail(e),
@@ -294,7 +398,7 @@ impl App {
             Msg::OpenPort(port) => {
                 self.update(Message::OpenUrl(format!("http://localhost:{port}")))
             }
-            Msg::Open(id) => self.update(Message::Navigate(Screen::Detail(id))),
+            Msg::Open(id) => self.update(Message::OpenDock(id)),
         }
     }
 
@@ -329,6 +433,7 @@ impl App {
     fn set_failed(&mut self, e: DockerError) {
         self.conn = Connection::Failed(e);
         self.containers.confirm_remove = None;
+        self.dock = None;
     }
 
     /// Connection problems send the user to the onboarding; anything else becomes a toast.
@@ -378,11 +483,26 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
-        let body: Element<'_, Message> = match &self.conn {
+        let main: Element<'_, Message> = match &self.conn {
             Connection::Checking => center(text(t!("connection.checking").into_owned())).into(),
             Connection::Failed(e) => onboarding::view(e),
-            Connection::Ok => row![sidebar::view(&self.screen), self.main_area()].into(),
+            Connection::Ok => self.workspace(),
         };
+        let count = (self.conn == Connection::Ok).then_some(self.containers.items.len());
+        let body = column![
+            row![
+                sidebar::view(&self.screen, self.sidebar_collapsed, count),
+                container(main).width(Length::Fill).height(Length::Fill),
+            ]
+            .height(Length::Fill),
+            rule::horizontal(BORDER_WIDTH).style(style::rule_border),
+            status_bar::view(&self.conn, &self.containers.items),
+        ];
+        let body: Element<'_, Message> = container(body)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(style::container::bg)
+            .into();
         if self.toasts.is_empty() {
             body
         } else {
@@ -390,24 +510,51 @@ impl App {
         }
     }
 
-    fn main_area(&self) -> Element<'_, Message> {
-        if self.screen == Screen::Containers {
-            return containers::view(&self.containers);
+    /// The screen, with the dock below it while one is open: alone when maximized, otherwise
+    /// side by side with the screen in the pane grid.
+    fn workspace(&self) -> Element<'_, Message> {
+        let Some(open) = &self.dock else {
+            return self.screen_content();
+        };
+        let dock_view = || dock::view(open, self.container_name(&open.container_id));
+        if open.maximized {
+            return dock_view();
         }
+        pane_grid::PaneGrid::new(&self.panes, |_, pane, _| {
+            pane_grid::Content::new(match pane {
+                Pane::List => self.screen_content(),
+                Pane::Dock => dock_view(),
+            })
+        })
+        .spacing(BORDER_WIDTH)
+        .on_resize(SPACE_1, Message::PaneResized)
+        .style(dock::grid_style)
+        .into()
+    }
+
+    /// Name of a container, if it is in the list.
+    fn container_name(&self, id: &str) -> Option<&str> {
+        self.containers
+            .items
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| c.name.as_str())
+    }
+
+    fn screen_content(&self) -> Element<'_, Message> {
         let title = match &self.screen {
-            Screen::Containers => t!("sidebar.containers"),
+            Screen::Containers => return containers::view(&self.containers),
             Screen::Volumes => t!("sidebar.volumes"),
             Screen::Networks => t!("sidebar.networks"),
-            Screen::Detail(_) => t!("detail.title"),
         };
         container(
             column![
-                text(title.into_owned()).size(24),
-                text(t!("common.coming_soon").into_owned()),
+                text(title.into_owned()).size(TEXT_LG).font(SANS_SEMIBOLD),
+                text(t!("common.coming_soon").into_owned()).style(style::text::muted),
             ]
-            .spacing(8),
+            .spacing(SPACE_2),
         )
-        .padding(24)
+        .padding(SPACE_6)
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
@@ -532,8 +679,8 @@ mod tests {
         assert_eq!(app.screen, Screen::Containers);
         let _ = app.update(Message::Navigate(Screen::Volumes));
         assert_eq!(app.screen, Screen::Volumes);
-        let _ = app.update(Message::Navigate(Screen::Detail("web-id".into())));
-        assert_eq!(app.screen, Screen::Detail("web-id".into()));
+        let _ = app.update(Message::Navigate(Screen::Networks));
+        assert_eq!(app.screen, Screen::Networks);
     }
 
     #[test]
@@ -995,14 +1142,6 @@ mod tests {
         assert!(!app.containers.show_stopped);
     }
 
-    #[test]
-    fn open_navigates_to_the_detail() {
-        let fake = Arc::new(FakeClient::new());
-        let mut app = app_with(&fake);
-        let _ = app.update(Message::Containers(containers::Msg::Open("web-id".into())));
-        assert_eq!(app.screen, Screen::Detail("web-id".into()));
-    }
-
     #[tokio::test]
     async fn empty_list_shows_empty_state() {
         let fake = Arc::new(FakeClient::new());
@@ -1437,6 +1576,242 @@ mod tests {
         assert!(app.containers.confirm_remove.is_none());
     }
 
+    fn web_dock() -> Dock {
+        Dock {
+            container_id: "web-id".into(),
+            tab: DockTab::Logs,
+            maximized: false,
+        }
+    }
+
+    #[test]
+    fn open_dock_from_containers_msg() {
+        let fake = Arc::new(FakeClient::new());
+        let mut app = app_with(&fake);
+        assert_eq!(app.dock, None);
+        let _ = app.update(Message::Containers(containers::Msg::Open("web-id".into())));
+        assert_eq!(app.dock, Some(web_dock()));
+        // Opening another container replaces the dock and starts on Logs, not maximized.
+        let _ = app.update(Message::DockTab(DockTab::Stats));
+        let _ = app.update(Message::ToggleMaximize);
+        let _ = app.update(Message::OpenDock("db-id".into()));
+        assert_eq!(
+            app.dock,
+            Some(Dock {
+                container_id: "db-id".into(),
+                ..web_dock()
+            })
+        );
+    }
+
+    #[test]
+    fn reopening_the_same_container_keeps_the_dock_as_it_is() {
+        let fake = Arc::new(FakeClient::new());
+        let mut app = app_with(&fake);
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        let _ = app.update(Message::DockTab(DockTab::Stats));
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        assert_eq!(app.dock.map(|d| d.tab), Some(DockTab::Stats));
+    }
+
+    #[test]
+    fn close_and_toggle_dock() {
+        let fake = Arc::new(FakeClient::new());
+        let mut app = app_with(&fake);
+        let _ = app.update(Message::OpenDock("web-id".into()));
+
+        let _ = app.update(Message::DockTab(DockTab::Stats));
+        assert_eq!(app.dock.as_ref().map(|d| d.tab), Some(DockTab::Stats));
+        let _ = app.update(Message::ToggleMaximize);
+        assert_eq!(app.dock.as_ref().map(|d| d.maximized), Some(true));
+        let _ = app.update(Message::ToggleMaximize);
+        assert_eq!(app.dock.as_ref().map(|d| d.maximized), Some(false));
+
+        let _ = app.update(Message::ToggleDock);
+        assert_eq!(app.dock, None);
+        // Without a dock there is nothing to toggle yet (selection comes with task 2.5.4).
+        let _ = app.update(Message::ToggleDock);
+        assert_eq!(app.dock, None);
+
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        let _ = app.update(Message::CloseDock);
+        assert_eq!(app.dock, None);
+        // Nothing to act on: no panic, no dock.
+        let _ = app.update(Message::CloseDock);
+        let _ = app.update(Message::ToggleMaximize);
+        let _ = app.update(Message::DockTab(DockTab::Terminal));
+        assert_eq!(app.dock, None);
+    }
+
+    #[tokio::test]
+    async fn dock_stays_open_while_its_container_exists() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        settle(&mut app, Message::ReloadContainers).await;
+        assert_eq!(app.dock, Some(web_dock()));
+    }
+
+    #[tokio::test]
+    async fn dock_closes_when_container_disappears() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        let _ = app.update(Message::ToggleMaximize);
+        fake.remove("web-id", true).await.unwrap();
+        settle(&mut app, Message::ReloadContainers).await;
+        assert!(!app.containers.items.iter().any(|c| c.id == "web-id"));
+        assert_eq!(app.dock, None);
+        assert!(app.toasts.is_empty());
+        assert_eq!(app.conn, Connection::Ok);
+        let _ = app.view();
+    }
+
+    #[tokio::test]
+    async fn dock_closes_when_the_app_removes_its_container() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("worker-id".into()));
+        let _ = app.update(Message::Containers(containers::Msg::AskRemove(
+            "worker-id".into(),
+        )));
+        settle(
+            &mut app,
+            Message::Containers(containers::Msg::ConfirmRemove { force: false }),
+        )
+        .await;
+        // The `destroy` event the daemon sends leads to the reload.
+        settle(&mut app, Message::ReloadContainers).await;
+        assert_eq!(app.dock, None);
+        assert!(app.toasts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn connection_loss_closes_dock() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        let _ = app.update(Message::Pinged(Err(DockerError::NotRunning)));
+        assert_eq!(app.conn, Connection::Failed(DockerError::NotRunning));
+        assert_eq!(app.dock, None);
+
+        // The same through a failed reload, and after coming back the dock stays closed.
+        app.conn = Connection::Ok;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        let seq = app.load_seq;
+        let _ = app.update(Message::Containers(containers::Msg::Loaded(
+            seq,
+            Err(DockerError::NotRunning),
+        )));
+        assert_eq!(app.dock, None);
+        settle(&mut app, Message::Pinged(Ok(()))).await;
+        assert_eq!(app.conn, Connection::Ok);
+        assert_eq!(app.dock, None);
+    }
+
+    #[test]
+    fn toggle_sidebar() {
+        let fake = Arc::new(FakeClient::new());
+        let mut app = app_with(&fake);
+        let before = app.sidebar_collapsed;
+        let _ = app.update(Message::ToggleSidebar);
+        assert_ne!(app.sidebar_collapsed, before);
+        let _ = app.update(Message::ToggleSidebar);
+        assert_eq!(app.sidebar_collapsed, before);
+    }
+
+    /// Ratio of the only split of the pane grid.
+    fn split_of(app: &App) -> (pane_grid::Split, f32) {
+        match app.panes.layout() {
+            pane_grid::Node::Split { id, ratio, .. } => (*id, *ratio),
+            pane_grid::Node::Pane(_) => panic!("the panes are not split"),
+        }
+    }
+
+    #[test]
+    fn dock_starts_at_sixty_percent_and_resizing_is_kept() {
+        let fake = Arc::new(FakeClient::new());
+        let mut app = app_with(&fake);
+        let (split, ratio) = split_of(&app);
+        assert_eq!(ratio, DOCK_SPLIT_RATIO);
+        assert_eq!(ratio, 0.6);
+        let _ = app.update(Message::PaneResized(pane_grid::ResizeEvent {
+            split,
+            ratio: 0.3,
+        }));
+        assert_eq!(split_of(&app).1, 0.3);
+        // Closing and reopening the dock keeps the divider where the user left it.
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        let _ = app.update(Message::CloseDock);
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        assert_eq!(split_of(&app).1, 0.3);
+    }
+
+    #[test]
+    fn view_builds_for_every_layout() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = app_with(&fake);
+        app.containers.items = futures::executor::block_on(fake.list_containers(true)).unwrap();
+        app.push_toast("a".into(), Some("detail".into()));
+        for conn in [
+            Connection::Checking,
+            Connection::Ok,
+            Connection::Failed(DockerError::NotRunning),
+        ] {
+            app.conn = conn;
+            for collapsed in [false, true] {
+                app.sidebar_collapsed = collapsed;
+                for dock in [
+                    None,
+                    Some(web_dock()),
+                    Some(Dock {
+                        maximized: true,
+                        ..web_dock()
+                    }),
+                    // A dock whose container is unknown must not panic either.
+                    Some(Dock {
+                        container_id: "gone-id".into(),
+                        tab: DockTab::Terminal,
+                        maximized: false,
+                    }),
+                ] {
+                    app.dock = dock;
+                    for screen in [Screen::Containers, Screen::Volumes, Screen::Networks] {
+                        app.screen = screen;
+                        let _ = app.view();
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dock_and_status_texts_are_translated() {
+        for key in [
+            "status.connected",
+            "status.checking",
+            "status.counts",
+            "status.toggle_sidebar",
+            "status.toggle_dock",
+            "status.palette",
+            "dock.empty_tab",
+            "dock.tab.logs",
+            "dock.tab.stats",
+            "dock.tab.terminal",
+            "dock.maximize",
+            "dock.restore",
+            "dock.close",
+        ] {
+            for locale in ["en", "pt-BR"] {
+                assert_ne!(
+                    t!(key, locale = locale, running = 1, stopped = 2),
+                    key,
+                    "missing {locale} translation for {key}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn view_builds_for_every_screen_and_connection_state() {
         let fake = Arc::new(FakeClient::new());
@@ -1448,12 +1823,7 @@ mod tests {
             Connection::Ok,
         ] {
             app.conn = conn;
-            for screen in [
-                Screen::Containers,
-                Screen::Volumes,
-                Screen::Networks,
-                Screen::Detail("web-id".into()),
-            ] {
+            for screen in [Screen::Containers, Screen::Volumes, Screen::Networks] {
                 app.screen = screen;
                 let _ = app.view();
             }
