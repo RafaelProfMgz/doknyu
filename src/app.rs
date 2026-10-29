@@ -10,7 +10,7 @@ use rust_i18n::t;
 use crate::docker::DockerClient;
 use crate::error::DockerError;
 use crate::model::{ContainerInfo, DockerEvent, ResourceKind};
-use crate::ui::components::ToastKind;
+use crate::ui::components::{ToastKind, modal};
 use crate::ui::fonts::SANS_SEMIBOLD;
 use crate::ui::style;
 use crate::ui::theme::{ThemeMode, resolve};
@@ -104,7 +104,7 @@ pub enum Message {
     /// Shows a container in the dock, on the Logs tab.
     OpenDock(String),
     CloseDock,
-    /// Closes the dock if it is open. Opening it needs a selection (task 2.5.4).
+    /// Closes the dock if it is open; otherwise opens it for the selected container.
     ToggleDock,
     DockTab(DockTab),
     ToggleMaximize,
@@ -321,10 +321,13 @@ impl App {
                 self.dock = None;
                 Task::none()
             }
-            Message::ToggleDock => {
-                self.dock = None;
-                Task::none()
-            }
+            Message::ToggleDock => match (&self.dock, self.containers.selected.clone()) {
+                (None, Some(id)) => self.update(Message::OpenDock(id)),
+                _ => {
+                    self.dock = None;
+                    Task::none()
+                }
+            },
             Message::DockTab(tab) => {
                 if let Some(dock) = &mut self.dock {
                     dock.tab = tab;
@@ -350,7 +353,7 @@ impl App {
             // Reloads can overlap: only the latest one counts.
             Msg::Loaded(seq, _) if seq != self.load_seq => Task::none(),
             Msg::Loaded(_, Ok(items)) => {
-                self.containers.items = items;
+                self.containers.set_items(items);
                 // The container is gone (removed here or elsewhere): close the dock quietly.
                 if let Some(dock) = &self.dock
                     && !self
@@ -368,8 +371,26 @@ impl App {
                 self.containers.query = query;
                 Task::none()
             }
-            Msg::ToggleStopped(show) => {
-                self.containers.show_stopped = show;
+            Msg::ToggleRunning => {
+                self.containers.show_running = !self.containers.show_running;
+                Task::none()
+            }
+            Msg::ToggleStopped => {
+                self.containers.show_stopped = !self.containers.show_stopped;
+                Task::none()
+            }
+            Msg::Select(id) => {
+                self.containers.selected = Some(id);
+                Task::none()
+            }
+            Msg::Hover(id) => {
+                self.containers.hovered = Some(id);
+                Task::none()
+            }
+            Msg::Leave(id) => {
+                if self.containers.hovered.as_deref() == Some(id.as_str()) {
+                    self.containers.hovered = None;
+                }
                 Task::none()
             }
             Msg::Start(id) => self.container_action(id, ContainerAction::Start),
@@ -398,7 +419,10 @@ impl App {
             Msg::OpenPort(port) => {
                 self.update(Message::OpenUrl(format!("http://localhost:{port}")))
             }
-            Msg::Open(id) => self.update(Message::OpenDock(id)),
+            Msg::Open(id) => {
+                self.containers.selected = Some(id.clone());
+                self.update(Message::OpenDock(id))
+            }
         }
     }
 
@@ -503,6 +527,15 @@ impl App {
             .height(Length::Fill)
             .style(style::container::bg)
             .into();
+        // The dialog dims the whole window, sidebar and status bar included.
+        let body = match containers::remove_dialog(&self.containers) {
+            Some(card) => modal(
+                body,
+                card,
+                Message::Containers(containers::Msg::CancelRemove),
+            ),
+            None => body,
+        };
         if self.toasts.is_empty() {
             body
         } else {
@@ -1138,8 +1171,13 @@ mod tests {
         let mut app = app_with(&fake);
         let _ = app.update(Message::Containers(containers::Msg::Query("ng".into())));
         assert_eq!(app.containers.query, "ng");
-        let _ = app.update(Message::Containers(containers::Msg::ToggleStopped(false)));
+        assert!(app.containers.show_running && app.containers.show_stopped);
+        let _ = app.update(Message::Containers(containers::Msg::ToggleStopped));
         assert!(!app.containers.show_stopped);
+        let _ = app.update(Message::Containers(containers::Msg::ToggleRunning));
+        assert!(!app.containers.show_running);
+        let _ = app.update(Message::Containers(containers::Msg::ToggleStopped));
+        assert!(app.containers.show_stopped);
     }
 
     #[tokio::test]
@@ -1629,7 +1667,7 @@ mod tests {
 
         let _ = app.update(Message::ToggleDock);
         assert_eq!(app.dock, None);
-        // Without a dock there is nothing to toggle yet (selection comes with task 2.5.4).
+        // Without a dock and without a selection there is nothing to open.
         let _ = app.update(Message::ToggleDock);
         assert_eq!(app.dock, None);
 
@@ -1641,6 +1679,117 @@ mod tests {
         let _ = app.update(Message::ToggleMaximize);
         let _ = app.update(Message::DockTab(DockTab::Terminal));
         assert_eq!(app.dock, None);
+    }
+
+    #[test]
+    fn select_and_double_click_open() {
+        let fake = Arc::new(FakeClient::new());
+        let mut app = app_with(&fake);
+        let _ = app.update(Message::Containers(containers::Msg::Select(
+            "web-id".into(),
+        )));
+        assert_eq!(app.containers.selected.as_deref(), Some("web-id"));
+        assert_eq!(app.dock, None, "a single click only selects");
+        let _ = app.update(Message::Containers(containers::Msg::Open("web-id".into())));
+        assert_eq!(app.dock, Some(web_dock()));
+        assert_eq!(app.containers.selected.as_deref(), Some("web-id"));
+    }
+
+    #[test]
+    fn hover_follows_the_rows_under_the_cursor() {
+        let fake = Arc::new(FakeClient::new());
+        let mut app = app_with(&fake);
+        let hover = |id: &str| Message::Containers(containers::Msg::Hover(id.into()));
+        let leave = |id: &str| Message::Containers(containers::Msg::Leave(id.into()));
+        let _ = app.update(hover("a"));
+        assert_eq!(app.containers.hovered.as_deref(), Some("a"));
+        // Moving up: the new row reports before the old one leaves.
+        let _ = app.update(hover("b"));
+        let _ = app.update(leave("a"));
+        assert_eq!(app.containers.hovered.as_deref(), Some("b"));
+        let _ = app.update(leave("b"));
+        assert_eq!(app.containers.hovered, None);
+    }
+
+    #[tokio::test]
+    async fn selection_moves_to_neighbor_when_removed() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let order: Vec<String> = app
+            .containers
+            .visible()
+            .iter()
+            .map(|c| c.id.clone())
+            .collect();
+        assert!(order.len() >= 3);
+        let _ = app.update(Message::Containers(containers::Msg::Select(
+            order[1].clone(),
+        )));
+        fake.remove(&order[1], true).await.unwrap();
+        settle(&mut app, Message::ReloadContainers).await;
+        assert_eq!(app.containers.selected.as_ref(), Some(&order[2]));
+
+        // The last one goes: the new last one is selected.
+        let last = order.last().unwrap().clone();
+        let _ = app.update(Message::Containers(containers::Msg::Select(last.clone())));
+        fake.remove(&last, true).await.unwrap();
+        settle(&mut app, Message::ReloadContainers).await;
+        let now: Vec<String> = app
+            .containers
+            .visible()
+            .iter()
+            .map(|c| c.id.clone())
+            .collect();
+        assert_eq!(app.containers.selected.as_ref(), now.last());
+    }
+
+    #[tokio::test]
+    async fn selection_survives_reconnecting_only_if_the_container_exists() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::Containers(containers::Msg::Select(
+            "web-id".into(),
+        )));
+        let _ = app.update(Message::Pinged(Err(DockerError::NotRunning)));
+        settle(&mut app, Message::Pinged(Ok(()))).await;
+        assert_eq!(app.containers.selected.as_deref(), Some("web-id"));
+
+        let _ = app.update(Message::Pinged(Err(DockerError::NotRunning)));
+        fake.remove("web-id", true).await.unwrap();
+        settle(&mut app, Message::Pinged(Ok(()))).await;
+        assert_ne!(app.containers.selected.as_deref(), Some("web-id"));
+        assert!(
+            app.containers.selected.as_ref().is_none_or(|id| app
+                .containers
+                .items
+                .iter()
+                .any(|c| &c.id == id))
+        );
+    }
+
+    #[tokio::test]
+    async fn toggle_dock_opens_selected() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::Containers(containers::Msg::Select(
+            "web-id".into(),
+        )));
+        let _ = app.update(Message::ToggleDock);
+        assert_eq!(app.dock, Some(web_dock()));
+        let _ = app.update(Message::ToggleDock);
+        assert_eq!(app.dock, None);
+    }
+
+    #[tokio::test]
+    async fn remove_dialog_covers_the_whole_window() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        app.containers.confirm_remove = Some("db-id".into());
+        // Dock open, dialog open, sidebar collapsed: all layouts build.
+        let _ = app.view();
+        app.sidebar_collapsed = true;
+        let _ = app.view();
     }
 
     #[tokio::test]
