@@ -1,4 +1,5 @@
 use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,10 +15,12 @@ use crate::keymap;
 use crate::model::{ContainerInfo, DockerEvent, ResourceKind};
 use crate::ui::components::{ToastKind, modal};
 use crate::ui::fonts::SANS_SEMIBOLD;
+use crate::ui::prefs;
 use crate::ui::style;
 use crate::ui::theme::{ThemeMode, resolve};
 use crate::ui::tokens::{BORDER_WIDTH, ROW_HEIGHT, SPACE_1, SPACE_2, SPACE_6, TEXT_LG};
 use crate::views::containers::{self, ContainersState};
+use crate::views::palette::{self, PaletteState};
 use crate::views::widgets::{friendly_error, toast_stack};
 use crate::views::{dock, onboarding, sidebar, status_bar};
 
@@ -120,6 +123,14 @@ pub enum Message {
         mods: iced::keyboard::Modifiers,
         captured: bool,
     },
+    /// The palette's search text changed.
+    PaletteQuery(String),
+    /// Moves the highlighted palette result by this many rows.
+    PaletteMove(i32),
+    /// Runs the action and closes the palette; `None` (no result) does nothing.
+    PaletteRun(Option<ActionId>),
+    /// The results of the palette were scrolled to this offset.
+    PaletteScrolled(f32),
 }
 
 pub struct App {
@@ -133,6 +144,12 @@ pub struct App {
     pub system_mode: iced::theme::Mode,
     pub sidebar_collapsed: bool,
     pub dock: Option<Dock>,
+    /// The command palette, while it is open.
+    pub palette: Option<PaletteState>,
+    /// Scroll offset of the palette results, to keep the cursor in view.
+    palette_scroll_y: f32,
+    /// Where preferences are saved; `None` keeps them in memory only.
+    config_dir: Option<PathBuf>,
     /// Keeps the position of the divider between list and dock, also while the dock is closed.
     panes: pane_grid::State<Pane>,
     /// A ping is in flight; further `Retry` messages are ignored until it resolves.
@@ -213,16 +230,31 @@ const MAX_TOASTS: usize = 5;
 impl App {
     /// Builds the app and starts the first connectivity check.
     pub fn new(client: Arc<dyn DockerClient>) -> (Self, Task<Message>) {
+        Self::new_with_config(client, None)
+    }
+
+    /// Like [`App::new`], but loads the saved preferences from `config_dir` and saves later
+    /// changes there.
+    pub fn new_with_config(
+        client: Arc<dyn DockerClient>,
+        config_dir: Option<PathBuf>,
+    ) -> (Self, Task<Message>) {
         let mut app = Self {
             client,
             conn: Connection::Checking,
             screen: Screen::Containers,
             containers: ContainersState::default(),
             toasts: Vec::new(),
-            theme_mode: ThemeMode::default(),
+            theme_mode: config_dir
+                .as_deref()
+                .map(prefs::load_theme_mode)
+                .unwrap_or_default(),
             system_mode: iced::theme::Mode::None,
             sidebar_collapsed: false,
             dock: None,
+            palette: None,
+            palette_scroll_y: 0.0,
+            config_dir,
             panes: initial_panes(),
             pinging: false,
             events_generation: 0,
@@ -375,6 +407,18 @@ impl App {
                 mods,
                 captured,
             } => self.on_key(&key, mods, captured),
+            Message::PaletteQuery(query) => self.palette_query(query),
+            Message::PaletteMove(delta) => self.palette_move(delta),
+            Message::PaletteRun(Some(id)) => {
+                self.palette = None;
+                self.run_action(id)
+            }
+            // Nothing matches: the palette stays, so the user can fix the query.
+            Message::PaletteRun(None) => Task::none(),
+            Message::PaletteScrolled(y) => {
+                self.palette_scroll_y = y;
+                Task::none()
+            }
         }
     }
 
@@ -399,8 +443,11 @@ impl App {
             ToggleSidebar => self.update(Message::ToggleSidebar),
             ToggleDock => self.update(Message::ToggleDock),
             FocusSearch => iced::widget::operation::focus(Id::new(containers::SEARCH_ID)),
-            // The palette arrives in task 2.6.2.
-            OpenPalette => Task::none(),
+            OpenPalette => {
+                self.palette = Some(PaletteState::default());
+                self.palette_scroll_y = 0.0;
+                iced::widget::operation::focus(Id::new(palette::PALETTE_INPUT_ID))
+            }
             SelectNext => self.select_step(true),
             SelectPrev => self.select_step(false),
             OpenSelected => on_selected(self, Msg::Open),
@@ -470,9 +517,12 @@ impl App {
         )
     }
 
-    /// Esc closes one layer, the topmost: the removal dialog, then the dock, then the search.
-    /// (The command palette will sit above all of them.)
+    /// Esc closes one layer, the topmost: the command palette, then the removal dialog, then the
+    /// dock, then the search.
     fn close_top_layer(&mut self) {
+        if self.palette.take().is_some() {
+            return;
+        }
         if self.containers.confirm_remove.take().is_some() || self.dock.take().is_some() {
             return;
         }
@@ -482,9 +532,73 @@ impl App {
         }
     }
 
+    /// Applies the theme and saves the choice; a failure to save is only logged.
     fn set_theme_mode(&mut self, mode: ThemeMode) -> Task<Message> {
         self.theme_mode = mode;
-        Task::none()
+        let Some(dir) = self.config_dir.clone() else {
+            return Task::none();
+        };
+        Task::perform(
+            async move {
+                let saved =
+                    tokio::task::spawn_blocking(move || prefs::save_theme_mode(&dir, mode)).await;
+                match saved {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => tracing::warn!("could not save the theme: {e}"),
+                    Err(e) => tracing::warn!("could not save the theme: {e}"),
+                }
+            },
+            |()| (),
+        )
+        .discard()
+    }
+
+    /// New search text: the highlight goes back to the best match, at the top of the results.
+    fn palette_query(&mut self, query: String) -> Task<Message> {
+        let Some(state) = &mut self.palette else {
+            return Task::none();
+        };
+        state.query = query;
+        state.cursor = 0;
+        if self.palette_scroll_y == 0.0 {
+            return Task::none();
+        }
+        self.palette_scroll_y = 0.0;
+        self.scroll_palette_to(0.0)
+    }
+
+    /// Moves the highlight, stopping at the first and last result, and scrolls it into view.
+    fn palette_move(&mut self, delta: i32) -> Task<Message> {
+        let Some(state) = &self.palette else {
+            return Task::none();
+        };
+        let count = palette::matches(self, &state.query).len();
+        let last = count.saturating_sub(1) as i64;
+        let cursor = (state.cursor as i64 + i64::from(delta)).clamp(0, last) as usize;
+        if let Some(state) = &mut self.palette {
+            state.cursor = cursor;
+        }
+        let Some(y) = containers::scroll_offset(
+            cursor,
+            ROW_HEIGHT,
+            palette::list_height(count),
+            self.palette_scroll_y,
+        ) else {
+            return Task::none();
+        };
+        // Programmatic scrolling is not reported back, so remember where it went.
+        self.palette_scroll_y = y;
+        self.scroll_palette_to(y)
+    }
+
+    fn scroll_palette_to(&self, y: f32) -> Task<Message> {
+        iced::widget::operation::scroll_to(
+            Id::new(palette::PALETTE_LIST_ID),
+            iced::widget::operation::AbsoluteOffset {
+                x: None,
+                y: Some(y),
+            },
+        )
     }
 
     /// A key press: turns it into an action, if it stands for one.
@@ -494,6 +608,28 @@ impl App {
         mods: iced::keyboard::Modifiers,
         captured: bool,
     ) -> Task<Message> {
+        // The palette sits above everything: it takes the arrows and Enter, even when its text
+        // input already used them, and leaves only Esc and Ctrl shortcuts to the keymap.
+        if let Some(state) = &self.palette {
+            use iced::keyboard::Key;
+            use iced::keyboard::key::Named;
+            if !mods.control() {
+                match key {
+                    Key::Named(Named::ArrowDown) => return self.palette_move(1),
+                    Key::Named(Named::ArrowUp) => return self.palette_move(-1),
+                    Key::Named(Named::Enter) => {
+                        let chosen = palette::matches(self, &state.query)
+                            .get(state.cursor)
+                            .copied();
+                        return self.update(Message::PaletteRun(chosen));
+                    }
+                    _ => {}
+                }
+            }
+            if !mods.control() && *key != Key::Named(Named::Escape) {
+                return Task::none();
+            }
+        }
         // With the removal dialog open, Enter presses its main button, even if a text input
         // still holds the event. Esc is left to the keymap and cancels.
         if let Some(force) = containers::remove_force(&self.containers)
@@ -502,7 +638,6 @@ impl App {
         {
             return self.update_containers(containers::Msg::ConfirmRemove { force });
         }
-        // The palette (task 2.6.2) will take arrows and Enter here, before the keymap.
         match keymap::resolve(key, mods, captured) {
             Some(id) => self.run_action(id),
             None => Task::none(),
@@ -715,6 +850,10 @@ impl App {
                 card,
                 Message::Containers(containers::Msg::CancelRemove),
             ),
+            None => body,
+        };
+        let body = match &self.palette {
+            Some(state) => stack![body, palette::view(self, state)].into(),
             None => body,
         };
         if self.toasts.is_empty() {
@@ -2725,5 +2864,259 @@ mod tests {
         assert_eq!(app.containers.scroll_y, 2.0 * row);
         let _ = app.run_action(ActionId::SelectPrev);
         assert_eq!(app.containers.scroll_y, row);
+    }
+
+    fn key(named: iced::keyboard::key::Named, captured: bool) -> Message {
+        Message::Key {
+            key: iced::keyboard::Key::Named(named),
+            mods: iced::keyboard::Modifiers::empty(),
+            captured,
+        }
+    }
+
+    fn char_key(c: &str, mods: iced::keyboard::Modifiers, captured: bool) -> Message {
+        Message::Key {
+            key: iced::keyboard::Key::Character(c.into()),
+            mods,
+            captured,
+        }
+    }
+
+    async fn open_palette(app: &mut App) {
+        settle(app, Message::Action(ActionId::OpenPalette)).await;
+        assert!(app.palette.is_some(), "the palette opens");
+    }
+
+    #[tokio::test]
+    async fn open_palette_action_opens_it_empty() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        assert!(app.palette.is_none());
+        open_palette(&mut app).await;
+        assert_eq!(app.palette, Some(PaletteState::default()));
+        // Opening again starts over.
+        let _ = app.update(Message::PaletteQuery("vol".into()));
+        open_palette(&mut app).await;
+        assert_eq!(app.palette, Some(PaletteState::default()));
+    }
+
+    #[tokio::test]
+    async fn palette_query_resets_the_cursor() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        open_palette(&mut app).await;
+        let _ = app.update(Message::PaletteMove(3));
+        assert_eq!(app.palette.as_ref().unwrap().cursor, 3);
+        let _ = app.update(Message::PaletteQuery("vol".into()));
+        let state = app.palette.as_ref().unwrap();
+        assert_eq!(state.query, "vol");
+        assert_eq!(state.cursor, 0);
+    }
+
+    #[tokio::test]
+    async fn palette_run_executes_and_closes() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        open_palette(&mut app).await;
+        let _ = app.update(Message::PaletteQuery("volumes".into()));
+        let _ = app.update(Message::PaletteRun(Some(ActionId::GoVolumes)));
+        assert_eq!(app.palette, None);
+        assert_eq!(app.screen, Screen::Volumes);
+    }
+
+    #[tokio::test]
+    async fn palette_enter_without_results_keeps_open() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        open_palette(&mut app).await;
+        let _ = app.update(Message::PaletteQuery("zzzzzz".into()));
+        let calls_before = fake.calls().len();
+        // The real key: Enter inside the text input arrives captured.
+        let _ = app.update(key(iced::keyboard::key::Named::Enter, true));
+        assert!(app.palette.is_some(), "the palette stays open");
+        assert_eq!(app.screen, Screen::Containers);
+        assert_eq!(fake.calls().len(), calls_before);
+        let _ = app.update(Message::PaletteRun(None));
+        assert!(app.palette.is_some());
+    }
+
+    #[tokio::test]
+    async fn palette_cursor_is_clamped() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        open_palette(&mut app).await;
+        let last = palette::matches(&app, "").len() - 1;
+        let _ = app.update(Message::PaletteMove(50));
+        assert_eq!(app.palette.as_ref().unwrap().cursor, last);
+        let _ = app.update(Message::PaletteMove(-50));
+        assert_eq!(app.palette.as_ref().unwrap().cursor, 0);
+        // No results: the cursor stays at 0.
+        let _ = app.update(Message::PaletteQuery("zzzzzz".into()));
+        let _ = app.update(Message::PaletteMove(1));
+        assert_eq!(app.palette.as_ref().unwrap().cursor, 0);
+    }
+
+    #[tokio::test]
+    async fn palette_moves_and_runs_with_the_keys_even_when_captured() {
+        use iced::keyboard::key::Named;
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        app.containers.selected = Some("web-id".into());
+        open_palette(&mut app).await;
+        let _ = app.update(Message::PaletteQuery("volumes".into()));
+        let _ = app.update(key(Named::ArrowDown, true));
+        assert_eq!(app.palette.as_ref().unwrap().cursor, 0, "one result only");
+        let _ = app.update(Message::PaletteQuery(String::new()));
+        let _ = app.update(key(Named::ArrowDown, true));
+        let _ = app.update(key(Named::ArrowDown, true));
+        let _ = app.update(key(Named::ArrowUp, true));
+        assert_eq!(app.palette.as_ref().unwrap().cursor, 1);
+        // The selection of the list did not move.
+        assert_eq!(selected_id(&app), Some("web-id"));
+        let expected = palette::matches(&app, "")[1];
+        assert_eq!(expected, ActionId::GoVolumes);
+        let _ = app.update(key(Named::Enter, true));
+        assert_eq!(app.palette, None);
+        assert_eq!(app.screen, Screen::Volumes);
+    }
+
+    #[tokio::test]
+    async fn palette_ignores_plain_keys_but_not_ctrl_shortcuts() {
+        use iced::keyboard::Modifiers;
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        app.containers.selected = Some("web-id".into());
+        open_palette(&mut app).await;
+        let calls_before = fake.calls().len();
+        for c in ["s", "r", "j", "k", "/"] {
+            let _ = app.update(char_key(c, Modifiers::empty(), false));
+        }
+        let _ = app.update(key(iced::keyboard::key::Named::Delete, false));
+        assert_eq!(app.containers.confirm_remove, None);
+        assert_eq!(fake.calls().len(), calls_before, "no action ran");
+        assert_eq!(selected_id(&app), Some("web-id"));
+        assert!(app.palette.is_some());
+
+        let _ = app.update(char_key("2", Modifiers::CTRL, true));
+        assert_eq!(app.screen, Screen::Volumes, "Ctrl shortcuts still work");
+    }
+
+    #[tokio::test]
+    async fn palette_enter_wins_over_the_removal_dialog() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        app.containers.confirm_remove = Some("web-id".into());
+        open_palette(&mut app).await;
+        let _ = app.update(Message::PaletteQuery("volumes".into()));
+        let _ = app.update(key(iced::keyboard::key::Named::Enter, true));
+        assert_eq!(app.screen, Screen::Volumes);
+        assert!(!fake.calls().iter().any(|c| c.starts_with("remove")));
+        assert_eq!(
+            app.containers.confirm_remove.as_deref(),
+            Some("web-id"),
+            "the dialog is still there"
+        );
+    }
+
+    #[tokio::test]
+    async fn escape_closes_palette_first() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        app.containers.confirm_remove = Some("web-id".into());
+        open_palette(&mut app).await;
+        let _ = app.update(key(iced::keyboard::key::Named::Escape, true));
+        assert_eq!(app.palette, None, "the palette goes first");
+        assert_eq!(app.containers.confirm_remove.as_deref(), Some("web-id"));
+        let _ = app.update(key(iced::keyboard::key::Named::Escape, false));
+        assert_eq!(app.containers.confirm_remove, None, "then the dialog");
+    }
+
+    #[tokio::test]
+    async fn palette_runs_an_action_that_closes_it_before_running() {
+        // Remove from the palette still asks for confirmation.
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        app.containers.selected = Some("web-id".into());
+        open_palette(&mut app).await;
+        let _ = app.update(Message::PaletteRun(Some(ActionId::RemoveSelected)));
+        assert_eq!(app.palette, None);
+        assert_eq!(app.containers.confirm_remove.as_deref(), Some("web-id"));
+        assert!(!fake.calls().iter().any(|c| c.starts_with("remove")));
+    }
+
+    #[test]
+    fn palette_texts_are_translated() {
+        for key in ["palette.placeholder", "palette.empty"] {
+            for locale in ["en", "pt-BR"] {
+                assert_ne!(t!(key, locale = locale), key, "{locale} {key}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn palette_view_is_drawn_over_the_window() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        open_palette(&mut app).await;
+        let _ = app.view();
+        app.palette = Some(PaletteState {
+            query: "zzz".into(),
+            cursor: 0,
+        });
+        let _ = app.view();
+    }
+
+    #[tokio::test]
+    async fn theme_action_saves_preference() {
+        let dir = crate::ui::prefs::tests::unique_dir("action");
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = App::new_with_config(fake.clone(), Some(dir.clone())).0;
+        settle(&mut app, Message::Action(ActionId::ThemeDark)).await;
+        assert_eq!(app.theme_mode, ThemeMode::Dark);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("theme")).unwrap().trim(),
+            "dark"
+        );
+        settle(&mut app, Message::Action(ActionId::ThemeLight)).await;
+        assert_eq!(
+            std::fs::read_to_string(dir.join("theme")).unwrap().trim(),
+            "light"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn saved_theme_is_loaded_at_startup() {
+        let dir = crate::ui::prefs::tests::unique_dir("startup");
+        crate::ui::prefs::save_theme_mode(&dir, ThemeMode::Light).unwrap();
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let app = App::new_with_config(fake.clone(), Some(dir.clone())).0;
+        assert_eq!(app.theme_mode, ThemeMode::Light);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn broken_theme_preference_opens_in_system_and_keeps_working() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        // Garbage in the file.
+        let dir = crate::ui::prefs::tests::unique_dir("garbage");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("theme"), "azul").unwrap();
+        let app = App::new_with_config(fake.clone(), Some(dir.clone())).0;
+        assert_eq!(app.theme_mode, ThemeMode::System);
+        // The config "directory" is a file: saving fails, quietly.
+        let file = crate::ui::prefs::tests::unique_dir("not-a-dir");
+        std::fs::write(&file, "x").unwrap();
+        let mut app = App::new_with_config(fake.clone(), Some(file.clone())).0;
+        assert_eq!(app.theme_mode, ThemeMode::System);
+        settle(&mut app, Message::Action(ActionId::ThemeDark)).await;
+        assert_eq!(app.theme_mode, ThemeMode::Dark, "the choice still applies");
+        assert!(app.toasts.is_empty(), "a failure is only logged");
+        // No directory at all: nothing is written anywhere.
+        let mut app = App::new_with_config(fake.clone(), None).0;
+        settle(&mut app, Message::Action(ActionId::ThemeLight)).await;
+        assert_eq!(app.theme_mode, ThemeMode::Light);
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_file(&file).unwrap();
     }
 }

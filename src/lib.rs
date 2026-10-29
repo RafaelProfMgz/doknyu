@@ -2,6 +2,7 @@ pub mod actions;
 pub mod app;
 pub mod docker;
 pub mod error;
+pub mod fuzzy;
 pub mod keymap;
 pub mod model;
 pub mod stats;

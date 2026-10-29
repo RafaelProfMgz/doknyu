@@ -14,7 +14,7 @@ use crate::ui::theme::palette;
 use crate::ui::tokens::{DOT_SIZE, Palette, SPACE_1, SPACE_2, SPACE_3, STATUS_BAR_HEIGHT, TEXT_SM};
 use crate::views::widgets::friendly_error;
 
-/// Hint of the command palette button. The palette itself arrives in phase 2.6.
+/// Hint of the command palette button.
 const PALETTE_SHORTCUT: Shortcut = Shortcut {
     ctrl: true,
     shift: true,
@@ -70,9 +70,9 @@ pub fn view<'a>(conn: &Connection, items: &[ContainerInfo]) -> Element<'a, Messa
         ));
     }
 
-    // Without an action yet: phase 2.6 turns it into the button that opens the palette.
     let palette_hint = tooltip(
         button(kbd(&PALETTE_SHORTCUT))
+            .on_press(Message::Action(ActionId::OpenPalette))
             .padding(Padding::from([0.0, SPACE_1]))
             .style(style::button::ghost),
         container(text(t!("status.palette").into_owned()).size(TEXT_SM))
