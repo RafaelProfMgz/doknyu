@@ -100,13 +100,13 @@
 ### Tarefa 1.4: Trait `DockerClient` + `BollardClient`
 
 **Arquivos:**
-- Modificar: `src/docker/mod.rs` (trait + `DockerStream` conforme README; `pub fn connect() -> Result<Arc<dyn DockerClient>, DockerError>`)
+- Modificar: `src/docker/mod.rs` (trait + `DockerStream` conforme README; `pub fn connect() -> Arc<dyn DockerClient>`)
 - Criar: `src/docker/bollard.rs`, `tests/docker_integration.rs`
 
 **Interfaces:**
 - Consome: `convert::*`, `classify_connect_error`.
 - Produz: `pub struct BollardClient` implementando `DockerClient`;
-  `pub fn connect() -> Result<Arc<dyn DockerClient>, DockerError>` — usa `DOCKER_HOST` se
+  `pub fn connect() -> Arc<dyn DockerClient>` — usa `DOCKER_HOST` se
   `unix://...`, senão `/var/run/docker.sock`; **não** falha se o daemon estiver parado (o erro
   aparece no primeiro `ping`).
 - Notas de implementação:
