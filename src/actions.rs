@@ -150,9 +150,12 @@ pub fn def(id: ActionId) -> &'static ActionDef {
 pub fn available(app: &App, id: ActionId) -> bool {
     use ActionId::*;
     let connected = app.conn == Connection::Ok;
-    // The container list can be used: Docker answers, it is on screen and no dialog covers it.
-    let list_usable =
-        connected && app.screen == Screen::Containers && app.containers.confirm_remove.is_none();
+    // The container list can be used: Docker answers, it is on screen (not hidden by the
+    // maximized dock) and no dialog covers it.
+    let list_usable = connected
+        && app.screen == Screen::Containers
+        && app.containers.confirm_remove.is_none()
+        && !app.dock.as_ref().is_some_and(|d| d.maximized);
     let has_selection = || {
         app.containers
             .selected

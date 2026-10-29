@@ -523,7 +523,11 @@ impl App {
         if self.palette.take().is_some() {
             return;
         }
-        if self.containers.confirm_remove.take().is_some() || self.dock.take().is_some() {
+        if self.containers.confirm_remove.take().is_some() {
+            return;
+        }
+        if self.dock.is_some() {
+            let _ = self.update(Message::CloseDock);
             return;
         }
         if !self.containers.query.is_empty() {
@@ -532,25 +536,16 @@ impl App {
         }
     }
 
-    /// Applies the theme and saves the choice; a failure to save is only logged.
+    /// Applies the theme and saves the choice. The file is tiny, so it is written right here:
+    /// two quick changes cannot race and the last one wins. A failure is only logged.
     fn set_theme_mode(&mut self, mode: ThemeMode) -> Task<Message> {
         self.theme_mode = mode;
-        let Some(dir) = self.config_dir.clone() else {
-            return Task::none();
-        };
-        Task::perform(
-            async move {
-                let saved =
-                    tokio::task::spawn_blocking(move || prefs::save_theme_mode(&dir, mode)).await;
-                match saved {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => tracing::warn!("could not save the theme: {e}"),
-                    Err(e) => tracing::warn!("could not save the theme: {e}"),
-                }
-            },
-            |()| (),
-        )
-        .discard()
+        if let Some(dir) = &self.config_dir
+            && let Err(e) = prefs::save_theme_mode(dir, mode)
+        {
+            tracing::warn!("could not save the theme: {e}");
+        }
+        Task::none()
     }
 
     /// New search text: the highlight goes back to the best match, at the top of the results.
@@ -632,16 +627,28 @@ impl App {
         }
         // With the removal dialog open, Enter presses its main button, even if a text input
         // still holds the event. Esc is left to the keymap and cancels.
-        if let Some(force) = containers::remove_force(&self.containers)
+        let dialog_open = containers::remove_force(&self.containers);
+        if let Some(force) = dialog_open
             && *key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter)
             && mods.is_empty()
         {
             return self.update_containers(containers::Msg::ConfirmRemove { force });
         }
-        match keymap::resolve(key, mods, captured) {
-            Some(id) => self.run_action(id),
-            None => Task::none(),
+        let Some(id) = keymap::resolve(key, mods, captured) else {
+            return Task::none();
+        };
+        // The dialog only answers to Enter and Esc; nothing else reaches the window behind it.
+        if dialog_open.is_some() && id != ActionId::Escape {
+            return Task::none();
         }
+        // A shortcut that works on the window behind the palette closes it first.
+        if self.palette.is_some()
+            && !matches!(id, ActionId::Escape | ActionId::OpenPalette)
+            && actions::available(self, id)
+        {
+            self.palette = None;
+        }
+        self.run_action(id)
     }
 
     fn update_containers(&mut self, m: containers::Msg) -> Task<Message> {
@@ -3114,5 +3121,77 @@ mod tests {
         let mut app = App::new_with_config(fake.clone(), None).0;
         settle(&mut app, Message::Action(ActionId::ThemeLight)).await;
         assert_eq!(app.theme_mode, ThemeMode::Light);
+    }
+
+    #[tokio::test]
+    async fn container_keys_do_nothing_while_the_dock_hides_the_list() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        app.containers.selected = Some("web-id".into());
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        let _ = app.update(Message::ToggleMaximize);
+        assert!(app.dock.as_ref().is_some_and(|d| d.maximized));
+        let calls_before = fake.calls().len();
+        for c in ["s", "r", "j", "k"] {
+            settle(
+                &mut app,
+                char_key(c, iced::keyboard::Modifiers::empty(), false),
+            )
+            .await;
+        }
+        let _ = app.update(key(iced::keyboard::key::Named::Delete, false));
+        assert_eq!(
+            fake.calls().len(),
+            calls_before,
+            "the client was not called"
+        );
+        assert_eq!(app.containers.confirm_remove, None);
+        assert_eq!(selected_id(&app), Some("web-id"));
+    }
+
+    #[tokio::test]
+    async fn ctrl_shortcut_closes_the_palette_and_runs() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        open_palette(&mut app).await;
+        let _ = app.update(char_key("2", iced::keyboard::Modifiers::CTRL, true));
+        assert_eq!(app.palette, None);
+        assert_eq!(app.screen, Screen::Volumes);
+    }
+
+    #[tokio::test]
+    async fn removal_dialog_ignores_ctrl_shortcuts() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        app.containers.confirm_remove = Some("web-id".into());
+        let ctrl = iced::keyboard::Modifiers::CTRL;
+        let _ = app.update(char_key("2", ctrl, false));
+        let _ = app.update(char_key("b", ctrl, false));
+        let _ = app.update(char_key(
+            "p",
+            ctrl | iced::keyboard::Modifiers::SHIFT,
+            false,
+        ));
+        assert_eq!(app.screen, Screen::Containers);
+        assert!(!app.sidebar_collapsed);
+        assert!(app.palette.is_none());
+        assert_eq!(app.containers.confirm_remove.as_deref(), Some("web-id"));
+        // Esc still cancels.
+        let _ = app.update(key(iced::keyboard::key::Named::Escape, false));
+        assert_eq!(app.containers.confirm_remove, None);
+    }
+
+    #[tokio::test]
+    async fn rapid_theme_changes_leave_the_last_one_saved() {
+        let dir = crate::ui::prefs::tests::unique_dir("rapid");
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = App::new_with_config(fake, Some(dir.to_path_buf())).0;
+        // The tasks are never run: the file is written by `run_action` itself.
+        let _ = app.run_action(ActionId::ThemeDark);
+        let _ = app.run_action(ActionId::ThemeLight);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("theme")).unwrap().trim(),
+            "light"
+        );
     }
 }
