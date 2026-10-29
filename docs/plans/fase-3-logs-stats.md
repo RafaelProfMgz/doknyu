@@ -58,6 +58,10 @@
   ```
   - Subscription de logs (só com detalhe aberto) usa `logs(id, 500)` e entrega em **lotes**
     (agrupa linhas a cada 100 ms ou 200 linhas) → `LogBatch`.
+  - **Reassinatura:** a identidade da subscription de logs/stats inclui `(id, generation)`;
+    `generation` incrementa quando o container volta a rodar (evento `start`/`restart` do id).
+    Ao reassinar, o `LogBuffer` é limpo antes (o `logs(id, 500)` traz o histórico de novo, sem duplicar)
+    e o `StatsHistory` recomeça.
   - `follow` = auto-scroll; vira `false` quando `Scrolled { at_bottom: false }`, volta a `true` no fim
     ou no botão "Ir para o fim".
   - Renderização: só as linhas visíveis (lista virtualizada por altura de linha fixa, fonte mono);
@@ -66,7 +70,8 @@
   - Cabeçalho: nome, imagem, badge de status e botões de ação reaproveitados da Tarefa 2.3.
 
 - [ ] **Passo 1: Testes que falham:** `log_batch_appends`; `scroll_up_disables_follow`;
-  `switching_container_resets_buffer`.
+  `switching_container_resets_buffer`; `restart_resubscribes_logs` (Fake: com detalhe aberto,
+  `stop` → `LogsEnded`; `start` → `generation` incrementa, buffer limpo e novas linhas chegam).
 - [ ] **Passo 2–4:** FAIL → implementar → PASS.
 - [ ] **Passo 5:** Manual: `docker run -d --name spam alpine sh -c 'while true; do date; done'` →
   aba Logs rola sem travar a UI (CPU do doknyu < 1 núcleo); rolar para cima pausa.

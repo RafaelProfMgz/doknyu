@@ -35,8 +35,8 @@ chamadas pela `Task` e testar essas funções + o `update` com as mensagens de r
   ```
   - `widgets.rs`: `status_badge(&ContainerState) -> Element`, `confirm_dialog(...)`, `toast_stack(...)`.
   - `pub fn friendly_error(e: &DockerError) -> String` em `src/views/widgets.rs` (usa `t!`).
-- `main.rs`: cria o client e passa para `App::new` — `docker::connect()` por padrão; com a feature
-  `fake` e `DOKNYU_FAKE=1`, `FakeClient::with_sample_data()`. Erro de `connect()` não dá panic: o app
+- `main.rs`: cria o client e passa para `App::new` — `docker::connect()` por padrão; compilado com a
+  feature `fake` (a feature sozinha basta, sem variável de ambiente), usa `FakeClient::with_sample_data()`. Erro de `connect()` não dá panic: o app
   abre e o onboarding mostra o erro (ver Tarefa 2.2).
 - i18n: `rust_i18n::i18n!("locales", fallback = "en")`; locale via `sys_locale::get_locale()`,
   normalizando `pt_BR`/`pt-BR`/`pt` → `pt-BR`.
