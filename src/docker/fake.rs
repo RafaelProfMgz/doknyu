@@ -201,11 +201,12 @@ impl FakeClient {
     /// Appends to the container's log history and to live log streams.
     pub fn push_log(&self, id: &str, line: LogLine) {
         let mut st = self.lock();
+        let id = canonical_id(&st, id);
         st.log_history
-            .entry(id.to_string())
+            .entry(id.clone())
             .or_default()
             .push(line.clone());
-        if let Some(subs) = st.log_subs.get_mut(id) {
+        if let Some(subs) = st.log_subs.get_mut(&id) {
             subs.retain(|tx| tx.send(line.clone()).is_ok());
         }
     }
@@ -213,8 +214,9 @@ impl FakeClient {
     /// Ends the live logs and stats streams of a container.
     pub fn close_streams(&self, id: &str) {
         let mut st = self.lock();
-        st.log_subs.remove(id);
-        st.stats_subs.remove(id);
+        let id = canonical_id(&st, id);
+        st.log_subs.remove(&id);
+        st.stats_subs.remove(&id);
     }
 
     fn set_state(&self, call: String, id: &str, new: ContainerState) -> Result<(), DockerError> {
@@ -253,6 +255,11 @@ fn container_index(st: &State, id: &str) -> Result<usize, DockerError> {
         (Some((i, _)), None) => Ok(i),
         _ => Err(not_found()),
     }
+}
+
+/// Canonical id for a name/prefix; unknown ids are kept as given.
+fn canonical_id(st: &State, id: &str) -> String {
+    container_index(st, id).map_or_else(|_| id.to_string(), |i| st.containers[i].id.clone())
 }
 
 fn find_container<'a>(st: &'a mut State, id: &str) -> Result<&'a mut ContainerInfo, DockerError> {
@@ -295,22 +302,22 @@ impl DockerClient for FakeClient {
     async fn remove(&self, id: &str, force: bool) -> Result<(), DockerError> {
         let mut st = self.begin(format!("remove:{id}"))?;
         let c = find_container(&mut st, id)?;
-        let (name, active) = (c.name.clone(), is_active(&c.state));
+        let (cid, name, active) = (c.id.clone(), c.name.clone(), is_active(&c.state));
         if active && !force {
             return Err(DockerError::Conflict(format!(
                 "You cannot remove a running container {id}. Stop the container before attempting removal or force remove"
             )));
         }
-        st.containers.retain(|c| c.id != id);
+        st.containers.retain(|c| c.id != cid);
         for v in &mut st.volumes {
             v.used_by.retain(|n| *n != name);
         }
         for n in &mut st.networks {
             n.members.retain(|m| *m != name);
         }
-        st.log_subs.remove(id);
-        st.stats_subs.remove(id);
-        st.log_history.remove(id);
+        st.log_subs.remove(&cid);
+        st.stats_subs.remove(&cid);
+        st.log_history.remove(&cid);
         Ok(())
     }
 
@@ -319,18 +326,18 @@ impl DockerClient for FakeClient {
         if let Some(e) = Self::begin_stream(&mut st, format!("logs:{id}")) {
             return futures::stream::once(async move { Err(e) }).boxed();
         }
-        if !st.containers.iter().any(|c| c.id == id) {
-            let err = DockerError::NotFound(format!("No such container: {id}"));
-            return futures::stream::once(async move { Err(err) }).boxed();
-        }
+        let cid = match container_index(&st, id) {
+            Ok(i) => st.containers[i].id.clone(),
+            Err(err) => return futures::stream::once(async move { Err(err) }).boxed(),
+        };
         let (tx, rx) = unbounded_channel();
-        if let Some(history) = st.log_history.get(id) {
+        if let Some(history) = st.log_history.get(&cid) {
             let skip = history.len().saturating_sub(tail);
             for line in &history[skip..] {
                 let _ = tx.send(line.clone());
             }
         }
-        let subs = st.log_subs.entry(id.to_string()).or_default();
+        let subs = st.log_subs.entry(cid).or_default();
         subs.retain(|tx| !tx.is_closed());
         subs.push(tx);
         into_stream(rx)
@@ -341,12 +348,12 @@ impl DockerClient for FakeClient {
         if let Some(e) = Self::begin_stream(&mut st, format!("stats:{id}")) {
             return futures::stream::once(async move { Err(e) }).boxed();
         }
-        if !st.containers.iter().any(|c| c.id == id) {
-            let err = DockerError::NotFound(format!("No such container: {id}"));
-            return futures::stream::once(async move { Err(err) }).boxed();
-        }
+        let cid = match container_index(&st, id) {
+            Ok(i) => st.containers[i].id.clone(),
+            Err(err) => return futures::stream::once(async move { Err(err) }).boxed(),
+        };
         let (tx, rx) = unbounded_channel();
-        let subs = st.stats_subs.entry(id.to_string()).or_default();
+        let subs = st.stats_subs.entry(cid).or_default();
         subs.retain(|tx| !tx.is_closed());
         subs.push(tx);
         into_stream(rx)
@@ -623,5 +630,27 @@ mod tests {
         let before = c.list_containers(true).await.unwrap();
         c.start("web-id").await.unwrap();
         assert_eq!(c.list_containers(true).await.unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn remove_by_name_removes_and_closes_streams() {
+        let c = FakeClient::with_sample_data();
+        let mut s = c.logs("web", 0);
+        c.remove("web", true).await.unwrap();
+        assert!(s.next().await.is_none());
+        let all = c.list_containers(true).await.unwrap();
+        assert!(all.iter().all(|x| x.id != "web-id"));
+    }
+
+    #[tokio::test]
+    async fn logs_by_name_receive_push() {
+        let c = FakeClient::with_sample_data();
+        let mut s = c.logs("web", 0);
+        c.push_log("web-id", line("x"));
+        assert_eq!(s.next().await.unwrap().unwrap().text, "x");
+        c.push_log("web", line("y"));
+        assert_eq!(s.next().await.unwrap().unwrap().text, "y");
+        c.close_streams("web");
+        assert!(s.next().await.is_none());
     }
 }
