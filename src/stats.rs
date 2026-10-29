@@ -23,7 +23,8 @@ pub fn sample_from_raw(raw: &RawStats) -> StatsSample {
 /// CPU usage in percent; 0.0 for the first sample, stopped containers or
 /// counters that went backwards (never NaN or infinite).
 fn cpu_percent(raw: &RawStats) -> f64 {
-    if raw.precpu_total == 0 || raw.presystem == 0 {
+    // Docker zero-fills precpu_stats on the first read; system usage is never 0 otherwise.
+    if raw.presystem == 0 {
         return 0.0;
     }
     let (Some(cpu_delta), Some(sys_delta)) = (
@@ -124,6 +125,19 @@ mod tests {
             ..raw()
         };
         assert_eq!(sample_from_raw(&r).cpu_percent, 0.0);
+    }
+
+    #[test]
+    fn cpu_counted_when_container_had_no_previous_cpu() {
+        let r = RawStats {
+            cpu_total: 200,
+            precpu_total: 0,
+            system: 2000,
+            presystem: 1000,
+            online_cpus: 4,
+            ..raw()
+        };
+        assert_eq!(sample_from_raw(&r).cpu_percent, 80.0);
     }
 
     #[test]
