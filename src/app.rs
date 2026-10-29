@@ -1,13 +1,15 @@
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::{Stream, StreamExt};
 use iced::widget::{center, column, container, row, stack, text};
 use iced::{Element, Length, Subscription, Task};
 use rust_i18n::t;
 
 use crate::docker::DockerClient;
 use crate::error::DockerError;
-use crate::model::{ContainerInfo, DockerEvent};
+use crate::model::{ContainerInfo, DockerEvent, ResourceKind};
 use crate::views::containers::{self, ContainersState};
 use crate::views::onboarding;
 use crate::views::sidebar;
@@ -51,6 +53,8 @@ pub enum Message {
     Containers(containers::Msg),
     Docker(DockerEvent),
     EventsEnded,
+    /// The debounce window after a container event is over: reload the list.
+    ReloadContainers,
     Tick,
 }
 
@@ -62,6 +66,10 @@ pub struct App {
     pub toasts: Vec<Toast>,
     /// A ping is in flight; further `Retry` messages are ignored until it resolves.
     pinging: bool,
+    /// Bumped on every successful ping so each (re)connection gets a fresh events subscription.
+    events_generation: u64,
+    /// A reload is waiting for the debounce window to end; further events join it.
+    reload_scheduled: bool,
 }
 
 /// Maps a system locale (`pt_BR.UTF-8`, `en_US`, `fr`...) to a supported locale.
@@ -112,6 +120,9 @@ const PING_TIMEOUT: Duration = Duration::from_secs(5);
 /// How often the app checks again while Docker is unreachable.
 const RETRY_INTERVAL: Duration = Duration::from_secs(3);
 
+/// Container events closer together than this share a single list reload.
+const RELOAD_DEBOUNCE: Duration = Duration::from_millis(300);
+
 impl App {
     /// Builds the app and starts the first connectivity check.
     pub fn new(client: Arc<dyn DockerClient>) -> (Self, Task<Message>) {
@@ -122,6 +133,8 @@ impl App {
             containers: ContainersState::default(),
             toasts: Vec::new(),
             pinging: false,
+            events_generation: 0,
+            reload_scheduled: false,
         };
         let task = app.start_ping();
         (app, task)
@@ -147,6 +160,7 @@ impl App {
             }
             Message::Pinged(Ok(())) => {
                 self.conn = Connection::Ok;
+                self.events_generation += 1;
                 self.load_containers()
             }
             Message::Pinged(Err(e)) if e.is_connection() => {
@@ -157,6 +171,7 @@ impl App {
                 // The daemon answered, just not with a pong: report it and carry on.
                 self.push_toast(friendly_error(&e), Some(format!("{e:?}")));
                 self.conn = Connection::Ok;
+                self.events_generation += 1;
                 self.load_containers()
             }
             Message::Retry => self.start_ping(),
@@ -180,8 +195,20 @@ impl App {
                 Task::none()
             }
             Message::Containers(m) => self.update_containers(m),
-            // Filled in by task 2.4; Tick is reserved.
-            Message::Docker(_) | Message::EventsEnded | Message::Tick => Task::none(),
+            Message::Docker(ev) => self.on_docker_event(ev),
+            Message::ReloadContainers => {
+                self.reload_scheduled = false;
+                if self.conn == Connection::Ok {
+                    self.load_containers()
+                } else {
+                    Task::none()
+                }
+            }
+            // The stream is gone: either the daemon stopped (the ping fails and the onboarding
+            // takes over) or it is still there and the new ping renews the subscription.
+            Message::EventsEnded => self.start_ping(),
+            // Reserved.
+            Message::Tick => Task::none(),
         }
     }
 
@@ -229,6 +256,18 @@ impl App {
             }
             Msg::Open(id) => self.update(Message::Navigate(Screen::Detail(id))),
         }
+    }
+
+    /// Container events refresh the list, debounced so a burst causes a single reload.
+    /// Volume and network events are handled in phase 4.
+    fn on_docker_event(&mut self, ev: DockerEvent) -> Task<Message> {
+        if ev.kind != ResourceKind::Container || self.reload_scheduled {
+            return Task::none();
+        }
+        self.reload_scheduled = true;
+        Task::perform(tokio::time::sleep(RELOAD_DEBOUNCE), |()| {
+            Message::ReloadContainers
+        })
     }
 
     /// Connection problems send the user to the onboarding; anything else becomes a toast.
@@ -302,13 +341,49 @@ impl App {
         .into()
     }
 
-    /// While Docker is unreachable, ping again every few seconds.
+    /// While Docker is reachable, listen to its events; while it is not, ping again every few
+    /// seconds.
     pub fn subscription(&self) -> Subscription<Message> {
         match self.conn {
+            Connection::Ok => Subscription::run_with(EventsSource::new(self), |source| {
+                event_messages(source.client.clone())
+            }),
             Connection::Failed(_) => iced::time::every(RETRY_INTERVAL).map(|_| Message::Retry),
-            _ => Subscription::none(),
+            Connection::Checking => Subscription::none(),
         }
     }
+}
+
+/// Identity of the events subscription: a new generation makes iced start a new stream.
+struct EventsSource {
+    client: Arc<dyn DockerClient>,
+    generation: u64,
+}
+
+impl EventsSource {
+    fn new(app: &App) -> Self {
+        Self {
+            client: app.client.clone(),
+            generation: app.events_generation,
+        }
+    }
+}
+
+impl Hash for EventsSource {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.generation.hash(state);
+    }
+}
+
+/// Docker events as messages. When the stream fails or ends, yields `EventsEnded` and stops.
+fn event_messages(client: Arc<dyn DockerClient>) -> impl Stream<Item = Message> {
+    client
+        .events()
+        .take_while(|event| std::future::ready(event.is_ok()))
+        .filter_map(|event| std::future::ready(event.ok().map(Message::Docker)))
+        .chain(futures::stream::once(std::future::ready(
+            Message::EventsEnded,
+        )))
 }
 
 /// Helpers to drive `App::update` in tests. Convention for tasks 2.2-2.4:
@@ -367,7 +442,7 @@ mod tests {
     use super::test_support::{run, settle};
     use super::*;
     use crate::docker::{DockerStream, FakeClient};
-    use crate::model::{LogLine, NetworkInfo, RawStats, VolumeInfo};
+    use crate::model::{ContainerState, LogLine, NetworkInfo, RawStats, ResourceKind, VolumeInfo};
 
     /// An app with no ping in flight (the initial ping task is discarded).
     fn app_with(fake: &Arc<FakeClient>) -> App {
@@ -527,10 +602,8 @@ mod tests {
     fn retry_tick_runs_only_while_failed() {
         let fake = Arc::new(FakeClient::new());
         let mut app = app_with(&fake);
-        for conn in [Connection::Checking, Connection::Ok] {
-            app.conn = conn;
-            assert_eq!(app.subscription().units(), 0);
-        }
+        app.conn = Connection::Checking;
+        assert_eq!(app.subscription().units(), 0);
         app.conn = Connection::Failed(DockerError::NotRunning);
         assert_eq!(app.subscription().units(), 1);
     }
@@ -880,6 +953,222 @@ mod tests {
         assert!(!app.toasts[0].expanded);
         let _ = app.update(Message::ToggleToast(9)); // out of range: ignored
         let _ = app.view();
+    }
+
+    fn container_event(action: &str) -> DockerEvent {
+        DockerEvent {
+            kind: ResourceKind::Container,
+            action: action.into(),
+            id: "web-id".into(),
+        }
+    }
+
+    fn list_calls(fake: &FakeClient) -> usize {
+        fake.calls()
+            .iter()
+            .filter(|c| *c == "list_containers:true")
+            .count()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn container_event_triggers_reload() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let before = list_calls(&fake);
+        fake.stop("web-id").await.unwrap();
+        settle(&mut app, Message::Docker(container_event("die"))).await;
+        assert_eq!(list_calls(&fake), before + 1);
+        let web = app.containers.items.iter().find(|c| c.id == "web-id");
+        assert!(matches!(
+            web.map(|c| &c.state),
+            Some(ContainerState::Exited { .. })
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn burst_of_events_reloads_once() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let before = list_calls(&fake);
+        let tasks: Vec<_> = (0..5)
+            .map(|_| app.update(Message::Docker(container_event("die"))))
+            .collect();
+        tokio::time::advance(Duration::from_millis(100)).await;
+        let mut produced = Vec::new();
+        for task in tasks {
+            produced.extend(run(task).await);
+        }
+        assert_eq!(produced.len(), 1, "only the first event schedules a reload");
+        for m in produced {
+            settle(&mut app, m).await;
+        }
+        assert_eq!(list_calls(&fake), before + 1);
+
+        // The window is over: the next event schedules a new reload.
+        settle(&mut app, Message::Docker(container_event("start"))).await;
+        assert_eq!(list_calls(&fake), before + 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reload_waits_for_the_debounce_window() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let before = list_calls(&fake);
+        let task = app.update(Message::Docker(container_event("die")));
+        let started = tokio::time::Instant::now();
+        let produced = run(task).await;
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        assert!(matches!(produced[..], [Message::ReloadContainers]));
+        // Nothing is listed until the debounce message is handled.
+        assert_eq!(list_calls(&fake), before);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn volume_and_network_events_do_not_reload() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let before = list_calls(&fake);
+        for kind in [ResourceKind::Volume, ResourceKind::Network] {
+            let ev = DockerEvent {
+                kind,
+                action: "create".into(),
+                id: "x".into(),
+            };
+            let handled = settle(&mut app, Message::Docker(ev.clone())).await;
+            assert_eq!(handled.len(), 1);
+        }
+        assert_eq!(list_calls(&fake), before);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reload_is_skipped_when_docker_is_unreachable() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::Docker(container_event("die")));
+        app.conn = Connection::Failed(DockerError::NotRunning);
+        let before = list_calls(&fake);
+        assert!(run(app.update(Message::ReloadContainers)).await.is_empty());
+        assert_eq!(list_calls(&fake), before);
+        // The flag was cleared: a later event can schedule again.
+        app.conn = Connection::Ok;
+        assert_eq!(
+            run(app.update(Message::Docker(container_event("die"))))
+                .await
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn events_ended_with_daemon_down_goes_to_onboarding() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        fake.set_ping_error(Some(DockerError::NotRunning));
+        let handled = settle(&mut app, Message::EventsEnded).await;
+        assert_eq!(app.conn, Connection::Failed(DockerError::NotRunning));
+        assert!(matches!(
+            handled[..],
+            [Message::EventsEnded, Message::Pinged(Err(_))]
+        ));
+        assert!(app.toasts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn events_ended_with_daemon_up_resubscribes() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let before = app.events_generation;
+        settle(&mut app, Message::EventsEnded).await;
+        assert_eq!(app.conn, Connection::Ok);
+        assert_eq!(app.events_generation, before + 1);
+    }
+
+    #[tokio::test]
+    async fn every_successful_ping_renews_the_events_subscription() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = app_with(&fake);
+        let first = EventsSource::new(&app);
+        settle(&mut app, Message::Pinged(Ok(()))).await;
+        let second = EventsSource::new(&app);
+        assert_ne!(hash_of(&first), hash_of(&second));
+        // Same generation, same identity: iced keeps the running subscription.
+        assert_eq!(hash_of(&second), hash_of(&EventsSource::new(&app)));
+    }
+
+    fn hash_of(source: &EventsSource) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        source.hash(&mut h);
+        h.finish()
+    }
+
+    #[test]
+    fn events_subscription_runs_only_while_connected() {
+        let fake = Arc::new(FakeClient::new());
+        let mut app = app_with(&fake);
+        app.conn = Connection::Ok;
+        assert_eq!(app.subscription().units(), 1);
+        app.conn = Connection::Checking;
+        assert_eq!(app.subscription().units(), 0);
+    }
+
+    #[tokio::test]
+    async fn event_messages_forward_events_and_end_when_the_stream_ends() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut stream = Box::pin(event_messages(fake.clone()));
+        let ev = container_event("start");
+        fake.push_event(ev.clone());
+        assert!(matches!(
+            stream.next().await,
+            Some(Message::Docker(e)) if e == ev
+        ));
+        fake.set_ping_error(Some(DockerError::NotRunning));
+        assert!(matches!(stream.next().await, Some(Message::EventsEnded)));
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn event_messages_end_when_the_stream_cannot_open() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        fake.set_ping_error(Some(DockerError::NotRunning));
+        let mut stream = Box::pin(event_messages(fake.clone()));
+        assert!(matches!(stream.next().await, Some(Message::EventsEnded)));
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn action_events_refresh_the_list_without_extra_reload() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let mut stream = Box::pin(event_messages(fake.clone()));
+        let before = list_calls(&fake);
+        settle(
+            &mut app,
+            Message::Containers(containers::Msg::Stop("web-id".into())),
+        )
+        .await;
+        assert_eq!(list_calls(&fake), before);
+        // The events the action caused (die + stop) arrive as a burst.
+        let mut tasks = Vec::new();
+        for _ in 0..2 {
+            let Some(m) = stream.next().await else {
+                panic!("the stream ended early");
+            };
+            tasks.push(app.update(m));
+        }
+        let mut produced = Vec::new();
+        for task in tasks {
+            produced.extend(run(task).await);
+        }
+        for m in produced {
+            settle(&mut app, m).await;
+        }
+        assert_eq!(list_calls(&fake), before + 1);
+        let web = app.containers.items.iter().find(|c| c.id == "web-id");
+        assert!(matches!(
+            web.map(|c| &c.state),
+            Some(ContainerState::Exited { .. })
+        ));
     }
 
     #[test]
