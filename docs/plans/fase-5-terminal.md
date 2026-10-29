@@ -14,6 +14,10 @@
 - Com o terminal focado, os atalhos de uma letra e as setas são do terminal: o `keymap` só trata
   teclas com Ctrl+Shift (palette, `DockTerminal`) e Esc **não** fecha o dock quando o terminal tem
   foco (Esc é do shell). Fechar o dock pelo teclado: Ctrl+J.
+- O `App` não sabe onde está o foco e `keymap` converte Esc em `Escape` mesmo com `captured`:
+  guarde `terminal_focused: bool` (atualizado ao focar/desfocar o terminal) e, nesse caso, em
+  `App::on_key` deixe Esc e as teclas sem Ctrl para o shell antes do `keymap` (não confie no
+  `iced_term` marcar o evento como capturado).
 - Ações registradas: `DockTerminal` (Ctrl+Shift+T) e `OpenExternalTerminal` (palette).
 
 ---

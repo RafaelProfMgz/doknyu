@@ -22,6 +22,8 @@
   `CopyLogs`, `FocusLogSearch` (Ctrl+F quando o foco lógico está no dock: o dock está aberto e
   a aba é Logs).
 - `sparkline` e `human_bytes` vão para `src/ui/components/` (não para `views/widgets.rs`).
+- `keymap::resolve` não conhece o estado do app: Ctrl+F sempre resolve para `FocusSearch`. Em
+  `App::on_key`, troque para `FocusLogSearch` quando o dock estiver aberto na aba Logs.
 
 ---
 
