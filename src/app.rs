@@ -32,6 +32,8 @@ pub enum Connection {
 pub struct Toast {
     pub text: String,
     pub details: Option<String>,
+    /// The technical details are shown.
+    pub expanded: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -44,6 +46,8 @@ pub enum Message {
     /// Opens a link in the default browser.
     OpenUrl(String),
     DismissToast(usize),
+    /// Shows or hides the technical details of a toast.
+    ToggleToast(usize),
     Containers(containers::Msg),
     Docker(DockerEvent),
     EventsEnded,
@@ -79,6 +83,27 @@ async fn ping(client: Arc<dyn DockerClient>) -> Result<(), DockerError> {
 
 async fn list_all(client: Arc<dyn DockerClient>) -> Result<Vec<ContainerInfo>, DockerError> {
     client.list_containers(true).await
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ContainerAction {
+    Start,
+    Stop,
+    Restart,
+    Remove { force: bool },
+}
+
+async fn run_action(
+    client: Arc<dyn DockerClient>,
+    id: String,
+    action: ContainerAction,
+) -> Result<(), DockerError> {
+    match action {
+        ContainerAction::Start => client.start(&id).await,
+        ContainerAction::Stop => client.stop(&id).await,
+        ContainerAction::Restart => client.restart(&id).await,
+        ContainerAction::Remove { force } => client.remove(&id, force).await,
+    }
 }
 
 /// Longest a ping may take before the daemon is considered unreachable.
@@ -148,21 +173,83 @@ impl App {
                 }
                 Task::none()
             }
-            // Filled in by tasks 2.3 (Containers) and 2.4 (Docker, EventsEnded); Tick is reserved.
-            Message::Containers(containers::Msg::Loaded(Ok(items))) => {
+            Message::ToggleToast(i) => {
+                if let Some(toast) = self.toasts.get_mut(i) {
+                    toast.expanded = !toast.expanded;
+                }
+                Task::none()
+            }
+            Message::Containers(m) => self.update_containers(m),
+            // Filled in by task 2.4; Tick is reserved.
+            Message::Docker(_) | Message::EventsEnded | Message::Tick => Task::none(),
+        }
+    }
+
+    fn update_containers(&mut self, m: containers::Msg) -> Task<Message> {
+        use containers::Msg;
+        match m {
+            Msg::Loaded(Ok(items)) => {
                 self.containers.items = items;
                 Task::none()
             }
-            Message::Containers(containers::Msg::Loaded(Err(e))) if e.is_connection() => {
-                self.conn = Connection::Failed(e);
+            Msg::Loaded(Err(e)) => self.fail(e),
+            Msg::Query(query) => {
+                self.containers.query = query;
                 Task::none()
             }
-            Message::Containers(containers::Msg::Loaded(Err(e))) => {
-                self.push_toast(friendly_error(&e), Some(format!("{e:?}")));
+            Msg::ToggleStopped(show) => {
+                self.containers.show_stopped = show;
                 Task::none()
             }
-            Message::Docker(_) | Message::EventsEnded | Message::Tick => Task::none(),
+            Msg::Start(id) => self.container_action(id, ContainerAction::Start),
+            Msg::Stop(id) => self.container_action(id, ContainerAction::Stop),
+            Msg::Restart(id) => self.container_action(id, ContainerAction::Restart),
+            Msg::AskRemove(id) => {
+                self.containers.confirm_remove = Some(id);
+                Task::none()
+            }
+            Msg::ConfirmRemove { force } => match self.containers.confirm_remove.take() {
+                Some(id) => self.container_action(id, ContainerAction::Remove { force }),
+                None => Task::none(),
+            },
+            Msg::CancelRemove => {
+                self.containers.confirm_remove = None;
+                Task::none()
+            }
+            // The list is refreshed by the Docker events the action causes (task 2.4).
+            Msg::ActionDone(id, result) => {
+                self.containers.pending.remove(&id);
+                match result {
+                    Ok(()) => Task::none(),
+                    Err(e) => self.fail(e),
+                }
+            }
+            Msg::OpenPort(port) => {
+                self.update(Message::OpenUrl(format!("http://localhost:{port}")))
+            }
+            Msg::Open(id) => self.update(Message::Navigate(Screen::Detail(id))),
         }
+    }
+
+    /// Connection problems send the user to the onboarding; anything else becomes a toast.
+    fn fail(&mut self, e: DockerError) -> Task<Message> {
+        if e.is_connection() {
+            self.conn = Connection::Failed(e);
+        } else {
+            self.push_toast(friendly_error(&e), Some(format!("{e:?}")));
+        }
+        Task::none()
+    }
+
+    /// Runs a container action unless one is already running for that container.
+    fn container_action(&mut self, id: String, action: ContainerAction) -> Task<Message> {
+        if !self.containers.pending.insert(id.clone()) {
+            return Task::none();
+        }
+        let client = self.client.clone();
+        Task::perform(run_action(client, id.clone(), action), move |r| {
+            Message::Containers(containers::Msg::ActionDone(id.clone(), r))
+        })
     }
 
     fn load_containers(&self) -> Task<Message> {
@@ -172,7 +259,11 @@ impl App {
     }
 
     pub fn push_toast(&mut self, text: String, details: Option<String>) {
-        self.toasts.push(Toast { text, details });
+        self.toasts.push(Toast {
+            text,
+            details,
+            expanded: false,
+        });
     }
 
     pub fn view(&self) -> Element<'_, Message> {
@@ -189,6 +280,9 @@ impl App {
     }
 
     fn main_area(&self) -> Element<'_, Message> {
+        if self.screen == Screen::Containers {
+            return containers::view(&self.containers);
+        }
         let title = match &self.screen {
             Screen::Containers => t!("sidebar.containers"),
             Screen::Volumes => t!("sidebar.volumes"),
@@ -555,6 +649,237 @@ mod tests {
         assert_eq!(app.toasts[0].text, "b");
         let _ = app.update(Message::DismissToast(9)); // out of range: ignored
         assert_eq!(app.toasts.len(), 1);
+    }
+
+    /// An app already connected, with the sample containers loaded.
+    async fn loaded_app(fake: &Arc<FakeClient>) -> App {
+        let mut app = app_with(fake);
+        settle(&mut app, Message::Pinged(Ok(()))).await;
+        assert_eq!(app.containers.items.len(), 3);
+        app
+    }
+
+    #[tokio::test]
+    async fn stop_calls_client_and_marks_pending() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+
+        let task = app.update(Message::Containers(containers::Msg::Stop("web-id".into())));
+        assert!(app.containers.pending.contains("web-id"));
+        let produced = run(task).await;
+        assert!(fake.calls().contains(&"stop:web-id".to_string()));
+        assert!(app.containers.pending.contains("web-id"));
+
+        for m in produced {
+            let _ = app.update(m);
+        }
+        assert!(app.containers.pending.is_empty());
+        assert!(app.toasts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn start_and_restart_call_the_client() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        settle(
+            &mut app,
+            Message::Containers(containers::Msg::Start("worker-id".into())),
+        )
+        .await;
+        settle(
+            &mut app,
+            Message::Containers(containers::Msg::Restart("db-id".into())),
+        )
+        .await;
+        let calls = fake.calls();
+        assert!(calls.contains(&"start:worker-id".to_string()), "{calls:?}");
+        assert!(calls.contains(&"restart:db-id".to_string()), "{calls:?}");
+        assert!(app.containers.pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn action_does_not_reload_the_list() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let before = fake.calls().len();
+        settle(
+            &mut app,
+            Message::Containers(containers::Msg::Stop("web-id".into())),
+        )
+        .await;
+        assert_eq!(fake.calls()[before..], ["stop:web-id".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn action_is_ignored_while_the_container_is_pending() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let first = app.update(Message::Containers(containers::Msg::Stop("web-id".into())));
+        let second = app.update(Message::Containers(containers::Msg::Restart(
+            "web-id".into(),
+        )));
+        assert_eq!(run(first).await.len(), 1);
+        assert!(run(second).await.is_empty());
+        assert!(!fake.calls().contains(&"restart:web-id".to_string()));
+    }
+
+    #[tokio::test]
+    async fn remove_running_requires_force_dialog() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+
+        let task = app.update(Message::Containers(containers::Msg::AskRemove(
+            "web-id".into(),
+        )));
+        assert_eq!(app.containers.confirm_remove.as_deref(), Some("web-id"));
+        assert!(run(task).await.is_empty());
+        assert!(!fake.calls().iter().any(|c| c.starts_with("remove")));
+
+        settle(
+            &mut app,
+            Message::Containers(containers::Msg::ConfirmRemove { force: true }),
+        )
+        .await;
+        assert!(app.containers.confirm_remove.is_none());
+        assert!(app.containers.pending.is_empty());
+        assert!(fake.calls().contains(&"remove:web-id:force".to_string()));
+    }
+
+    #[tokio::test]
+    async fn remove_stopped_uses_plain_remove() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::Containers(containers::Msg::AskRemove(
+            "worker-id".into(),
+        )));
+        settle(
+            &mut app,
+            Message::Containers(containers::Msg::ConfirmRemove { force: false }),
+        )
+        .await;
+        assert!(fake.calls().contains(&"remove:worker-id".to_string()));
+    }
+
+    #[test]
+    fn cancel_remove_closes_the_dialog() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = app_with(&fake);
+        let _ = app.update(Message::Containers(containers::Msg::AskRemove(
+            "web-id".into(),
+        )));
+        let _ = app.update(Message::Containers(containers::Msg::CancelRemove));
+        assert!(app.containers.confirm_remove.is_none());
+    }
+
+    #[tokio::test]
+    async fn confirm_remove_without_dialog_does_nothing() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let task = app.update(Message::Containers(containers::Msg::ConfirmRemove {
+            force: true,
+        }));
+        assert!(run(task).await.is_empty());
+        assert!(app.containers.pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn action_error_creates_toast() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        fake.fail_next(DockerError::Conflict("409 in use".into()));
+        settle(
+            &mut app,
+            Message::Containers(containers::Msg::Stop("web-id".into())),
+        )
+        .await;
+        assert_eq!(app.toasts.len(), 1);
+        assert!(!app.toasts[0].text.contains("409"));
+        assert_eq!(
+            app.toasts[0].details.as_deref(),
+            Some("Conflict(\"409 in use\")")
+        );
+        assert!(app.containers.pending.is_empty());
+        assert_eq!(app.conn, Connection::Ok);
+    }
+
+    #[tokio::test]
+    async fn action_connection_error_goes_to_onboarding() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        fake.fail_next(DockerError::NotRunning);
+        settle(
+            &mut app,
+            Message::Containers(containers::Msg::Stop("web-id".into())),
+        )
+        .await;
+        assert_eq!(app.conn, Connection::Failed(DockerError::NotRunning));
+        assert!(app.toasts.is_empty());
+        assert!(app.containers.pending.is_empty());
+    }
+
+    #[test]
+    fn query_and_toggle_update_the_filters() {
+        let fake = Arc::new(FakeClient::new());
+        let mut app = app_with(&fake);
+        let _ = app.update(Message::Containers(containers::Msg::Query("ng".into())));
+        assert_eq!(app.containers.query, "ng");
+        let _ = app.update(Message::Containers(containers::Msg::ToggleStopped(false)));
+        assert!(!app.containers.show_stopped);
+    }
+
+    #[test]
+    fn open_navigates_to_the_detail() {
+        let fake = Arc::new(FakeClient::new());
+        let mut app = app_with(&fake);
+        let _ = app.update(Message::Containers(containers::Msg::Open("web-id".into())));
+        assert_eq!(app.screen, Screen::Detail("web-id".into()));
+    }
+
+    #[tokio::test]
+    async fn empty_list_shows_empty_state() {
+        let fake = Arc::new(FakeClient::new());
+        let mut app = app_with(&fake);
+        settle(&mut app, Message::Pinged(Ok(()))).await;
+        assert!(app.containers.items.is_empty());
+        let _ = app.view();
+        for locale in ["en", "pt-BR"] {
+            assert_ne!(
+                t!("containers.empty", locale = locale),
+                "containers.empty",
+                "missing {locale} translation"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn containers_view_builds_with_items_dialog_and_pending() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.view();
+        app.containers.pending.insert("db-id".into());
+        app.containers.confirm_remove = Some("web-id".into());
+        let _ = app.view();
+        app.containers.confirm_remove = Some("worker-id".into());
+        let _ = app.view();
+        app.containers.confirm_remove = Some("gone-id".into());
+        app.containers.query = "zzz".into();
+        let _ = app.view();
+    }
+
+    #[test]
+    fn toggle_toast_expands_details() {
+        let fake = Arc::new(FakeClient::new());
+        let mut app = app_with(&fake);
+        app.push_toast("a".into(), Some("detail".into()));
+        app.push_toast("b".into(), Some("other".into()));
+        assert!(!app.toasts[0].expanded);
+        let _ = app.update(Message::ToggleToast(0));
+        assert!(app.toasts[0].expanded);
+        assert!(!app.toasts[1].expanded);
+        let _ = app.update(Message::ToggleToast(0));
+        assert!(!app.toasts[0].expanded);
+        let _ = app.update(Message::ToggleToast(9)); // out of range: ignored
+        let _ = app.view();
     }
 
     #[test]

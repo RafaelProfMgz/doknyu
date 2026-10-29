@@ -1,9 +1,17 @@
-//! Container list. Only the shared state types exist here; the list itself arrives in task 2.3.
+//! Container list: search, filters, per-row actions and the removal dialog.
 
 use std::collections::HashSet;
 
+use iced::widget::{
+    Column, button, checkbox, column, container, row, scrollable, stack, text, text_input,
+};
+use iced::{Alignment, Element, Length};
+use rust_i18n::t;
+
+use crate::app::Message;
 use crate::error::DockerError;
-use crate::model::ContainerInfo;
+use crate::model::{ContainerInfo, ContainerState};
+use crate::views::widgets::{confirm_dialog, status_badge};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContainersState {
@@ -26,8 +34,273 @@ impl Default for ContainersState {
     }
 }
 
-/// Messages of the container list (task 2.3 adds the user actions).
+/// Messages of the container list.
 #[derive(Debug, Clone)]
 pub enum Msg {
     Loaded(Result<Vec<ContainerInfo>, DockerError>),
+    Query(String),
+    ToggleStopped(bool),
+    Start(String),
+    Stop(String),
+    Restart(String),
+    AskRemove(String),
+    ConfirmRemove { force: bool },
+    CancelRemove,
+    ActionDone(String, Result<(), DockerError>),
+    OpenPort(u16),
+    Open(String),
+}
+
+/// Containers that are not running and not on their way to running.
+fn is_stopped(state: &ContainerState) -> bool {
+    matches!(
+        state,
+        ContainerState::Exited { .. } | ContainerState::Created | ContainerState::Dead
+    )
+}
+
+impl ContainersState {
+    /// Items matching the search (name or image, case-insensitive) and the stopped filter;
+    /// running first, then by name.
+    pub fn visible(&self) -> Vec<&ContainerInfo> {
+        let query = self.query.trim().to_lowercase();
+        let mut items: Vec<&ContainerInfo> = self
+            .items
+            .iter()
+            .filter(|c| self.show_stopped || !is_stopped(&c.state))
+            .filter(|c| {
+                query.is_empty()
+                    || c.name.to_lowercase().contains(&query)
+                    || c.image.to_lowercase().contains(&query)
+            })
+            .collect();
+        items.sort_by_cached_key(|c| (!c.state.is_running(), c.name.to_lowercase()));
+        items
+    }
+}
+
+fn msg(m: Msg) -> Message {
+    Message::Containers(m)
+}
+
+fn action_button<'a>(label: String, on_press: Option<Message>) -> Element<'a, Message> {
+    button(text(label).size(13))
+        .style(button::secondary)
+        .on_press_maybe(on_press)
+        .into()
+}
+
+fn row_view<'a>(c: &'a ContainerInfo, busy: bool) -> Element<'a, Message> {
+    let id = &c.id;
+    let enabled = |m: Msg| (!busy).then(|| msg(m));
+
+    let mut ports = row![].spacing(4);
+    for p in c.ports.iter().filter_map(|p| p.public) {
+        ports = ports.push(
+            button(text(format!("localhost:{p}")).size(13))
+                .style(button::text)
+                .on_press(msg(Msg::OpenPort(p))),
+        );
+    }
+
+    let mut actions = row![].spacing(6).align_y(Alignment::Center);
+    if busy {
+        actions = actions.push(text(t!("containers.working").into_owned()).size(13));
+    }
+    if c.state.is_running() {
+        actions = actions
+            .push(action_button(
+                t!("containers.stop").into_owned(),
+                enabled(Msg::Stop(id.clone())),
+            ))
+            .push(action_button(
+                t!("containers.restart").into_owned(),
+                enabled(Msg::Restart(id.clone())),
+            ));
+    } else {
+        actions = actions.push(action_button(
+            t!("containers.start").into_owned(),
+            enabled(Msg::Start(id.clone())),
+        ));
+    }
+    actions = actions.push(
+        button(text(t!("containers.remove").into_owned()).size(13))
+            .style(button::danger)
+            .on_press_maybe(enabled(Msg::AskRemove(id.clone()))),
+    );
+
+    container(
+        row![
+            button(
+                column![
+                    text(c.name.as_str()).size(16),
+                    text(c.image.as_str()).size(12).style(text::secondary),
+                ]
+                .spacing(2)
+            )
+            .style(button::text)
+            .width(Length::FillPortion(3))
+            .on_press(msg(Msg::Open(id.clone()))),
+            column![
+                status_badge(&c.state),
+                text(c.status_text.as_str()).size(12).style(text::secondary),
+            ]
+            .spacing(2)
+            .width(Length::FillPortion(2)),
+            container(ports).width(Length::FillPortion(2)),
+            actions,
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center),
+    )
+    .padding(8)
+    .style(container::bordered_box)
+    .into()
+}
+
+fn remove_dialog(state: &ContainersState, id: &str) -> Element<'static, Message> {
+    let found = state.items.iter().find(|c| c.id == id);
+    let name = found.map_or(id, |c| c.name.as_str());
+    let running = found.is_some_and(|c| c.state.is_running());
+    let (body, label) = if running {
+        (
+            t!("containers.remove_running.body", name = name),
+            t!("containers.remove_running.confirm"),
+        )
+    } else {
+        (
+            t!("containers.remove_dialog.body", name = name),
+            t!("containers.remove_dialog.confirm"),
+        )
+    };
+    confirm_dialog(
+        t!("containers.remove_dialog.title").into_owned(),
+        body.into_owned(),
+        label.into_owned(),
+        msg(Msg::ConfirmRemove { force: running }),
+        msg(Msg::CancelRemove),
+    )
+}
+
+/// The Containers screen.
+pub fn view(state: &ContainersState) -> Element<'_, Message> {
+    let toolbar = row![
+        text_input(&t!("containers.search"), &state.query)
+            .on_input(|q| msg(Msg::Query(q)))
+            .width(Length::Fill),
+        checkbox(state.show_stopped)
+            .label(t!("containers.show_stopped").into_owned())
+            .on_toggle(|v| msg(Msg::ToggleStopped(v))),
+    ]
+    .spacing(16)
+    .align_y(Alignment::Center);
+
+    let visible = state.visible();
+    let list: Element<'_, Message> = if visible.is_empty() {
+        let key = if state.items.is_empty() {
+            t!("containers.empty")
+        } else {
+            t!("containers.no_match")
+        };
+        container(text(key.into_owned()).style(text::secondary))
+            .center_x(Length::Fill)
+            .padding(32)
+            .into()
+    } else {
+        scrollable(
+            Column::with_children(
+                visible
+                    .into_iter()
+                    .map(|c| row_view(c, state.pending.contains(&c.id))),
+            )
+            .spacing(6)
+            .padding([0, 12]),
+        )
+        .height(Length::Fill)
+        .into()
+    };
+
+    let page = container(
+        column![
+            text(t!("containers.title").into_owned()).size(24),
+            toolbar,
+            list,
+        ]
+        .spacing(12),
+    )
+    .padding(24)
+    .width(Length::Fill)
+    .height(Length::Fill);
+
+    match &state.confirm_remove {
+        Some(id) => stack![page, remove_dialog(state, id)].into(),
+        None => page.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ContainerState;
+
+    fn info(id: &str, name: &str, image: &str, state: ContainerState) -> ContainerInfo {
+        ContainerInfo {
+            id: id.into(),
+            name: name.into(),
+            image: image.into(),
+            state,
+            status_text: String::new(),
+            ports: vec![],
+        }
+    }
+
+    fn state_with(items: Vec<ContainerInfo>) -> ContainersState {
+        ContainersState {
+            items,
+            ..ContainersState::default()
+        }
+    }
+
+    fn names(state: &ContainersState) -> Vec<&str> {
+        state.visible().iter().map(|c| c.name.as_str()).collect()
+    }
+
+    #[test]
+    fn visible_filters_by_name_or_image() {
+        let mut s = state_with(vec![
+            info("1", "web", "nginx", ContainerState::Running),
+            info("2", "db", "postgres:16", ContainerState::Running),
+            info("3", "POSTGRES-admin", "pgadmin", ContainerState::Running),
+        ]);
+        s.query = "POSTGRES".into();
+        assert_eq!(names(&s), vec!["db", "POSTGRES-admin"]);
+        s.query = "web".into();
+        assert_eq!(names(&s), vec!["web"]);
+        s.query = "nope".into();
+        assert!(s.visible().is_empty());
+    }
+
+    #[test]
+    fn visible_hides_stopped_when_toggled_off() {
+        let mut s = state_with(vec![
+            info("1", "web", "nginx", ContainerState::Running),
+            info("2", "worker", "w", ContainerState::Exited { code: 1 }),
+            info("3", "new", "n", ContainerState::Created),
+            info("4", "dead", "d", ContainerState::Dead),
+        ]);
+        assert_eq!(s.visible().len(), 4);
+        s.show_stopped = false;
+        assert_eq!(names(&s), vec!["web"]);
+    }
+
+    #[test]
+    fn visible_sorts_running_first() {
+        let s = state_with(vec![
+            info("1", "alpha", "a", ContainerState::Exited { code: 0 }),
+            info("2", "zeta", "z", ContainerState::Running),
+            info("3", "beta", "b", ContainerState::Running),
+            info("4", "Charlie", "c", ContainerState::Created),
+        ]);
+        assert_eq!(names(&s), vec!["beta", "zeta", "alpha", "Charlie"]);
+    }
 }

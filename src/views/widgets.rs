@@ -103,12 +103,20 @@ pub fn toast_stack(toasts: &[Toast]) -> Element<'_, Message> {
     let items = toasts.iter().enumerate().map(|(i, toast)| {
         let mut body = column![text(toast.text.clone())].spacing(4);
         if let Some(details) = &toast.details {
+            let label = if toast.expanded {
+                t!("toast.hide_details")
+            } else {
+                t!("toast.show_details")
+            };
             body = body.push(
-                text(t!("toast.details").into_owned())
-                    .size(12)
-                    .style(text::secondary),
+                button(text(label.into_owned()).size(12))
+                    .padding(0)
+                    .style(button::text)
+                    .on_press(Message::ToggleToast(i)),
             );
-            body = body.push(text(details.clone()).size(12).style(text::secondary));
+            if toast.expanded {
+                body = body.push(text(details.clone()).size(12).style(text::secondary));
+            }
         }
         container(
             row![
