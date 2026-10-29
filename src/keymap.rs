@@ -33,6 +33,7 @@ fn with_ctrl(key: &Key, mods: Modifiers) -> Option<ActionId> {
     };
     match (c.to_lowercase().as_str(), mods.shift()) {
         ("p", true) => Some(ActionId::OpenPalette),
+        ("l", true) => Some(ActionId::DockLogs),
         ("1", false) => Some(ActionId::GoContainers),
         ("2", false) => Some(ActionId::GoVolumes),
         ("3", false) => Some(ActionId::GoNetworks),
@@ -98,6 +99,9 @@ mod tests {
             (ch("b"), ctrl, Some(ActionId::ToggleSidebar)),
             (ch("j"), ctrl, Some(ActionId::ToggleDock)),
             (ch("f"), ctrl, Some(ActionId::FocusSearch)),
+            (ch("l"), ctrl_shift, Some(ActionId::DockLogs)),
+            (ch("L"), ctrl_shift, Some(ActionId::DockLogs)),
+            (ch("l"), ctrl, None),
             (ch("/"), none, Some(ActionId::FocusSearch)),
             (ch("j"), none, Some(ActionId::SelectNext)),
             (ch("k"), none, Some(ActionId::SelectPrev)),

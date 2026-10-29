@@ -25,6 +25,9 @@ pub enum Icon {
     Circle,
     TriangleAlert,
     Copy,
+    ChevronUp,
+    ChevronDown,
+    ArrowDownToLine,
 }
 
 impl Icon {
@@ -47,6 +50,9 @@ impl Icon {
         Icon::Circle,
         Icon::TriangleAlert,
         Icon::Copy,
+        Icon::ChevronUp,
+        Icon::ChevronDown,
+        Icon::ArrowDownToLine,
     ];
 
     /// Glyph in the Lucide font (private use area).
@@ -70,6 +76,9 @@ impl Icon {
             Icon::Circle => '\u{e076}',
             Icon::TriangleAlert => '\u{e193}',
             Icon::Copy => '\u{e09e}',
+            Icon::ChevronUp => '\u{e070}',
+            Icon::ChevronDown => '\u{e06d}',
+            Icon::ArrowDownToLine => '\u{e455}',
         }
     }
 }
@@ -91,6 +100,6 @@ mod tests {
             assert!(('\u{E000}'..='\u{F8FF}').contains(&c), "{i:?} -> {c:?}");
             assert!(seen.insert(c), "{i:?} repeats {c:?}");
         }
-        assert_eq!(seen.len(), 18);
+        assert_eq!(seen.len(), 21);
     }
 }

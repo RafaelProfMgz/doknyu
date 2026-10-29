@@ -3,7 +3,7 @@
 
 use rust_i18n::t;
 
-use crate::app::{App, Connection, Screen};
+use crate::app::{App, Connection, DockTab, Screen};
 use crate::ui::components::Shortcut;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -14,6 +14,12 @@ pub enum ActionId {
     ToggleSidebar,
     ToggleDock,
     FocusSearch,
+    /// Ctrl+F while the dock shows the logs; `App::on_key` swaps it in for `FocusSearch`.
+    FocusLogSearch,
+    /// Shows the logs of the selected container in the dock.
+    DockLogs,
+    ToggleTimestamps,
+    CopyLogs,
     OpenPalette,
     SelectNext,
     SelectPrev,
@@ -70,7 +76,7 @@ const fn def_of(
 }
 
 /// Every action, in the order the palette lists them when nothing else ranks them.
-static ALL: [ActionDef; 18] = [
+static ALL: [ActionDef; 22] = [
     def_of(
         ActionId::GoContainers,
         "actions.go_containers",
@@ -92,6 +98,30 @@ static ALL: [ActionDef; 18] = [
         ctrl("F"),
         true,
     ),
+    // No shortcut of its own: Ctrl+F is routed here by the app when the logs are on screen.
+    def_of(
+        ActionId::FocusLogSearch,
+        "actions.focus_log_search",
+        None,
+        true,
+    ),
+    def_of(
+        ActionId::DockLogs,
+        "actions.dock_logs",
+        Some(Shortcut {
+            ctrl: true,
+            shift: true,
+            key: "L",
+        }),
+        true,
+    ),
+    def_of(
+        ActionId::ToggleTimestamps,
+        "actions.toggle_timestamps",
+        None,
+        true,
+    ),
+    def_of(ActionId::CopyLogs, "actions.copy_logs", None, true),
     def_of(
         ActionId::OpenPalette,
         "actions.open_palette",
@@ -162,10 +192,18 @@ pub fn available(app: &App, id: ActionId) -> bool {
             .as_deref()
             .is_some_and(|id| app.containers.items.iter().any(|c| c.id == id))
     };
+    // The Logs tab is on screen: its search, timestamps and copy only make sense then.
+    let logs_open = connected
+        && app.dock.as_ref().is_some_and(|d| d.tab == DockTab::Logs)
+        && app.detail.is_some();
     match id {
         GoContainers | GoVolumes | GoNetworks | ToggleSidebar | OpenPalette | ThemeSystem
         | ThemeDark | ThemeLight | Escape => true,
         ToggleDock => connected,
+        // Works from the maximized dock too: it does not need the list, only the selection.
+        DockLogs => connected && app.containers.confirm_remove.is_none() && has_selection(),
+        ToggleTimestamps | FocusLogSearch => logs_open,
+        CopyLogs => logs_open && app.detail.as_ref().is_some_and(|d| !d.logs.is_empty()),
         Retry => matches!(app.conn, Connection::Failed(_)),
         FocusSearch | SelectNext | SelectPrev => list_usable,
         OpenSelected | StartStopSelected | RestartSelected | RemoveSelected => {
@@ -207,6 +245,19 @@ mod tests {
             assert_eq!(all().iter().filter(|o| o.id == d.id).count(), 1);
             assert_eq!(def(d.id).id, d.id);
         }
+    }
+
+    #[test]
+    fn log_actions_are_in_the_palette_and_open_logs_has_its_shortcut() {
+        for id in [
+            ActionId::DockLogs,
+            ActionId::ToggleTimestamps,
+            ActionId::CopyLogs,
+            ActionId::FocusLogSearch,
+        ] {
+            assert!(def(id).in_palette, "{id:?}");
+        }
+        assert_eq!(tip(ActionId::DockLogs, "Logs"), "Logs (Ctrl ⇧ L)");
     }
 
     #[test]

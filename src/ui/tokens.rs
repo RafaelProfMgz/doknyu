@@ -73,6 +73,8 @@ pub const TEXT_LG: f32 = 15.0;
 
 pub const ROW_HEIGHT: f32 = 28.0;
 pub const STATUS_BAR_HEIGHT: f32 = 24.0;
+/// Fixed height of one line of the log view, which is what lets it draw only the visible ones.
+pub const LOG_LINE_HEIGHT: f32 = 18.0;
 pub const SIDEBAR_WIDTH: f32 = 200.0;
 pub const SIDEBAR_COLLAPSED: f32 = 40.0;
 

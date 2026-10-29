@@ -17,9 +17,10 @@ use crate::ui::components::{ToastKind, modal};
 use crate::ui::fonts::SANS_SEMIBOLD;
 use crate::ui::prefs;
 use crate::ui::style;
-use crate::ui::theme::{ThemeMode, resolve};
+use crate::ui::theme::{ThemeMode, palette, resolve};
 use crate::ui::tokens::{BORDER_WIDTH, ROW_HEIGHT, SPACE_1, SPACE_2, SPACE_6, TEXT_LG};
 use crate::views::containers::{self, ContainersState};
+use crate::views::detail::{self, DetailState};
 use crate::views::palette::{self, PaletteState};
 use crate::views::widgets::{friendly_error, toast_stack};
 use crate::views::{dock, onboarding, sidebar, status_bar};
@@ -97,6 +98,8 @@ pub enum Message {
     /// Shows or hides the technical details of a toast.
     ToggleToast(usize),
     Containers(containers::Msg),
+    /// Something in the container shown in the dock (logs today).
+    Detail(detail::Msg),
     Docker(DockerEvent),
     EventsEnded,
     /// The wait after the events stream ended is over: check the daemon again.
@@ -144,6 +147,8 @@ pub struct App {
     pub system_mode: iced::theme::Mode,
     pub sidebar_collapsed: bool,
     pub dock: Option<Dock>,
+    /// What the dock tabs keep for the container it shows; exists exactly while `dock` does.
+    pub detail: Option<DetailState>,
     /// The command palette, while it is open.
     pub palette: Option<PaletteState>,
     /// Scroll offset of the palette results, to keep the cursor in view.
@@ -252,6 +257,7 @@ impl App {
             system_mode: iced::theme::Mode::None,
             sidebar_collapsed: false,
             dock: None,
+            detail: None,
             palette: None,
             palette_scroll_y: 0.0,
             config_dir,
@@ -328,6 +334,11 @@ impl App {
                 Task::none()
             }
             Message::Containers(m) => self.update_containers(m),
+            Message::Detail(m) => match &mut self.detail {
+                Some(detail) => detail.update(m),
+                // The dock was closed while the message was on its way.
+                None => Task::none(),
+            },
             Message::Docker(ev) => self.on_docker_event(ev),
             Message::ReloadContainers => {
                 self.reload_scheduled = false;
@@ -355,8 +366,9 @@ impl App {
                 if self.conn != Connection::Ok {
                     return Task::none();
                 }
-                // Opening what is already shown keeps its tab and size.
+                // Opening what is already shown keeps its tab, size and logs.
                 if self.dock.as_ref().is_none_or(|d| d.container_id != id) {
+                    self.detail = Some(DetailState::new(id.clone()));
                     self.dock = Some(Dock {
                         container_id: id,
                         tab: DockTab::Logs,
@@ -366,7 +378,7 @@ impl App {
                 Task::none()
             }
             Message::CloseDock => {
-                self.dock = None;
+                self.close_dock();
                 Task::none()
             }
             Message::ToggleDock => {
@@ -376,26 +388,40 @@ impl App {
                 match (&self.dock, self.containers.selected.clone()) {
                     (None, Some(id)) => self.update(Message::OpenDock(id)),
                     _ => {
-                        self.dock = None;
+                        self.close_dock();
                         Task::none()
                     }
                 }
             }
             Message::DockTab(tab) => {
-                if let Some(dock) = &mut self.dock {
+                let mut task = Task::none();
+                if let Some(dock) = &mut self.dock
+                    && dock.tab != tab
+                {
                     dock.tab = tab;
+                    // The tab is drawn again from scratch, with its list at the end.
+                    if let Some(detail) = &mut self.detail {
+                        detail.reset_scroll();
+                        task = detail::scroll_list_to(0.0);
+                    }
                 }
-                Task::none()
+                task
             }
             Message::ToggleMaximize => {
+                let mut task = Task::none();
                 if let Some(dock) = &mut self.dock {
                     dock.maximized = !dock.maximized;
                     if dock.maximized {
                         // The list is hidden, so the cursor exit of its row never arrives.
                         self.containers.hovered = None;
                     }
+                    // The dock moves in the widget tree, which may start its lists over.
+                    if let Some(detail) = &mut self.detail {
+                        detail.reset_scroll();
+                        task = detail::scroll_list_to(0.0);
+                    }
                 }
-                Task::none()
+                task
             }
             Message::PaneResized(event) => {
                 self.panes.resize(event.split, event.ratio);
@@ -443,6 +469,16 @@ impl App {
             ToggleSidebar => self.update(Message::ToggleSidebar),
             ToggleDock => self.update(Message::ToggleDock),
             FocusSearch => iced::widget::operation::focus(Id::new(containers::SEARCH_ID)),
+            FocusLogSearch => iced::widget::operation::focus(Id::new(detail::logs::SEARCH_ID)),
+            DockLogs => match self.containers.selected.clone() {
+                Some(id) => {
+                    let open = self.update(Message::OpenDock(id));
+                    Task::batch([open, self.update(Message::DockTab(DockTab::Logs))])
+                }
+                None => Task::none(),
+            },
+            ToggleTimestamps => self.update(Message::Detail(detail::Msg::ToggleTimestamps)),
+            CopyLogs => self.update(Message::Detail(detail::Msg::Copy)),
             OpenPalette => {
                 self.palette = Some(PaletteState::default());
                 self.palette_scroll_y = 0.0;
@@ -518,12 +554,21 @@ impl App {
     }
 
     /// Esc closes one layer, the topmost: the command palette, then the removal dialog, then the
-    /// dock, then the search.
+    /// dock (the log search first, if it has text), then the search.
     fn close_top_layer(&mut self) {
         if self.palette.take().is_some() {
             return;
         }
         if self.containers.confirm_remove.take().is_some() {
+            return;
+        }
+        // Esc in the log search clears it first; the next one closes the dock. The app does not
+        // know where the focus is, so a search text that is set counts as the focus being there.
+        if let Some(detail) = &mut self.detail
+            && self.dock.as_ref().is_some_and(|d| d.tab == DockTab::Logs)
+            && !detail.query.is_empty()
+        {
+            detail.set_query(String::new());
             return;
         }
         if self.dock.is_some() {
@@ -637,6 +682,7 @@ impl App {
         let Some(id) = keymap::resolve(key, mods, captured) else {
             return Task::none();
         };
+        let id = self.contextual(id, mods);
         // The dialog only answers to Enter and Esc; nothing else reaches the window behind it.
         if dialog_open.is_some() && id != ActionId::Escape {
             return Task::none();
@@ -649,6 +695,18 @@ impl App {
             self.palette = None;
         }
         self.run_action(id)
+    }
+
+    /// The keymap does not know the app state, so Ctrl+F always comes as `FocusSearch`. With the
+    /// dock open on the Logs tab it means the logs' search instead, also while the dock is
+    /// maximized (the list is hidden then). `/` stays the list's search.
+    fn contextual(&self, id: ActionId, mods: iced::keyboard::Modifiers) -> ActionId {
+        let logs_open = self.dock.as_ref().is_some_and(|d| d.tab == DockTab::Logs);
+        if id == ActionId::FocusSearch && mods.control() && logs_open {
+            ActionId::FocusLogSearch
+        } else {
+            id
+        }
     }
 
     fn update_containers(&mut self, m: containers::Msg) -> Task<Message> {
@@ -666,7 +724,7 @@ impl App {
                         .iter()
                         .any(|c| c.id == dock.container_id)
                 {
-                    self.dock = None;
+                    self.close_dock();
                 }
                 // The container to remove is gone: nothing left to confirm.
                 if let Some(id) = &self.containers.confirm_remove
@@ -753,13 +811,27 @@ impl App {
     fn on_docker_event(&mut self, ev: DockerEvent) -> Task<Message> {
         // The stream is alive.
         self.events_backoff = EVENTS_BACKOFF_MIN;
+        let mut rescroll = Task::none();
+        // The shown container runs again: its streams ended with the old run, so it gets new
+        // ones (a new generation), with the logs starting over.
+        if ev.kind == ResourceKind::Container
+            && matches!(ev.action.as_str(), "start" | "restart")
+            && let Some(detail) = &mut self.detail
+            && detail.id == ev.id
+        {
+            detail.resubscribe();
+            rescroll = detail::scroll_list_to(0.0);
+        }
         if ev.kind != ResourceKind::Container || self.reload_scheduled {
-            return Task::none();
+            return rescroll;
         }
         self.reload_scheduled = true;
-        Task::perform(tokio::time::sleep(RELOAD_DEBOUNCE), |()| {
-            Message::ReloadContainers
-        })
+        Task::batch([
+            rescroll,
+            Task::perform(tokio::time::sleep(RELOAD_DEBOUNCE), |()| {
+                Message::ReloadContainers
+            }),
+        ])
     }
 
     /// Waits (with backoff) before checking the daemon again after the events stream ended.
@@ -780,7 +852,13 @@ impl App {
         self.conn = Connection::Failed(e);
         self.containers.confirm_remove = None;
         self.containers.hovered = None;
+        self.close_dock();
+    }
+
+    /// Closes the dock and forgets what its tabs kept.
+    fn close_dock(&mut self) {
         self.dock = None;
+        self.detail = None;
     }
 
     /// Connection problems send the user to the onboarding; anything else becomes a toast.
@@ -876,7 +954,15 @@ impl App {
         let Some(open) = &self.dock else {
             return self.screen_content();
         };
-        let dock_view = || dock::view(open, self.container_name(&open.container_id));
+        let colors = palette(&self.theme());
+        let dock_view = || {
+            dock::view(
+                open,
+                self.container_name(&open.container_id),
+                self.detail.as_ref(),
+                colors,
+            )
+        };
         if open.maximized {
             return dock_view();
         }
@@ -933,7 +1019,23 @@ impl App {
         };
         // Not a closure: iced needs a plain `fn` to identify the subscription.
         let keys = iced::event::listen_with(key_event);
-        Subscription::batch([system_theme, conn, keys])
+        let logs = self
+            .logs_source()
+            .map_or_else(Subscription::none, detail::logs::subscription);
+        Subscription::batch([system_theme, conn, keys, logs])
+    }
+
+    /// The log stream wanted right now: only with Docker reachable, the dock open and its
+    /// container still in the list. A stopped container counts: its history is worth showing,
+    /// and the stream ends by itself.
+    fn logs_source(&self) -> Option<detail::logs::LogsSource> {
+        let detail = self.detail.as_ref()?;
+        let listed = self.containers.items.iter().any(|c| c.id == detail.id);
+        (self.conn == Connection::Ok && listed).then(|| detail::logs::LogsSource {
+            client: self.client.clone(),
+            id: detail.id.clone(),
+            generation: detail.generation,
+        })
     }
 }
 
@@ -3193,5 +3295,439 @@ mod tests {
             std::fs::read_to_string(dir.join("theme")).unwrap().trim(),
             "light"
         );
+    }
+
+    // ---- Logs tab (task 3.2) ----
+
+    fn log_line(text: &str) -> LogLine {
+        LogLine {
+            stream: crate::model::LogStream::Stdout,
+            timestamp: None,
+            text: text.into(),
+        }
+    }
+
+    fn log_texts(app: &App) -> Vec<String> {
+        app.detail
+            .as_ref()
+            .map(|d| d.logs.iter().map(|l| l.text.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    fn batch_msg(id: &str, generation: u64, texts: &[&str]) -> Message {
+        Message::Detail(detail::Msg::LogBatch {
+            id: id.into(),
+            generation,
+            lines: texts.iter().map(|t| log_line(t)).collect(),
+        })
+    }
+
+    #[tokio::test]
+    async fn the_detail_lives_as_long_as_the_dock() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        assert!(app.detail.is_none());
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        assert_eq!(app.detail.as_ref().map(|d| d.id.as_str()), Some("web-id"));
+
+        let _ = app.update(Message::CloseDock);
+        assert!(app.detail.is_none());
+
+        app.containers.selected = Some("web-id".into());
+        let _ = app.update(Message::ToggleDock);
+        assert!(app.detail.is_some());
+        let _ = app.update(Message::ToggleDock);
+        assert!(app.detail.is_none());
+
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        app.set_failed(DockerError::NotRunning);
+        assert!(app.detail.is_none(), "no Docker: nothing to show");
+
+        app.conn = Connection::Ok;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        fake.remove("web-id", true).await.unwrap();
+        settle(&mut app, Message::ReloadContainers).await;
+        assert!(app.dock.is_none() && app.detail.is_none());
+    }
+
+    #[tokio::test]
+    async fn log_batch_appends() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        let _ = app.update(batch_msg("web-id", 0, &["a", "b"]));
+        let _ = app.update(batch_msg("web-id", 0, &["c"]));
+        assert_eq!(log_texts(&app), ["a", "b", "c"]);
+        // Nothing open: a late batch is just dropped.
+        let _ = app.update(Message::CloseDock);
+        let _ = app.update(batch_msg("web-id", 0, &["late"]));
+        assert!(app.detail.is_none());
+    }
+
+    #[tokio::test]
+    async fn scroll_up_disables_follow() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        let scrolled = |from_bottom| {
+            Message::Detail(detail::Msg::Scrolled {
+                from_bottom,
+                viewport_h: 300.0,
+            })
+        };
+        let _ = app.update(scrolled(200.0));
+        assert_eq!(app.detail.as_ref().map(|d| d.follow), Some(false));
+        let _ = app.update(scrolled(0.0));
+        assert_eq!(app.detail.as_ref().map(|d| d.follow), Some(true));
+    }
+
+    #[tokio::test]
+    async fn switching_container_resets_buffer() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        let _ = app.update(batch_msg("web-id", 0, &["a"]));
+        let _ = app.update(Message::Detail(detail::Msg::Query("a".into())));
+        assert_eq!(log_texts(&app), ["a"]);
+
+        // Opening the same container again changes nothing.
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        assert_eq!(log_texts(&app), ["a"]);
+
+        let _ = app.update(Message::OpenDock("db-id".into()));
+        let detail = app.detail.as_ref().unwrap();
+        assert_eq!(detail.id, "db-id");
+        assert!(detail.logs.is_empty());
+        assert!(detail.query.is_empty() && detail.matches.is_empty());
+        // The old container's late lines do not leak in.
+        let _ = app.update(batch_msg("web-id", 0, &["stale"]));
+        assert!(log_texts(&app).is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn restart_resubscribes_logs() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        fake.push_log("web-id", log_line("old"));
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        let client: Arc<dyn DockerClient> = fake.clone();
+
+        let source = app.logs_source().expect("the dock is open");
+        assert_eq!(source.generation, 0);
+        let mut first = Box::pin(detail::logs::log_messages(
+            client.clone(),
+            source.id,
+            source.generation,
+        ));
+        let _ = app.update(first.next().await.unwrap());
+        assert_eq!(log_texts(&app), ["old"]);
+
+        // The container stops: its stream ends, the detail stays with what it has.
+        fake.stop("web-id").await.unwrap();
+        let _ = app.update(first.next().await.unwrap());
+        assert!(first.next().await.is_none());
+        assert!(app.detail.as_ref().unwrap().logs_ended);
+        assert_eq!(log_texts(&app), ["old"]);
+        assert!(app.dock.is_some());
+
+        // It starts again: a new generation, an empty buffer, and the history comes back once.
+        fake.start("web-id").await.unwrap();
+        let _ = app.update(Message::Docker(container_event("start")));
+        let detail = app.detail.as_ref().unwrap();
+        assert_eq!(detail.generation, 1);
+        assert!(detail.logs.is_empty() && !detail.logs_ended);
+        // A batch still on its way from the old stream is ignored.
+        let _ = app.update(batch_msg("web-id", 0, &["old"]));
+        assert!(log_texts(&app).is_empty());
+
+        let source = app.logs_source().unwrap();
+        assert_eq!(source.generation, 1);
+        let mut second = Box::pin(detail::logs::log_messages(
+            client,
+            source.id,
+            source.generation,
+        ));
+        fake.push_log("web-id", log_line("new"));
+        let _ = app.update(second.next().await.unwrap());
+        assert_eq!(log_texts(&app), ["old", "new"], "history once, then live");
+    }
+
+    #[tokio::test]
+    async fn events_of_other_containers_or_kinds_keep_the_logs() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        let _ = app.update(batch_msg("web-id", 0, &["a"]));
+        let other = DockerEvent {
+            id: "db-id".into(),
+            ..container_event("start")
+        };
+        let _ = app.update(Message::Docker(other));
+        let _ = app.update(Message::Docker(container_event("die")));
+        let volume = DockerEvent {
+            kind: ResourceKind::Volume,
+            ..container_event("start")
+        };
+        let _ = app.update(Message::Docker(volume));
+        assert_eq!(app.detail.as_ref().unwrap().generation, 0);
+        assert_eq!(log_texts(&app), ["a"]);
+    }
+
+    #[tokio::test]
+    async fn logs_are_followed_only_with_the_dock_open_on_an_existing_container() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        assert!(app.logs_source().is_none(), "no dock");
+        let _ = app.subscription();
+
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        assert_eq!(
+            app.logs_source().map(|s| (s.id, s.generation)),
+            Some(("web-id".into(), 0))
+        );
+        let _ = app.subscription();
+
+        // The log tab does not have to be on screen: the buffer keeps filling.
+        let _ = app.update(Message::DockTab(DockTab::Stats));
+        assert!(app.logs_source().is_some());
+
+        // A stopped container still has history worth showing.
+        fake.stop("web-id").await.unwrap();
+        settle(&mut app, Message::ReloadContainers).await;
+        assert!(app.logs_source().is_some());
+
+        // The container left the list: no stream for it.
+        app.containers.items.retain(|c| c.id != "web-id");
+        assert!(app.logs_source().is_none());
+
+        let _ = app.update(Message::CloseDock);
+        assert!(app.logs_source().is_none());
+    }
+
+    #[tokio::test]
+    async fn no_logs_subscription_without_docker() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        app.conn = Connection::Failed(DockerError::NotRunning);
+        assert!(app.logs_source().is_none());
+    }
+
+    #[tokio::test]
+    async fn escape_clears_the_log_search_before_closing_the_dock() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        let _ = app.update(batch_msg("web-id", 0, &["error here"]));
+        let _ = app.update(Message::Detail(detail::Msg::Query("error".into())));
+        app.containers.query = "we".into();
+
+        let _ = app.run_action(ActionId::Escape);
+        assert!(
+            app.dock.is_some(),
+            "the first Esc only clears the log search"
+        );
+        assert!(app.detail.as_ref().unwrap().query.is_empty());
+        assert!(app.detail.as_ref().unwrap().matches.is_empty());
+        assert_eq!(app.containers.query, "we");
+
+        let _ = app.run_action(ActionId::Escape);
+        assert!(app.dock.is_none(), "the next one closes the dock");
+        let _ = app.run_action(ActionId::Escape);
+        assert_eq!(app.containers.query, "");
+    }
+
+    #[tokio::test]
+    async fn the_log_search_is_not_cleared_from_other_tabs() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        let _ = app.update(Message::Detail(detail::Msg::Query("x".into())));
+        let _ = app.update(Message::DockTab(DockTab::Stats));
+        let _ = app.run_action(ActionId::Escape);
+        assert!(app.dock.is_none(), "Esc closes the dock from the Stats tab");
+    }
+
+    #[tokio::test]
+    async fn ctrl_f_searches_the_logs_when_the_dock_shows_them() {
+        let ctrl = iced::keyboard::Modifiers::CTRL;
+        let none = iced::keyboard::Modifiers::empty();
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        assert_eq!(
+            app.contextual(ActionId::FocusSearch, ctrl),
+            ActionId::FocusSearch
+        );
+
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        assert_eq!(
+            app.contextual(ActionId::FocusSearch, ctrl),
+            ActionId::FocusLogSearch
+        );
+        // `/` is the list's search whenever the list is on screen.
+        assert_eq!(
+            app.contextual(ActionId::FocusSearch, none),
+            ActionId::FocusSearch
+        );
+        // Maximized: the list is hidden, so Ctrl+F still goes to the logs.
+        let _ = app.update(Message::ToggleMaximize);
+        assert_eq!(
+            app.contextual(ActionId::FocusSearch, ctrl),
+            ActionId::FocusLogSearch
+        );
+        let _ = app.update(Message::ToggleMaximize);
+
+        let _ = app.update(Message::DockTab(DockTab::Stats));
+        assert_eq!(
+            app.contextual(ActionId::FocusSearch, ctrl),
+            ActionId::FocusSearch
+        );
+        // Other actions are never rewritten.
+        assert_eq!(
+            app.contextual(ActionId::ToggleDock, ctrl),
+            ActionId::ToggleDock
+        );
+    }
+
+    #[tokio::test]
+    async fn ctrl_f_key_press_is_handled_with_the_dock_open() {
+        let ctrl = iced::keyboard::Modifiers::CTRL;
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        // Both ways of getting there end in an operation, not a state change or a panic.
+        let _ = run(app.update(char_key("f", ctrl, false))).await;
+        let _ = run(app.update(char_key("f", ctrl, true))).await;
+        assert!(app.dock.is_some());
+    }
+
+    #[tokio::test]
+    async fn dock_logs_opens_the_selected_container_on_the_logs_tab() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        app.containers.selected = None;
+        assert!(!actions::available(&app, ActionId::DockLogs));
+
+        app.containers.selected = Some("web-id".into());
+        let _ = app.run_action(ActionId::DockLogs);
+        assert_eq!(app.dock, Some(web_dock()));
+
+        // Already open on another tab: it goes to Logs.
+        let _ = app.update(Message::DockTab(DockTab::Stats));
+        let _ = app.run_action(ActionId::DockLogs);
+        assert_eq!(app.dock.as_ref().map(|d| d.tab), Some(DockTab::Logs));
+
+        // Another selection: the dock follows it.
+        app.containers.selected = Some("db-id".into());
+        let _ = app.run_action(ActionId::DockLogs);
+        assert_eq!(app.detail.as_ref().map(|d| d.id.as_str()), Some("db-id"));
+
+        // The shortcut reaches it, also from the maximized dock (the selection is still there).
+        let _ = app.update(Message::CloseDock);
+        let _ = app.update(char_key(
+            "L",
+            iced::keyboard::Modifiers::CTRL | iced::keyboard::Modifiers::SHIFT,
+            false,
+        ));
+        assert_eq!(
+            app.dock.as_ref().map(|d| d.container_id.as_str()),
+            Some("db-id")
+        );
+    }
+
+    #[tokio::test]
+    async fn dock_logs_needs_docker() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        app.containers.selected = Some("web-id".into());
+        app.set_failed(DockerError::NotRunning);
+        assert!(!actions::available(&app, ActionId::DockLogs));
+        let _ = app.run_action(ActionId::DockLogs);
+        assert!(app.dock.is_none());
+    }
+
+    #[tokio::test]
+    async fn log_actions_need_the_logs_tab_on_screen() {
+        const LOG_ACTIONS: [ActionId; 3] = [
+            ActionId::ToggleTimestamps,
+            ActionId::CopyLogs,
+            ActionId::FocusLogSearch,
+        ];
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        for id in LOG_ACTIONS {
+            assert!(!actions::available(&app, id), "{id:?} without a dock");
+        }
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        assert!(actions::available(&app, ActionId::ToggleTimestamps));
+        assert!(actions::available(&app, ActionId::FocusLogSearch));
+        assert!(
+            !actions::available(&app, ActionId::CopyLogs),
+            "nothing to copy yet"
+        );
+        let _ = app.update(batch_msg("web-id", 0, &["a"]));
+        assert!(actions::available(&app, ActionId::CopyLogs));
+
+        let _ = app.update(Message::DockTab(DockTab::Stats));
+        for id in LOG_ACTIONS {
+            assert!(!actions::available(&app, id), "{id:?} on the Stats tab");
+        }
+    }
+
+    #[tokio::test]
+    async fn toggle_timestamps_action_flips_the_option() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        let _ = app.run_action(ActionId::ToggleTimestamps);
+        assert_eq!(app.detail.as_ref().map(|d| d.timestamps), Some(true));
+        let _ = app.run_action(ActionId::ToggleTimestamps);
+        assert_eq!(app.detail.as_ref().map(|d| d.timestamps), Some(false));
+    }
+
+    #[tokio::test]
+    async fn the_list_goes_back_to_the_end_when_it_is_drawn_again() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        let scroll_up = || {
+            Message::Detail(detail::Msg::Scrolled {
+                from_bottom: 90.0,
+                viewport_h: 200.0,
+            })
+        };
+        let _ = app.update(scroll_up());
+        // Other tab and back: the scrollable is new, at its end.
+        let _ = app.update(Message::DockTab(DockTab::Stats));
+        let _ = app.update(Message::DockTab(DockTab::Logs));
+        assert_eq!(app.detail.as_ref().map(|d| d.follow), Some(true));
+
+        // Maximizing moves the dock in the widget tree.
+        let _ = app.update(scroll_up());
+        let _ = app.update(Message::ToggleMaximize);
+        assert_eq!(app.detail.as_ref().map(|d| d.follow), Some(true));
+
+        // Clicking the tab that is already open does not move the list.
+        let _ = app.update(scroll_up());
+        let _ = app.update(Message::DockTab(DockTab::Logs));
+        assert_eq!(app.detail.as_ref().map(|d| d.follow), Some(false));
+    }
+
+    #[tokio::test]
+    async fn view_builds_with_live_logs_in_every_layout() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        let texts: Vec<String> = (0..500).map(|i| format!("line {i}")).collect();
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let _ = app.update(batch_msg("web-id", 0, &refs));
+        let _ = app.update(Message::Detail(detail::Msg::Query("line 4".into())));
+        for tab in [DockTab::Logs, DockTab::Stats, DockTab::Terminal] {
+            let _ = app.update(Message::DockTab(tab));
+            for _ in 0..2 {
+                let _ = app.view();
+                let _ = app.update(Message::ToggleMaximize);
+            }
+        }
     }
 }

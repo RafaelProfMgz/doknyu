@@ -1,5 +1,5 @@
 //! The bottom dock: header with the container name, tabs and window buttons, and the tab body.
-//! The Logs, Stats and Terminal tabs are filled in by phases 3 and 5.
+//! The Logs tab is here; Stats and Terminal are filled in by phases 3.3 and 5.
 
 use iced::widget::{column, container, row, text};
 use iced::{Alignment, Element, Length};
@@ -11,7 +11,8 @@ use crate::ui::components::{chip, icon_button, panel_header};
 use crate::ui::fonts::SANS_MEDIUM;
 use crate::ui::icons::Icon;
 use crate::ui::style;
-use crate::ui::tokens::{SPACE_2, SPACE_4, TEXT};
+use crate::ui::tokens::{Palette, SPACE_2, SPACE_4, TEXT};
+use crate::views::detail::{DetailState, logs};
 
 const TABS: [DockTab; 3] = [DockTab::Logs, DockTab::Stats, DockTab::Terminal];
 
@@ -24,8 +25,14 @@ fn tab_label(tab: DockTab) -> String {
     .into_owned()
 }
 
-/// The dock for `dock`; `name` is the container's name, if it is still in the list.
-pub fn view<'a>(dock: &'a Dock, name: Option<&'a str>) -> Element<'a, Message> {
+/// The dock for `dock`; `name` is the container's name, if it is still in the list, and
+/// `detail` what the tabs keep for it.
+pub fn view<'a>(
+    dock: &'a Dock,
+    name: Option<&'a str>,
+    detail: Option<&'a DetailState>,
+    palette: &Palette,
+) -> Element<'a, Message> {
     let mut title = row![
         text(name.unwrap_or(&dock.container_id))
             .size(TEXT)
@@ -56,16 +63,23 @@ pub fn view<'a>(dock: &'a Dock, name: Option<&'a str>) -> Element<'a, Message> {
         ),
     ];
 
-    let body = container(text(t!("dock.empty_tab").into_owned()).style(style::text::muted))
-        .center(Length::Fill)
-        .padding(SPACE_4)
-        .style(style::container::bg);
+    let body: Element<'a, Message> = match (dock.tab, detail) {
+        (DockTab::Logs, Some(detail)) => container(logs::view(detail, palette))
+            .style(style::container::bg)
+            .into(),
+        _ => container(text(t!("dock.empty_tab").into_owned()).style(style::text::muted))
+            .center(Length::Fill)
+            .padding(SPACE_4)
+            .style(style::container::bg)
+            .into(),
+    };
     column![panel_header(title.into(), actions.into()), body].into()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::tokens::{DARK, LIGHT};
 
     #[test]
     fn view_builds_for_every_tab_and_size() {
@@ -76,8 +90,9 @@ mod tests {
                     tab,
                     maximized,
                 };
-                let _: Element<'_, Message> = view(&dock, Some("web"));
-                let _: Element<'_, Message> = view(&dock, None);
+                let detail = DetailState::new("web-id".into());
+                let _: Element<'_, Message> = view(&dock, Some("web"), Some(&detail), &DARK);
+                let _: Element<'_, Message> = view(&dock, None, None, &LIGHT);
             }
         }
     }

@@ -1,4 +1,5 @@
 pub mod containers;
+pub mod detail;
 pub mod dock;
 pub mod onboarding;
 pub mod palette;
