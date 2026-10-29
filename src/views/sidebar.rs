@@ -1,8 +1,7 @@
 //! Navigation column: Containers, Volumes and Networks, collapsible to icons only.
 
-use iced::widget::button::{Status, Style};
 use iced::widget::{button, center, column, container, row, rule, text, tooltip};
-use iced::{Alignment, Background, Element, Length, Padding, Theme};
+use iced::{Alignment, Element, Length, Padding};
 
 use rust_i18n::t;
 
@@ -10,23 +9,9 @@ use crate::app::{Message, Screen};
 use crate::ui::fonts::SANS_MEDIUM;
 use crate::ui::icons::{Icon, icon};
 use crate::ui::style;
-use crate::ui::theme::palette;
 use crate::ui::tokens::{
     BORDER_WIDTH, ROW_HEIGHT, SIDEBAR_COLLAPSED, SIDEBAR_WIDTH, SPACE_1, SPACE_2, TEXT, TEXT_SM,
 };
-
-/// A ghost button; the active one keeps the `selected` background.
-fn nav_style(active: bool) -> impl Fn(&Theme, Status) -> Style {
-    move |t, s| {
-        let mut style = style::button::ghost(t, s);
-        if active && s != Status::Pressed {
-            let p = palette(t);
-            style.background = Some(Background::Color(p.selected));
-            style.text_color = p.text;
-        }
-        style
-    }
-}
 
 fn entry(
     glyph: Icon,
@@ -61,7 +46,7 @@ fn entry(
         .width(Length::Fill)
         .height(ROW_HEIGHT)
         .padding(Padding::from([0.0, SPACE_2]))
-        .style(nav_style(active))
+        .style(style::button::nav(active))
         .on_press(Message::Navigate(target));
     if !collapsed {
         return item.into();
@@ -133,18 +118,5 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn active_entry_keeps_the_selected_background() {
-        use crate::ui::theme::theme;
-        use crate::ui::tokens::DARK;
-        let t = theme(&DARK);
-        let active = nav_style(true)(&t, Status::Active);
-        assert_eq!(active.background, Some(Background::Color(DARK.selected)));
-        let idle = nav_style(false)(&t, Status::Active);
-        assert_eq!(idle.background, None);
-        let hovered = nav_style(false)(&t, Status::Hovered);
-        assert_eq!(hovered.background, Some(Background::Color(DARK.hover)));
     }
 }

@@ -92,7 +92,8 @@ pub fn view<'a>(conn: &Connection, items: &[ContainerInfo]) -> Element<'a, Messa
             ),
             icon_button(
                 Icon::PanelBottom,
-                Some(Message::ToggleDock),
+                // The dock needs Docker: it cannot be opened from the onboarding.
+                (*conn == Connection::Ok).then_some(Message::ToggleDock),
                 t!("status.toggle_dock").into_owned(),
             ),
             palette_hint,

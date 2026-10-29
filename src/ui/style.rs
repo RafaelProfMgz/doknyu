@@ -1,6 +1,6 @@
 //! Style functions for iced widgets, all derived from the active [`Palette`].
 
-use iced::widget::{rule, scrollable, text_input};
+use iced::widget::{pane_grid, rule, scrollable, text_input};
 use iced::{Background, Border, Color, Shadow, Theme, Vector, border};
 
 use crate::ui::theme::palette;
@@ -99,6 +99,19 @@ pub mod button {
                 ..base(p.accent)
             },
             Status::Disabled => base(p.faint),
+        }
+    }
+
+    /// Sidebar entry: a ghost button; the active one keeps the `selected` background.
+    pub fn nav(active: bool) -> impl Fn(&Theme, Status) -> Style {
+        move |t, s| {
+            let mut style = ghost(t, s);
+            if active && s != Status::Pressed {
+                let p = palette(t);
+                style.background = Some(Background::Color(p.selected));
+                style.text_color = p.text;
+            }
+            style
         }
     }
 
@@ -247,18 +260,6 @@ pub mod text {
             color: Some(palette(t).faint),
         }
     }
-
-    pub fn accent(t: &Theme) -> Style {
-        Style {
-            color: Some(palette(t).accent),
-        }
-    }
-
-    pub fn danger(t: &Theme) -> Style {
-        Style {
-            color: Some(palette(t).danger),
-        }
-    }
 }
 
 /// Search box and other single-line inputs: no heavy frame, `accent` border while focused.
@@ -324,6 +325,22 @@ pub fn thin_scrollbar() -> scrollable::Direction {
     )
 }
 
+/// Divider of the pane grid: a thin accent line while hovered or dragged, no region highlight.
+pub fn pane_grid_style(t: &Theme) -> pane_grid::Style {
+    let line = pane_grid::Line {
+        color: palette(t).accent,
+        width: BORDER_WIDTH,
+    };
+    pane_grid::Style {
+        hovered_region: pane_grid::Highlight {
+            background: Background::Color(Color::TRANSPARENT),
+            border: rounded_border(Color::TRANSPARENT, 0.0),
+        },
+        picked_split: line,
+        hovered_split: line,
+    }
+}
+
 /// 1px divider in the border color.
 pub fn rule_border(t: &Theme) -> rule::Style {
     rule::Style {
@@ -331,5 +348,33 @@ pub fn rule_border(t: &Theme) -> rule::Style {
         radius: border::Radius::default(),
         fill_mode: rule::FillMode::Full,
         snap: true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::theme::theme;
+    use crate::ui::tokens::{DARK, LIGHT};
+    use iced::widget::button::Status;
+
+    #[test]
+    fn active_nav_entry_keeps_the_selected_background() {
+        let t = theme(&DARK);
+        let active = button::nav(true)(&t, Status::Active);
+        assert_eq!(active.background, Some(Background::Color(DARK.selected)));
+        let idle = button::nav(false)(&t, Status::Active);
+        assert_eq!(idle.background, None);
+        let hovered = button::nav(false)(&t, Status::Hovered);
+        assert_eq!(hovered.background, Some(Background::Color(DARK.hover)));
+    }
+
+    #[test]
+    fn pane_grid_divider_is_accent_in_both_themes() {
+        for p in [&DARK, &LIGHT] {
+            let s = pane_grid_style(&theme(p));
+            assert_eq!(s.hovered_split.color, p.accent);
+            assert_eq!(s.picked_split.color, p.accent);
+        }
     }
 }

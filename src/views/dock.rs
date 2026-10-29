@@ -1,8 +1,8 @@
 //! The bottom dock: header with the container name, tabs and window buttons, and the tab body.
 //! The Logs, Stats and Terminal tabs are filled in by phases 3 and 5.
 
-use iced::widget::{column, container, pane_grid, row, text};
-use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
+use iced::widget::{column, container, row, text};
+use iced::{Alignment, Element, Length};
 use rust_i18n::t;
 
 use crate::app::{Dock, DockTab, Message};
@@ -10,8 +10,7 @@ use crate::ui::components::{chip, icon_button, panel_header};
 use crate::ui::fonts::SANS_MEDIUM;
 use crate::ui::icons::Icon;
 use crate::ui::style;
-use crate::ui::theme::palette;
-use crate::ui::tokens::{BORDER_WIDTH, RADIUS, SPACE_2, SPACE_4, TEXT};
+use crate::ui::tokens::{SPACE_2, SPACE_4, TEXT};
 
 const TABS: [DockTab; 3] = [DockTab::Logs, DockTab::Stats, DockTab::Terminal];
 
@@ -62,30 +61,9 @@ pub fn view<'a>(dock: &'a Dock, name: Option<&'a str>) -> Element<'a, Message> {
     column![panel_header(title.into(), actions.into()), body].into()
 }
 
-/// Divider of the pane grid: a thin accent line while hovered or dragged, no region highlight.
-pub fn grid_style(t: &Theme) -> pane_grid::Style {
-    let line = pane_grid::Line {
-        color: palette(t).accent,
-        width: BORDER_WIDTH,
-    };
-    pane_grid::Style {
-        hovered_region: pane_grid::Highlight {
-            background: Background::Color(Color::TRANSPARENT),
-            border: Border {
-                radius: RADIUS.into(),
-                ..Border::default()
-            },
-        },
-        picked_split: line,
-        hovered_split: line,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::theme::theme;
-    use crate::ui::tokens::{DARK, LIGHT};
 
     #[test]
     fn view_builds_for_every_tab_and_size() {
@@ -99,15 +77,6 @@ mod tests {
                 let _: Element<'_, Message> = view(&dock, Some("web"));
                 let _: Element<'_, Message> = view(&dock, None);
             }
-        }
-    }
-
-    #[test]
-    fn divider_is_accent_in_both_themes() {
-        for p in [&DARK, &LIGHT] {
-            let s = grid_style(&theme(p));
-            assert_eq!(s.hovered_split.color, p.accent);
-            assert_eq!(s.picked_split.color, p.accent);
         }
     }
 }

@@ -249,6 +249,8 @@ impl App {
         match m {
             Message::Navigate(screen) => {
                 self.screen = screen;
+                // The row under the cursor is not drawn on the new screen, so no exit comes.
+                self.containers.hovered = None;
                 Task::none()
             }
             Message::Pinged(Ok(())) => {
@@ -307,6 +309,10 @@ impl App {
                 Task::none()
             }
             Message::OpenDock(id) => {
+                // Without Docker there is nothing to show; the onboarding is on screen.
+                if self.conn != Connection::Ok {
+                    return Task::none();
+                }
                 // Opening what is already shown keeps its tab and size.
                 if self.dock.as_ref().is_none_or(|d| d.container_id != id) {
                     self.dock = Some(Dock {
@@ -321,13 +327,18 @@ impl App {
                 self.dock = None;
                 Task::none()
             }
-            Message::ToggleDock => match (&self.dock, self.containers.selected.clone()) {
-                (None, Some(id)) => self.update(Message::OpenDock(id)),
-                _ => {
-                    self.dock = None;
-                    Task::none()
+            Message::ToggleDock => {
+                if self.conn != Connection::Ok {
+                    return Task::none();
                 }
-            },
+                match (&self.dock, self.containers.selected.clone()) {
+                    (None, Some(id)) => self.update(Message::OpenDock(id)),
+                    _ => {
+                        self.dock = None;
+                        Task::none()
+                    }
+                }
+            }
             Message::DockTab(tab) => {
                 if let Some(dock) = &mut self.dock {
                     dock.tab = tab;
@@ -337,6 +348,10 @@ impl App {
             Message::ToggleMaximize => {
                 if let Some(dock) = &mut self.dock {
                     dock.maximized = !dock.maximized;
+                    if dock.maximized {
+                        // The list is hidden, so the cursor exit of its row never arrives.
+                        self.containers.hovered = None;
+                    }
                 }
                 Task::none()
             }
@@ -364,19 +379,28 @@ impl App {
                 {
                     self.dock = None;
                 }
+                // The container to remove is gone: nothing left to confirm.
+                if let Some(id) = &self.containers.confirm_remove
+                    && !self.containers.items.iter().any(|c| &c.id == id)
+                {
+                    self.containers.confirm_remove = None;
+                }
                 Task::none()
             }
             Msg::Loaded(_, Err(e)) => self.fail(e),
             Msg::Query(query) => {
                 self.containers.query = query;
+                self.containers.keep_selection_visible();
                 Task::none()
             }
             Msg::ToggleRunning => {
                 self.containers.show_running = !self.containers.show_running;
+                self.containers.keep_selection_visible();
                 Task::none()
             }
             Msg::ToggleStopped => {
                 self.containers.show_stopped = !self.containers.show_stopped;
+                self.containers.keep_selection_visible();
                 Task::none()
             }
             Msg::Select(id) => {
@@ -457,6 +481,7 @@ impl App {
     fn set_failed(&mut self, e: DockerError) {
         self.conn = Connection::Failed(e);
         self.containers.confirm_remove = None;
+        self.containers.hovered = None;
         self.dock = None;
     }
 
@@ -561,7 +586,7 @@ impl App {
         })
         .spacing(BORDER_WIDTH)
         .on_resize(SPACE_1, Message::PaneResized)
-        .style(dock::grid_style)
+        .style(style::pane_grid_style)
         .into()
     }
 
@@ -1626,6 +1651,7 @@ mod tests {
     fn open_dock_from_containers_msg() {
         let fake = Arc::new(FakeClient::new());
         let mut app = app_with(&fake);
+        app.conn = Connection::Ok;
         assert_eq!(app.dock, None);
         let _ = app.update(Message::Containers(containers::Msg::Open("web-id".into())));
         assert_eq!(app.dock, Some(web_dock()));
@@ -1646,6 +1672,7 @@ mod tests {
     fn reopening_the_same_container_keeps_the_dock_as_it_is() {
         let fake = Arc::new(FakeClient::new());
         let mut app = app_with(&fake);
+        app.conn = Connection::Ok;
         let _ = app.update(Message::OpenDock("web-id".into()));
         let _ = app.update(Message::DockTab(DockTab::Stats));
         let _ = app.update(Message::OpenDock("web-id".into()));
@@ -1656,6 +1683,7 @@ mod tests {
     fn close_and_toggle_dock() {
         let fake = Arc::new(FakeClient::new());
         let mut app = app_with(&fake);
+        app.conn = Connection::Ok;
         let _ = app.update(Message::OpenDock("web-id".into()));
 
         let _ = app.update(Message::DockTab(DockTab::Stats));
@@ -1685,6 +1713,7 @@ mod tests {
     fn select_and_double_click_open() {
         let fake = Arc::new(FakeClient::new());
         let mut app = app_with(&fake);
+        app.conn = Connection::Ok;
         let _ = app.update(Message::Containers(containers::Msg::Select(
             "web-id".into(),
         )));
@@ -1856,6 +1885,113 @@ mod tests {
         settle(&mut app, Message::Pinged(Ok(()))).await;
         assert_eq!(app.conn, Connection::Ok);
         assert_eq!(app.dock, None);
+    }
+
+    #[tokio::test]
+    async fn dock_does_not_open_while_docker_is_down() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::Containers(containers::Msg::Select(
+            "web-id".into(),
+        )));
+        let _ = app.update(Message::Pinged(Err(DockerError::NotRunning)));
+        let _ = app.update(Message::ToggleDock);
+        assert_eq!(app.dock, None);
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        assert_eq!(app.dock, None);
+        let _ = app.update(Message::Containers(containers::Msg::Open("web-id".into())));
+        assert_eq!(app.dock, None);
+        // Back online the dock is still closed.
+        settle(&mut app, Message::Pinged(Ok(()))).await;
+        assert_eq!(app.conn, Connection::Ok);
+        assert_eq!(app.dock, None);
+    }
+
+    #[tokio::test]
+    async fn selection_moves_to_the_first_visible_row_when_a_filter_hides_it() {
+        use containers::Msg;
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let first_visible = |app: &App| app.containers.visible().first().map(|c| c.id.clone());
+        let select = |app: &mut App, id: &str| {
+            let _ = app.update(Message::Containers(Msg::Select(id.into())));
+        };
+
+        // The stopped chip is switched off while a stopped container is selected.
+        select(&mut app, "worker-id");
+        let _ = app.update(Message::Containers(Msg::ToggleStopped));
+        assert_eq!(app.containers.selected, first_visible(&app));
+        assert!(app.containers.selected.is_some());
+        // Nothing visible at all: no selection.
+        let _ = app.update(Message::Containers(Msg::ToggleRunning));
+        assert_eq!(app.containers.selected, None);
+
+        // A selection that stays visible is kept.
+        let _ = app.update(Message::Containers(Msg::ToggleRunning));
+        select(&mut app, "web-id");
+        let _ = app.update(Message::Containers(Msg::Query("web".into())));
+        assert_eq!(app.containers.selected.as_deref(), Some("web-id"));
+
+        // The search hides the selection.
+        select(&mut app, "web-id");
+        let _ = app.update(Message::Containers(Msg::Query("db".into())));
+        assert_eq!(app.containers.selected.as_deref(), Some("db-id"));
+        let _ = app.update(Message::Containers(Msg::Query("zzz".into())));
+        assert_eq!(app.containers.selected, None);
+
+        // Switching the running chip off hides a running selection.
+        let _ = app.update(Message::Containers(Msg::Query(String::new())));
+        let _ = app.update(Message::Containers(Msg::ToggleStopped));
+        select(&mut app, "web-id");
+        let _ = app.update(Message::Containers(Msg::ToggleRunning));
+        assert_eq!(app.containers.selected, first_visible(&app));
+        assert_eq!(app.containers.selected.as_deref(), Some("worker-id"));
+    }
+
+    #[tokio::test]
+    async fn hover_is_cleared_on_navigation_failure_and_maximize() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let hover = |app: &mut App| {
+            let _ = app.update(Message::Containers(containers::Msg::Hover("web-id".into())));
+            assert!(app.containers.hovered.is_some());
+        };
+
+        hover(&mut app);
+        let _ = app.update(Message::Navigate(Screen::Volumes));
+        assert_eq!(app.containers.hovered, None);
+
+        hover(&mut app);
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        let _ = app.update(Message::ToggleMaximize);
+        assert_eq!(app.containers.hovered, None);
+        // Restoring does not need to touch it.
+        hover(&mut app);
+        let _ = app.update(Message::ToggleMaximize);
+        assert!(app.containers.hovered.is_some());
+
+        let _ = app.update(Message::Pinged(Err(DockerError::NotRunning)));
+        assert_eq!(app.containers.hovered, None);
+    }
+
+    #[tokio::test]
+    async fn remove_dialog_closes_quietly_when_its_container_is_gone() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::Containers(containers::Msg::AskRemove(
+            "web-id".into(),
+        )));
+        fake.remove("web-id", true).await.unwrap();
+        settle(&mut app, Message::ReloadContainers).await;
+        assert!(app.containers.confirm_remove.is_none());
+        assert!(app.toasts.is_empty());
+
+        // A dialog for a container that is still there stays open across reloads.
+        let _ = app.update(Message::Containers(containers::Msg::AskRemove(
+            "db-id".into(),
+        )));
+        settle(&mut app, Message::ReloadContainers).await;
+        assert_eq!(app.containers.confirm_remove.as_deref(), Some("db-id"));
     }
 
     #[test]

@@ -119,6 +119,19 @@ impl ContainersState {
         items
     }
 
+    /// After a filter changed: a selection that is no longer in [`Self::visible`] moves to the
+    /// first visible row, or to nothing if the list is empty.
+    pub fn keep_selection_visible(&mut self) {
+        let visible = self.visible();
+        let hidden = self
+            .selected
+            .as_deref()
+            .is_some_and(|id| !visible.iter().any(|c| c.id == id));
+        if hidden {
+            self.selected = visible.first().map(|c| c.id.clone());
+        }
+    }
+
     /// Replaces the list after a reload. A selected container that is gone hands the selection
     /// to the one now at its position in [`Self::visible`] (or the last one, or nothing).
     pub fn set_items(&mut self, items: Vec<ContainerInfo>) {
@@ -161,8 +174,12 @@ const NAME_WIDTH: Length = Length::FillPortion(3);
 const IMAGE_WIDTH: Length = Length::FillPortion(3);
 const PORTS_WIDTH: Length = Length::FillPortion(2);
 const STATUS_WIDTH: f32 = 8.0 * SPACE_4;
-/// Room for the widest set of actions (stop, restart, remove).
-const ACTIONS_WIDTH: f32 = 3.0 * ICON_BUTTON_SIZE + 2.0 * SPACE_1;
+/// Room for the widest set of actions (stop, restart, remove) and the spaces between them,
+/// the leading spacer of `row_actions` included.
+const ACTIONS_WIDTH: f32 = 3.0 * ICON_BUTTON_SIZE + 3.0 * SPACE_1;
+
+// Compile-time check: the spacer in front of the buttons also counts as a child of the row.
+const _: () = assert!(ACTIONS_WIDTH >= 3.0 * ICON_BUTTON_SIZE + 3.0 * SPACE_1);
 
 /// Public ports of the container, each once (Docker lists IPv4 and IPv6 separately).
 fn public_ports(c: &ContainerInfo) -> Vec<u16> {
