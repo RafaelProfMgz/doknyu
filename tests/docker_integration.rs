@@ -215,3 +215,16 @@ async fn volume_in_use_conflict() {
     let err = client.remove_volume(&vol).await.unwrap_err();
     assert!(matches!(err, DockerError::Conflict(_)), "got {err:?}");
 }
+
+#[tokio::test]
+#[ignore]
+async fn start_running_is_ok() {
+    let docker = raw().await;
+    let mut cleanup = Cleanup::new();
+    let name = create(&docker, &mut cleanup, "sleep 300", None).await;
+    let client = connect().unwrap();
+    client.start(&name).await.unwrap();
+    client.start(&name).await.unwrap();
+    client.stop(&name).await.unwrap();
+    client.stop(&name).await.unwrap();
+}

@@ -169,6 +169,15 @@ impl FakeClient {
         }
     }
 
+    /// For stream constructors: records the call and returns an error to emit
+    /// as the only item (pending `fail_next`, or a connection-level ping error).
+    fn begin_stream(st: &mut State, call: String) -> Option<DockerError> {
+        st.calls.push(call);
+        st.next_error
+            .take()
+            .or_else(|| st.ping_error.clone().filter(DockerError::is_connection))
+    }
+
     pub fn set_ping_error(&self, e: Option<DockerError>) {
         self.lock().ping_error = e;
     }
@@ -211,20 +220,44 @@ impl FakeClient {
     fn set_state(&self, call: String, id: &str, new: ContainerState) -> Result<(), DockerError> {
         let mut st = self.begin(call)?;
         let c = find_container(&mut st, id)?;
-        c.status_text = match new {
-            ContainerState::Running => "Up less than a second".into(),
-            _ => "Exited (0) just now".into(),
-        };
-        c.state = new;
+        if c.state != new {
+            c.status_text = match new {
+                ContainerState::Running => "Up less than a second".into(),
+                _ => "Exited (0) just now".into(),
+            };
+            c.state = new;
+        }
         Ok(())
     }
 }
 
+/// Resolves an exact id, an exact name, or a unique id prefix (like Docker).
+fn container_index(st: &State, id: &str) -> Result<usize, DockerError> {
+    let not_found = || DockerError::NotFound(format!("No such container: {id}"));
+    if id.is_empty() {
+        return Err(not_found());
+    }
+    if let Some(i) = st
+        .containers
+        .iter()
+        .position(|c| c.id == id || c.name == id)
+    {
+        return Ok(i);
+    }
+    let mut hits = st
+        .containers
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.id.starts_with(id));
+    match (hits.next(), hits.next()) {
+        (Some((i, _)), None) => Ok(i),
+        _ => Err(not_found()),
+    }
+}
+
 fn find_container<'a>(st: &'a mut State, id: &str) -> Result<&'a mut ContainerInfo, DockerError> {
-    st.containers
-        .iter_mut()
-        .find(|c| c.id == id)
-        .ok_or_else(|| DockerError::NotFound(format!("No such container: {id}")))
+    let i = container_index(st, id)?;
+    Ok(&mut st.containers[i])
 }
 
 #[async_trait::async_trait]
@@ -283,7 +316,9 @@ impl DockerClient for FakeClient {
 
     fn logs(&self, id: &str, tail: usize) -> DockerStream<LogLine> {
         let mut st = self.lock();
-        st.calls.push(format!("logs:{id}"));
+        if let Some(e) = Self::begin_stream(&mut st, format!("logs:{id}")) {
+            return futures::stream::once(async move { Err(e) }).boxed();
+        }
         if !st.containers.iter().any(|c| c.id == id) {
             let err = DockerError::NotFound(format!("No such container: {id}"));
             return futures::stream::once(async move { Err(err) }).boxed();
@@ -295,25 +330,34 @@ impl DockerClient for FakeClient {
                 let _ = tx.send(line.clone());
             }
         }
-        st.log_subs.entry(id.to_string()).or_default().push(tx);
+        let subs = st.log_subs.entry(id.to_string()).or_default();
+        subs.retain(|tx| !tx.is_closed());
+        subs.push(tx);
         into_stream(rx)
     }
 
     fn stats(&self, id: &str) -> DockerStream<RawStats> {
         let mut st = self.lock();
-        st.calls.push(format!("stats:{id}"));
+        if let Some(e) = Self::begin_stream(&mut st, format!("stats:{id}")) {
+            return futures::stream::once(async move { Err(e) }).boxed();
+        }
         if !st.containers.iter().any(|c| c.id == id) {
             let err = DockerError::NotFound(format!("No such container: {id}"));
             return futures::stream::once(async move { Err(err) }).boxed();
         }
         let (tx, rx) = unbounded_channel();
-        st.stats_subs.entry(id.to_string()).or_default().push(tx);
+        let subs = st.stats_subs.entry(id.to_string()).or_default();
+        subs.retain(|tx| !tx.is_closed());
+        subs.push(tx);
         into_stream(rx)
     }
 
     fn events(&self) -> DockerStream<DockerEvent> {
         let mut st = self.lock();
-        st.calls.push("events".into());
+        if let Some(e) = Self::begin_stream(&mut st, "events".into()) {
+            return futures::stream::once(async move { Err(e) }).boxed();
+        }
+        st.event_subs.retain(|tx| !tx.is_closed());
         let (tx, rx) = unbounded_channel();
         st.event_subs.push(tx);
         into_stream(rx)
@@ -543,5 +587,41 @@ mod tests {
         let removed = c.prune_volumes().await.unwrap();
         assert_eq!(removed.len(), 1);
         assert_eq!(c.list_volumes().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fail_next_applies_to_streams() {
+        let c = FakeClient::with_sample_data();
+        c.fail_next(DockerError::Other("boom".into()));
+        let mut s = c.logs("web-id", 1);
+        assert_eq!(s.next().await, Some(Err(DockerError::Other("boom".into()))));
+        assert!(s.next().await.is_none());
+        assert!(c.start("db-id").await.is_ok());
+        c.set_ping_error(Some(DockerError::NotRunning));
+        let mut e = c.events();
+        assert_eq!(e.next().await, Some(Err(DockerError::NotRunning)));
+        let mut st = c.stats("web-id");
+        assert_eq!(st.next().await, Some(Err(DockerError::NotRunning)));
+    }
+
+    #[tokio::test]
+    async fn stop_by_name_works() {
+        let c = FakeClient::with_sample_data();
+        c.stop("web").await.unwrap();
+        c.stop("db-").await.unwrap();
+        let all = c.list_containers(true).await.unwrap();
+        assert!(all.iter().all(|x| !x.state.is_running()));
+        // "w" is an ambiguous prefix (web-id, worker-id).
+        assert!(matches!(c.stop("w").await, Err(DockerError::NotFound(_))));
+        c.stop("wor").await.unwrap();
+        assert!(matches!(c.stop("zzz").await, Err(DockerError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn start_running_is_idempotent() {
+        let c = FakeClient::with_sample_data();
+        let before = c.list_containers(true).await.unwrap();
+        c.start("web-id").await.unwrap();
+        assert_eq!(c.list_containers(true).await.unwrap(), before);
     }
 }

@@ -43,6 +43,17 @@ impl BollardClient {
     }
 }
 
+/// Docker answers 304 when the container is already in the requested state;
+/// treat that as success so start/stop are idempotent.
+fn ignore_not_modified(r: Result<(), ::bollard::errors::Error>) -> Result<(), DockerError> {
+    match r {
+        Err(::bollard::errors::Error::DockerResponseServerError {
+            status_code: 304, ..
+        }) => Ok(()),
+        other => other.map_err(api_error_from),
+    }
+}
+
 impl Default for BollardClient {
     fn default() -> Self {
         Self::new()
@@ -67,25 +78,16 @@ impl DockerClient for BollardClient {
     }
 
     async fn start(&self, id: &str) -> Result<(), DockerError> {
-        self.docker()?
-            .start_container(id, None)
-            .await
-            .map_err(api_error_from)
+        ignore_not_modified(self.docker()?.start_container(id, None).await)
     }
 
     async fn stop(&self, id: &str) -> Result<(), DockerError> {
         let opts = StopContainerOptionsBuilder::new().t(10).build();
-        self.docker()?
-            .stop_container(id, Some(opts))
-            .await
-            .map_err(api_error_from)
+        ignore_not_modified(self.docker()?.stop_container(id, Some(opts)).await)
     }
 
     async fn restart(&self, id: &str) -> Result<(), DockerError> {
-        self.docker()?
-            .restart_container(id, None)
-            .await
-            .map_err(api_error_from)
+        ignore_not_modified(self.docker()?.restart_container(id, None).await)
     }
 
     async fn remove(&self, id: &str, force: bool) -> Result<(), DockerError> {
