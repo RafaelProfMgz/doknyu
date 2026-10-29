@@ -26,3 +26,15 @@ jobs:
       - run: cargo test
       - name: Testes de integração (Docker)
         run: cargo test -- --ignored
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89
+      - uses: Swatinem/rust-cache@v2
+      - name: Dependências de sistema
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libvulkan-dev pkg-config
+      - run: cargo build --all-targets

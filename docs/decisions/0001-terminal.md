@@ -103,15 +103,22 @@ fn main() -> iced::Result {
   CLI podem diferir do que o bollard usa). Se ausente: aba mostra aviso e só o botão externo.
 - **API instável**: o README do `iced_term` avisa que não promete API estável; fixar `=0.8.x` ou
   `~0.8` e revisar a cada bump do iced.
-- `Terminal::new` e o subscription do `iced_term` dão `panic!` se o canal de eventos fechar
-  fora do `Exit` (`src/terminal.rs`); tratar fim de sessão via `Action::Shutdown` e não reusar
-  o mesmo `id` de `Terminal` ao criar "Nova sessão" (usar `id` incremental; o `id` é o hash da
-  subscription).
+- O stream da subscription do `iced_term` dá `panic!` se o canal de eventos fechar fora do
+  `Exit` (`Terminal::new` não dá). Tratar fim de sessão via `Action::Shutdown` e não reusar o
+  mesmo `id` de `Terminal` ao criar "Nova sessão" (usar `id` incremental; o `id` é o hash da
+  subscription). Após o `Exit`, remover o `Terminal` **e** a subscription no mesmo `update`:
+  subscription ativa sem `Terminal` faz `recv()` devolver `None` em loop (CPU 100%).
+- **Deadlock se a subscription for pausada com a sessão viva:** `EventProxy::send_event` usa
+  `blocking_send` num canal de 100 (`iced_term` `backend.rs:583`) e o `pty_read` do alacritty
+  envia `Wakeup` segurando o lock do `Term`. Se a subscription parar (ex.: usuário troca para a
+  aba Logs com `top` rodando), o canal enche, a thread do PTY bloqueia com o lock e o próximo
+  `view` trava o app.
 - `Shutdown` ocorre quando o PTY filho sai: cobre `exit`, mas também container parado/removido
   (a CLI sai com código != 0); a UI deve mostrar "Sessão encerrada" nos dois casos.
-- `alacritty_terminal` define `TERM`/`COLORTERM` no processo do app; passar
-  `env: {TERM: xterm-256color}` em `BackendSettings` não é necessário para o exec (a CLI repassa
-  `TERM` do PTY), mas conferir que o container recebe um TERM válido (`echo $TERM`).
+- `TERM`: o `iced_term` não chama `alacritty_terminal::tty::setup_env` e a CLI `docker` não
+  repassa `TERM` ao container. Aberto pelo `.desktop`, o app tem `TERM` vazio/`dumb`. Portanto
+  passar `env: {TERM: xterm-256color, COLORTERM: truecolor}` em `BackendSettings` **e**
+  `-e TERM=xterm-256color` nos args do `docker exec` (vale também para a Tarefa 5.1).
 - Shell padrão do `BackendSettings` é `/bin/bash`; sempre sobrescrever `program`.
 - Dependência pesada: `alacritty_terminal` + `vte` aumentam compilação e binário.
 
@@ -124,8 +131,9 @@ fn main() -> iced::Result {
   acrescentar um teste puro da função que monta `BackendSettings` (program `docker`, args
   `exec -it <id> sh -c '<cmd>'`) e `docker_cli_missing_shows_hint`.
 - Reutilizar na 5.2 o comando e a detecção de CLI da 5.1 (`docker` no PATH).
-- Gerenciar ids de `Terminal` (contador) e a subscription (`term.subscription()` só enquanto a aba
-  estiver aberta e a sessão viva).
+- Gerenciar ids de `Terminal` (contador). A subscription (`term.subscription()`) fica ativa
+  **enquanto o `Terminal` existir**, independente da aba visível; o `Terminal` é removido no mesmo
+  `update` que deixa de produzir a subscription (sair do detalhe, trocar de container, `Exit`).
 - Opção futura para eliminar a dependência da CLI: o próprio binário `doknyu` com um modo
   `--exec-bridge <id>` (bollard exec em tty, repassa stdin/stdout e converte SIGWINCH em
   `resize_exec`), usado como `program` do PTY. Não é necessário agora.

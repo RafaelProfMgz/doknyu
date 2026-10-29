@@ -12,7 +12,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-Rust 1.88 ou superior (exigido pelo `iced` 0.14).
+Rust 1.89 ou superior.
 
 Docs: [spec](docs/specs/2026-10-29-doknyu-design.md) e [plano](docs/plans/README.md).
 

@@ -23,7 +23,9 @@
     `alacritty`; `wezterm`; `foot`; `xfce4-terminal`; `xterm`.
   - Argumentos de execução por terminal: `gnome-terminal` → `["gnome-terminal", "--"]`;
     `wezterm` → `["wezterm", "start", "--"]`; demais → `[<bin>, "-e"]`.
-  - Comando executado: `docker exec -it <id> sh -c 'command -v bash >/dev/null && exec bash || exec sh'`.
+  - Comando executado: `docker exec -it -e TERM=xterm-256color <id> sh -c 'command -v bash >/dev/null && exec bash || exec sh'`.
+  - Produzir também `pub fn exec_args(container_id: &str) -> Vec<String>` (args após `docker`,
+    reutilizados pela 5.2) e `pub fn docker_cli_available() -> bool`.
   - Nenhum terminal ou CLI `docker` ausente → `Err(DockerError::Other(..))` → toast explicando.
 - Botão no cabeçalho do detalhe (só com container `Running`).
 
@@ -33,42 +35,45 @@
 - [ ] **Passo 5:** Manual: botão abre o terminal do sistema dentro do container.
 - [ ] **Passo 6:** Commit `feat: open container shell in system terminal`.
 
-### Tarefa 5.2: Aba Terminal embutida (variante decidida no spike)
+### Tarefa 5.2: Aba Terminal embutida (variante b — PTY local, ver ADR 0001)
 
 **Arquivos:**
 - Criar: `src/views/detail/terminal.rs`
-- Modificar: `src/docker/mod.rs`, `src/docker/bollard.rs`, `src/docker/fake.rs`, `src/views/detail/mod.rs`
+- Modificar: `src/views/detail/mod.rs`, `src/app.rs`, `locales/*.yml`
+- **Não** modificar `src/docker/*`: a trait `DockerClient` não muda.
 
-**Interfaces (variante a — exec do bollard):**
+**Interfaces:**
+- Consome: `terminal_launcher::{exec_args, docker_cli_available}` (Tarefa 5.1).
+- Produz:
   ```rust
-  pub struct ExecSession {
-      pub output: DockerStream<Vec<u8>>,
-      pub input: tokio::sync::mpsc::Sender<Vec<u8>>,
-      pub exec_id: String,
-  }
-  // adicionar à trait DockerClient:
-  async fn exec_shell(&self, id: &str, cols: u16, rows: u16) -> Result<ExecSession, DockerError>;
-  async fn resize_exec(&self, exec_id: &str, cols: u16, rows: u16) -> Result<(), DockerError>;
+  pub fn backend_settings(container_id: &str) -> iced_term::settings::BackendSettings;
+  // program "docker", args = exec_args(id), env TERM=xterm-256color e COLORTERM=truecolor
+  pub struct TerminalState { pub session: Option<iced_term::Terminal>, pub active_id: Option<u64>,
+                            pub next_id: u64, pub ended: bool }
+  impl TerminalState { pub fn close(&mut self); } // zera session e active_id juntos
   ```
-  - `exec_shell` executa `["sh", "-c", "command -v bash >/dev/null && exec bash || exec sh"]` com
-    `tty: true`, `attach_stdin/stdout/stderr: true`, env `TERM=xterm-256color`.
-  - Fake: ecoa o input de volta no output.
+  - A sessão é criada ao abrir a aba Terminal pela primeira vez; `id` = `next_id` incremental.
+  - **A subscription do terminal fica ativa enquanto `session.is_some()`**, mesmo com outra aba
+    visível (pausá-la com a sessão viva trava o app; ver ADR). `session` vira `None` no mesmo
+    `update` que encerra a subscription: sair do detalhe, trocar de container ou `Shutdown`.
+  - `Shutdown` (o usuário digitou `exit`, ou o container parou) → `session = None`, `ended = true`,
+    mensagem "Sessão encerrada" + botão "Nova sessão".
+  - Container parado → "Inicie o container para abrir um terminal".
+  - CLI `docker` ausente → aviso + só o botão do terminal externo.
+  - Testes unitários **não** constroem `Terminal` real (isso abre um PTY e roda `docker`); eles
+    verificam `backend_settings` e as transições de `TerminalState` via `active_id`
+    (invariante: `active_id.is_some() == session.is_some()` fora dos testes).
 
-**Variante b — PTY local:** sem mudança na trait; `terminal.rs` cria a sessão do `iced_term` rodando
-`docker exec -it <id> sh -c '...'` (mesmo comando da 5.1).
-
-**Comportamento comum:**
-  - A sessão é criada ao abrir a aba (não ao abrir o detalhe) e encerrada ao sair do detalhe ou ao
-    trocar de container.
-  - Fim do shell (`exit`) → mensagem "Sessão encerrada" + botão "Nova sessão".
-  - Container parado → aba mostra "Inicie o container para abrir um terminal".
-
-- [ ] **Passo 1: Testes que falham:** (a) `fake_exec_echoes_input`; `exec_closed_on_leave_detail`;
-  integração `#[ignore]` `exec_runs_command` (`echo doknyu\n` → output contém `doknyu`).
-  (b) `exec_closed_on_leave_detail`; `stopped_container_shows_hint`.
-- [ ] **Passo 2–4:** FAIL → implementar → PASS (`cargo test` e `cargo test -- --ignored`).
-- [ ] **Passo 5:** Manual: aba Terminal → `ls`, `top`, `vi`, setas e Ctrl+C funcionam;
-  redimensionar a janela ajusta colunas (`tput cols`).
+- [ ] **Passo 1: Testes que falham:**
+  - `backend_settings_runs_docker_exec`: program `"docker"`; args começam com
+    `["exec", "-it", "-e", "TERM=xterm-256color", "<id>", "sh", "-c"]`; env contém `TERM=xterm-256color`.
+  - `exec_closed_on_leave_detail`: com `active_id = Some(1)`, `Navigate(Containers)` → `active_id.is_none()` e `session.is_none()`.
+  - `shutdown_marks_ended`.
+  - `stopped_container_shows_hint`.
+  - `docker_cli_missing_shows_hint`.
+- [ ] **Passo 2–4:** FAIL → implementar → PASS.
+- [ ] **Passo 5:** Manual: aba Terminal → `ls`, `top`, `vi`, setas e Ctrl+C funcionam; `echo $TERM`
+  mostra `xterm-256color` (abrindo o app pelo terminal **e** pelo lançador); com `top` rodando,
+  trocar para Logs por 30 s e voltar → app responsivo; redimensionar a janela ajusta `stty size`;
+  sair do detalhe → `docker top <id>` sem o shell do exec.
 - [ ] **Passo 6:** Commit `feat(ui): embedded container terminal tab`.
-
-**Se o spike decidiu (c):** pular a Tarefa 5.2; a aba Terminal mostra o botão da 5.1 com explicação.

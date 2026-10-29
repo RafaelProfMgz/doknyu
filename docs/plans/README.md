@@ -32,7 +32,7 @@ Cada fase termina com o app compilando, `cargo clippy -- -D warnings` limpo e te
 
 ## Restrições globais
 
-- Rust edition 2024, MSRV 1.88 (exigido pelo iced 0.14); `cargo fmt` e `cargo clippy --all-targets -- -D warnings` limpos.
+- Rust edition 2024, MSRV 1.89 (iced 0.14 exige 1.88; serde-saphyr, via rust-i18n, exige 1.89); `cargo fmt` e `cargo clippy --all-targets -- -D warnings` limpos.
 - Licença: `MIT OR Apache-2.0`.
 - A UI nunca importa tipos do `bollard`; só tipos de `crate::model` e `crate::error`.
 - Toda string visível ao usuário passa por `t!("chave")` (rust-i18n) a partir da Fase 2;
