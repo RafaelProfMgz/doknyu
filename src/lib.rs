@@ -4,6 +4,7 @@ pub mod docker;
 pub mod error;
 pub mod fuzzy;
 pub mod keymap;
+pub mod logbuf;
 pub mod model;
 pub mod stats;
 pub mod ui;

@@ -178,16 +178,18 @@ pub fn log_line_from(o: LogOutput, timestamps: bool) -> LogLine {
         | LogOutput::StdIn { message }
         | LogOutput::Console { message } => (LogStream::Stdout, message),
     };
-    let full = String::from_utf8_lossy(&message);
-    let full = full.trim_end_matches(['\n', '\r']);
-    let (timestamp, text) = match full.split_once(' ') {
-        Some((ts, rest)) if timestamps => (Some(ts.to_string()), rest),
-        _ => (None, full),
+    // Split the RFC3339 timestamp on raw bytes, then sanitize each part.
+    let (timestamp, text) = match message.iter().position(|&b| b == b' ') {
+        Some(i) if timestamps => (
+            Some(crate::logbuf::sanitize(&message[..i])),
+            crate::logbuf::sanitize(&message[i + 1..]),
+        ),
+        _ => (None, crate::logbuf::sanitize(&message)),
     };
     LogLine {
         stream,
         timestamp,
-        text: text.to_string(),
+        text,
     }
 }
 
