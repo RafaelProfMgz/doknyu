@@ -70,13 +70,19 @@ pub fn normalize_locale(raw: &str) -> &'static str {
     }
 }
 
+/// A daemon that never answers is treated as stopped, so the retry loop can go on.
 async fn ping(client: Arc<dyn DockerClient>) -> Result<(), DockerError> {
-    client.ping().await
+    tokio::time::timeout(PING_TIMEOUT, client.ping())
+        .await
+        .unwrap_or(Err(DockerError::NotRunning))
 }
 
 async fn list_all(client: Arc<dyn DockerClient>) -> Result<Vec<ContainerInfo>, DockerError> {
     client.list_containers(true).await
 }
+
+/// Longest a ping may take before the daemon is considered unreachable.
+const PING_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How often the app checks again while Docker is unreachable.
 const RETRY_INTERVAL: Duration = Duration::from_secs(3);
@@ -266,7 +272,8 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::{run, settle};
     use super::*;
-    use crate::docker::FakeClient;
+    use crate::docker::{DockerStream, FakeClient};
+    use crate::model::{LogLine, NetworkInfo, RawStats, VolumeInfo};
 
     /// An app with no ping in flight (the initial ping task is discarded).
     fn app_with(fake: &Arc<FakeClient>) -> App {
@@ -454,6 +461,87 @@ mod tests {
         assert_eq!(run(a).await.len(), 1);
         assert!(run(b).await.is_empty());
         assert_eq!(fake.calls().iter().filter(|c| *c == "ping").count(), 2);
+    }
+
+    /// A daemon that accepts the connection but never answers.
+    #[derive(Default)]
+    struct HungClient {
+        pings: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl DockerClient for HungClient {
+        async fn ping(&self) -> Result<(), DockerError> {
+            self.pings.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::future::pending().await
+        }
+        async fn list_containers(&self, _all: bool) -> Result<Vec<ContainerInfo>, DockerError> {
+            std::future::pending().await
+        }
+        async fn start(&self, _id: &str) -> Result<(), DockerError> {
+            std::future::pending().await
+        }
+        async fn stop(&self, _id: &str) -> Result<(), DockerError> {
+            std::future::pending().await
+        }
+        async fn restart(&self, _id: &str) -> Result<(), DockerError> {
+            std::future::pending().await
+        }
+        async fn remove(&self, _id: &str, _force: bool) -> Result<(), DockerError> {
+            std::future::pending().await
+        }
+        fn logs(&self, _id: &str, _tail: usize) -> DockerStream<LogLine> {
+            futures::StreamExt::boxed(futures::stream::pending())
+        }
+        fn stats(&self, _id: &str) -> DockerStream<RawStats> {
+            futures::StreamExt::boxed(futures::stream::pending())
+        }
+        fn events(&self) -> DockerStream<DockerEvent> {
+            futures::StreamExt::boxed(futures::stream::pending())
+        }
+        async fn list_volumes(&self) -> Result<Vec<VolumeInfo>, DockerError> {
+            std::future::pending().await
+        }
+        async fn remove_volume(&self, _name: &str) -> Result<(), DockerError> {
+            std::future::pending().await
+        }
+        async fn prune_volumes(&self) -> Result<Vec<String>, DockerError> {
+            std::future::pending().await
+        }
+        async fn list_networks(&self) -> Result<Vec<NetworkInfo>, DockerError> {
+            std::future::pending().await
+        }
+        async fn remove_network(&self, _id: &str) -> Result<(), DockerError> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hung_ping_times_out_and_allows_retry() {
+        let hung = Arc::new(HungClient::default());
+        let pings = || hung.pings.load(std::sync::atomic::Ordering::SeqCst);
+        let (mut app, task) = App::new(hung.clone());
+        // Outer guard so a missing timeout fails the test instead of hanging it.
+        let produced = tokio::time::timeout(Duration::from_secs(60), run(task))
+            .await
+            .expect("ping never timed out");
+        assert!(matches!(
+            produced[..],
+            [Message::Pinged(Err(DockerError::NotRunning))]
+        ));
+        for m in produced {
+            let _ = app.update(m);
+        }
+        assert!(!app.pinging);
+        assert_eq!(app.conn, Connection::Failed(DockerError::NotRunning));
+        assert_eq!(pings(), 1);
+
+        let retry = app.update(Message::Retry);
+        let produced = tokio::time::timeout(Duration::from_secs(60), run(retry))
+            .await
+            .expect("retry ping never timed out");
+        assert_eq!(produced.len(), 1);
+        assert_eq!(pings(), 2);
     }
 
     #[test]
