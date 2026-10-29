@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 
+use crate::error::DockerError;
 use crate::model::ContainerInfo;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -25,6 +26,8 @@ impl Default for ContainersState {
     }
 }
 
-/// Messages of the container list (filled in by task 2.3).
+/// Messages of the container list (task 2.3 adds the user actions).
 #[derive(Debug, Clone)]
-pub enum Msg {}
+pub enum Msg {
+    Loaded(Result<Vec<ContainerInfo>, DockerError>),
+}

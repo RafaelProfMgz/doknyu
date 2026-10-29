@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use iced::widget::{center, column, container, row, stack, text};
 use iced::{Element, Length, Subscription, Task};
@@ -6,8 +7,9 @@ use rust_i18n::t;
 
 use crate::docker::DockerClient;
 use crate::error::DockerError;
-use crate::model::DockerEvent;
+use crate::model::{ContainerInfo, DockerEvent};
 use crate::views::containers::{self, ContainersState};
+use crate::views::onboarding;
 use crate::views::sidebar;
 use crate::views::widgets::{friendly_error, toast_stack};
 
@@ -37,6 +39,10 @@ pub enum Message {
     Navigate(Screen),
     Pinged(Result<(), DockerError>),
     Retry,
+    /// Copies a command to the clipboard (onboarding blocks).
+    Copy(String),
+    /// Opens a link in the default browser.
+    OpenUrl(String),
     DismissToast(usize),
     Containers(containers::Msg),
     Docker(DockerEvent),
@@ -66,6 +72,13 @@ async fn ping(client: Arc<dyn DockerClient>) -> Result<(), DockerError> {
     client.ping().await
 }
 
+async fn list_all(client: Arc<dyn DockerClient>) -> Result<Vec<ContainerInfo>, DockerError> {
+    client.list_containers(true).await
+}
+
+/// How often the app checks again while Docker is unreachable.
+const RETRY_INTERVAL: Duration = Duration::from_secs(3);
+
 impl App {
     /// Builds the app and starts the first connectivity check.
     pub fn new(client: Arc<dyn DockerClient>) -> (Self, Task<Message>) {
@@ -88,13 +101,26 @@ impl App {
             }
             Message::Pinged(Ok(())) => {
                 self.conn = Connection::Ok;
-                Task::none()
+                self.load_containers()
             }
-            Message::Pinged(Err(e)) => {
+            Message::Pinged(Err(e)) if e.is_connection() => {
                 self.conn = Connection::Failed(e);
                 Task::none()
             }
+            Message::Pinged(Err(e)) => {
+                // The daemon answered, just not with a pong: report it and carry on.
+                self.push_toast(friendly_error(&e), Some(format!("{e:?}")));
+                self.conn = Connection::Ok;
+                self.load_containers()
+            }
             Message::Retry => Task::perform(ping(self.client.clone()), Message::Pinged),
+            Message::Copy(text) => iced::clipboard::write(text),
+            Message::OpenUrl(url) => {
+                if let Err(e) = open::that_detached(&url) {
+                    self.push_toast(t!("error.open_link").into_owned(), Some(e.to_string()));
+                }
+                Task::none()
+            }
             Message::DismissToast(i) => {
                 if i < self.toasts.len() {
                     self.toasts.remove(i);
@@ -102,9 +128,26 @@ impl App {
                 Task::none()
             }
             // Filled in by tasks 2.3 (Containers) and 2.4 (Docker, EventsEnded); Tick is reserved.
-            Message::Containers(msg) => match msg {},
+            Message::Containers(containers::Msg::Loaded(Ok(items))) => {
+                self.containers.items = items;
+                Task::none()
+            }
+            Message::Containers(containers::Msg::Loaded(Err(e))) if e.is_connection() => {
+                self.conn = Connection::Failed(e);
+                Task::none()
+            }
+            Message::Containers(containers::Msg::Loaded(Err(e))) => {
+                self.push_toast(friendly_error(&e), Some(format!("{e:?}")));
+                Task::none()
+            }
             Message::Docker(_) | Message::EventsEnded | Message::Tick => Task::none(),
         }
+    }
+
+    fn load_containers(&self) -> Task<Message> {
+        Task::perform(list_all(self.client.clone()), |r| {
+            Message::Containers(containers::Msg::Loaded(r))
+        })
     }
 
     pub fn push_toast(&mut self, text: String, details: Option<String>) {
@@ -114,14 +157,7 @@ impl App {
     pub fn view(&self) -> Element<'_, Message> {
         let body: Element<'_, Message> = match &self.conn {
             Connection::Checking => center(text(t!("connection.checking").into_owned())).into(),
-            Connection::Failed(e) => center(
-                column![
-                    text(t!("connection.failed").into_owned()).size(24),
-                    text(friendly_error(e)),
-                ]
-                .spacing(8),
-            )
-            .into(),
+            Connection::Failed(e) => onboarding::view(e),
             Connection::Ok => row![sidebar::view(&self.screen), self.main_area()].into(),
         };
         if self.toasts.is_empty() {
@@ -151,8 +187,12 @@ impl App {
         .into()
     }
 
+    /// While Docker is unreachable, ping again every few seconds.
     pub fn subscription(&self) -> Subscription<Message> {
-        Subscription::none()
+        match self.conn {
+            Connection::Failed(_) => iced::time::every(RETRY_INTERVAL).map(|_| Message::Retry),
+            _ => Subscription::none(),
+        }
     }
 }
 
@@ -311,6 +351,69 @@ mod tests {
             handled[..],
             [Message::Retry, Message::Pinged(Err(_))]
         ));
+    }
+
+    #[tokio::test]
+    async fn ping_failure_shows_onboarding() {
+        let fake = Arc::new(FakeClient::new());
+        fake.set_ping_error(Some(DockerError::NotRunning));
+        let (mut app, task) = App::new(fake.clone());
+        for m in run(task).await {
+            let _ = app.update(m);
+        }
+        assert_eq!(app.conn, Connection::Failed(DockerError::NotRunning));
+        assert!(app.toasts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn retry_recovers() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        fake.set_ping_error(Some(DockerError::NotRunning));
+        let mut app = app_with(&fake);
+        settle(&mut app, Message::Retry).await;
+        assert_eq!(app.conn, Connection::Failed(DockerError::NotRunning));
+        assert!(app.containers.items.is_empty());
+
+        fake.set_ping_error(None);
+        settle(&mut app, Message::Retry).await;
+        assert_eq!(app.conn, Connection::Ok);
+        assert!(fake.calls().contains(&"list_containers:true".to_string()));
+        assert!(!app.containers.items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn non_connection_ping_error_toasts_and_loads_anyway() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = app_with(&fake);
+        let e = DockerError::Other("boom".into());
+        settle(&mut app, Message::Pinged(Err(e))).await;
+        assert_eq!(app.conn, Connection::Ok);
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(app.toasts[0].details.as_deref(), Some("Other(\"boom\")"));
+        assert!(fake.calls().contains(&"list_containers:true".to_string()));
+    }
+
+    #[tokio::test]
+    async fn connection_lost_while_loading_returns_to_onboarding() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = app_with(&fake);
+        let _ = app.update(Message::Pinged(Ok(())));
+        let _ = app.update(Message::Containers(containers::Msg::Loaded(Err(
+            DockerError::NotRunning,
+        ))));
+        assert_eq!(app.conn, Connection::Failed(DockerError::NotRunning));
+    }
+
+    #[test]
+    fn retry_tick_runs_only_while_failed() {
+        let fake = Arc::new(FakeClient::new());
+        let mut app = app_with(&fake);
+        for conn in [Connection::Checking, Connection::Ok] {
+            app.conn = conn;
+            assert_eq!(app.subscription().units(), 0);
+        }
+        app.conn = Connection::Failed(DockerError::NotRunning);
+        assert_eq!(app.subscription().units(), 1);
     }
 
     #[test]
