@@ -56,6 +56,8 @@ pub struct App {
     pub screen: Screen,
     pub containers: ContainersState,
     pub toasts: Vec<Toast>,
+    /// A ping is in flight; further `Retry` messages are ignored until it resolves.
+    pinging: bool,
 }
 
 /// Maps a system locale (`pt_BR.UTF-8`, `en_US`, `fr`...) to a supported locale.
@@ -82,18 +84,31 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(3);
 impl App {
     /// Builds the app and starts the first connectivity check.
     pub fn new(client: Arc<dyn DockerClient>) -> (Self, Task<Message>) {
-        let task = Task::perform(ping(client.clone()), Message::Pinged);
-        let app = Self {
+        let mut app = Self {
             client,
             conn: Connection::Checking,
             screen: Screen::Containers,
             containers: ContainersState::default(),
             toasts: Vec::new(),
+            pinging: false,
         };
+        let task = app.start_ping();
         (app, task)
     }
 
+    /// Pings the daemon unless a ping is already in flight.
+    fn start_ping(&mut self) -> Task<Message> {
+        if self.pinging {
+            return Task::none();
+        }
+        self.pinging = true;
+        Task::perform(ping(self.client.clone()), Message::Pinged)
+    }
+
     pub fn update(&mut self, m: Message) -> Task<Message> {
+        if matches!(m, Message::Pinged(_)) {
+            self.pinging = false;
+        }
         match m {
             Message::Navigate(screen) => {
                 self.screen = screen;
@@ -113,7 +128,7 @@ impl App {
                 self.conn = Connection::Ok;
                 self.load_containers()
             }
-            Message::Retry => Task::perform(ping(self.client.clone()), Message::Pinged),
+            Message::Retry => self.start_ping(),
             Message::Copy(text) => iced::clipboard::write(text),
             Message::OpenUrl(url) => {
                 if let Err(e) = open::that_detached(&url) {
@@ -253,8 +268,11 @@ mod tests {
     use super::*;
     use crate::docker::FakeClient;
 
+    /// An app with no ping in flight (the initial ping task is discarded).
     fn app_with(fake: &Arc<FakeClient>) -> App {
-        App::new(fake.clone()).0
+        let mut app = App::new(fake.clone()).0;
+        app.pinging = false;
+        app
     }
 
     #[test]
@@ -414,6 +432,28 @@ mod tests {
         }
         app.conn = Connection::Failed(DockerError::NotRunning);
         assert_eq!(app.subscription().units(), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_while_pinging_is_ignored() {
+        let fake = Arc::new(FakeClient::new());
+        let (mut app, first) = App::new(fake.clone());
+        // The initial ping is still in flight: a retry must not start another one.
+        let second = app.update(Message::Retry);
+        assert!(run(second).await.is_empty());
+        let produced = run(first).await;
+        assert_eq!(produced.len(), 1);
+        assert_eq!(fake.calls(), vec!["ping"]);
+
+        // Once the ping resolves, retries work again, and again only one at a time.
+        for m in produced {
+            let _ = app.update(m);
+        }
+        let a = app.update(Message::Retry);
+        let b = app.update(Message::Retry);
+        assert_eq!(run(a).await.len(), 1);
+        assert!(run(b).await.is_empty());
+        assert_eq!(fake.calls().iter().filter(|c| *c == "ping").count(), 2);
     }
 
     #[test]
