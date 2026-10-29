@@ -848,6 +848,7 @@ dependencies = [
  "bollard",
  "futures",
  "iced",
+ "iced_runtime",
  "iced_term",
  "open",
  "rust-i18n",
