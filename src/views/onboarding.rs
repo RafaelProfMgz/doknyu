@@ -4,6 +4,7 @@ use iced::widget::{button, column, container, row, text};
 use iced::{Alignment, Element, Length, Padding};
 use rust_i18n::t;
 
+use crate::actions::ActionId;
 use crate::app::Message;
 use crate::error::DockerError;
 use crate::ui::fonts::{MONO, SANS_SEMIBOLD};
@@ -90,7 +91,7 @@ pub fn view(err: &DockerError) -> Element<'_, Message> {
     card = card
         .push(action(
             t!("onboarding.retry").into_owned(),
-            Message::Retry,
+            Message::Action(ActionId::Retry),
             style::button::primary,
         ))
         .push(

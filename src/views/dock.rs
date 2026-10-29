@@ -5,6 +5,7 @@ use iced::widget::{column, container, row, text};
 use iced::{Alignment, Element, Length};
 use rust_i18n::t;
 
+use crate::actions::{self, ActionId};
 use crate::app::{Dock, DockTab, Message};
 use crate::ui::components::{chip, icon_button, panel_header};
 use crate::ui::fonts::SANS_MEDIUM;
@@ -49,8 +50,9 @@ pub fn view<'a>(dock: &'a Dock, name: Option<&'a str>) -> Element<'a, Message> {
         ),
         icon_button(
             Icon::X,
-            Some(Message::CloseDock),
-            t!("dock.close").into_owned()
+            // With the dock open, toggling it closes it.
+            Some(Message::Action(ActionId::ToggleDock)),
+            actions::tip(ActionId::ToggleDock, &t!("dock.close"))
         ),
     ];
 

@@ -3,12 +3,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::{Stream, StreamExt};
-use iced::widget::{center, column, container, pane_grid, row, rule, stack, text};
+use iced::widget::{Id, center, column, container, pane_grid, row, rule, stack, text};
 use iced::{Element, Length, Subscription, Task, Theme};
 use rust_i18n::t;
 
+use crate::actions::{self, ActionId};
 use crate::docker::DockerClient;
 use crate::error::DockerError;
+use crate::keymap;
 use crate::model::{ContainerInfo, DockerEvent, ResourceKind};
 use crate::ui::components::{ToastKind, modal};
 use crate::ui::fonts::SANS_SEMIBOLD;
@@ -110,6 +112,14 @@ pub enum Message {
     ToggleMaximize,
     /// The user dragged the divider between the list and the dock.
     PaneResized(pane_grid::ResizeEvent),
+    /// A button, shortcut or the palette asked for an action; the only way to run one.
+    Action(ActionId),
+    /// A key was pressed. `captured` is true when a widget (a text input) already used it.
+    Key {
+        key: iced::keyboard::Key,
+        mods: iced::keyboard::Modifiers,
+        captured: bool,
+    },
 }
 
 pub struct App {
@@ -359,6 +369,123 @@ impl App {
                 self.panes.resize(event.split, event.ratio);
                 Task::none()
             }
+            Message::Action(id) => self.run_action(id),
+            Message::Key {
+                key,
+                mods,
+                captured,
+            } => self.on_key(&key, mods, captured),
+        }
+    }
+
+    /// Carries out an action, unless it is not available right now. Buttons, shortcuts and the
+    /// palette all come through here.
+    pub fn run_action(&mut self, id: ActionId) -> Task<Message> {
+        use ActionId::*;
+        use containers::Msg;
+        if !actions::available(self, id) {
+            return Task::none();
+        }
+        let selected = self.containers.selected.clone();
+        // Only the actions on the selection read it; `available` made sure it exists then.
+        let on_selected = |this: &mut Self, m: fn(String) -> Msg| match selected {
+            Some(id) => this.update_containers(m(id)),
+            None => Task::none(),
+        };
+        match id {
+            GoContainers => self.update(Message::Navigate(Screen::Containers)),
+            GoVolumes => self.update(Message::Navigate(Screen::Volumes)),
+            GoNetworks => self.update(Message::Navigate(Screen::Networks)),
+            ToggleSidebar => self.update(Message::ToggleSidebar),
+            ToggleDock => self.update(Message::ToggleDock),
+            FocusSearch => iced::widget::operation::focus(Id::new(containers::SEARCH_ID)),
+            // The palette arrives in task 2.6.2.
+            OpenPalette => Task::none(),
+            SelectNext => {
+                self.select_step(true);
+                Task::none()
+            }
+            SelectPrev => {
+                self.select_step(false);
+                Task::none()
+            }
+            OpenSelected => on_selected(self, Msg::Open),
+            StartStopSelected => {
+                let running = self
+                    .selected_container()
+                    .is_some_and(|c| c.state.is_running());
+                on_selected(self, if running { Msg::Stop } else { Msg::Start })
+            }
+            RestartSelected => on_selected(self, Msg::Restart),
+            // Never removes right away: the dialog asks first.
+            RemoveSelected => on_selected(self, Msg::AskRemove),
+            ThemeSystem => self.set_theme_mode(ThemeMode::System),
+            ThemeDark => self.set_theme_mode(ThemeMode::Dark),
+            ThemeLight => self.set_theme_mode(ThemeMode::Light),
+            Retry => self.update(Message::Retry),
+            Escape => {
+                self.close_top_layer();
+                Task::none()
+            }
+        }
+    }
+
+    /// The selected container, if it is in the list.
+    fn selected_container(&self) -> Option<&ContainerInfo> {
+        let id = self.containers.selected.as_deref()?;
+        self.containers.items.iter().find(|c| c.id == id)
+    }
+
+    /// Moves the selection one row down or up the visible list, stopping at its ends. Without a
+    /// selection, down picks the first row and up the last.
+    fn select_step(&mut self, forward: bool) {
+        let visible = self.containers.visible();
+        let Some(last) = visible.len().checked_sub(1) else {
+            return;
+        };
+        let current = self
+            .containers
+            .selected
+            .as_deref()
+            .and_then(|id| visible.iter().position(|c| c.id == id));
+        let target = match (current, forward) {
+            (None, true) => 0,
+            (None, false) => last,
+            (Some(i), true) => (i + 1).min(last),
+            (Some(i), false) => i.saturating_sub(1),
+        };
+        let id = visible[target].id.clone();
+        self.containers.selected = Some(id);
+    }
+
+    /// Esc closes one layer, the topmost: the removal dialog, then the dock, then the search.
+    /// (The command palette will sit above all of them.)
+    fn close_top_layer(&mut self) {
+        if self.containers.confirm_remove.take().is_some() || self.dock.take().is_some() {
+            return;
+        }
+        if !self.containers.query.is_empty() {
+            self.containers.query.clear();
+            self.containers.keep_selection_visible();
+        }
+    }
+
+    fn set_theme_mode(&mut self, mode: ThemeMode) -> Task<Message> {
+        self.theme_mode = mode;
+        Task::none()
+    }
+
+    /// A key press: turns it into an action, if it stands for one.
+    fn on_key(
+        &mut self,
+        key: &iced::keyboard::Key,
+        mods: iced::keyboard::Modifiers,
+        captured: bool,
+    ) -> Task<Message> {
+        // The palette (task 2.6.2) will take arrows and Enter here, before the keymap.
+        match keymap::resolve(key, mods, captured) {
+            Some(id) => self.run_action(id),
+            None => Task::none(),
         }
     }
 
@@ -629,7 +756,27 @@ impl App {
             Connection::Failed(_) => iced::time::every(RETRY_INTERVAL).map(|_| Message::Retry),
             Connection::Checking => Subscription::none(),
         };
-        Subscription::batch([system_theme, conn])
+        // Not a closure: iced needs a plain `fn` to identify the subscription.
+        let keys = iced::event::listen_with(key_event);
+        Subscription::batch([system_theme, conn, keys])
+    }
+}
+
+/// A key press as a message; any other event is dropped.
+fn key_event(
+    event: iced::event::Event,
+    status: iced::event::Status,
+    _window: iced::window::Id,
+) -> Option<Message> {
+    match event {
+        iced::event::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+            key, modifiers, ..
+        }) => Some(Message::Key {
+            key,
+            mods: modifiers,
+            captured: status == iced::event::Status::Captured,
+        }),
+        _ => None,
     }
 }
 
@@ -881,7 +1028,7 @@ mod tests {
         assert_eq!(app.events_generation, before, "no events subscription");
         assert!(fake.calls().is_empty(), "{:?}", fake.calls());
         // It is retried every few seconds like any other connection failure.
-        assert_eq!(app.subscription().units(), 2);
+        assert_eq!(app.subscription().units(), 3);
     }
 
     #[tokio::test]
@@ -902,9 +1049,9 @@ mod tests {
         let fake = Arc::new(FakeClient::new());
         let mut app = app_with(&fake);
         app.conn = Connection::Checking;
-        assert_eq!(app.subscription().units(), 1);
-        app.conn = Connection::Failed(DockerError::NotRunning);
         assert_eq!(app.subscription().units(), 2);
+        app.conn = Connection::Failed(DockerError::NotRunning);
+        assert_eq!(app.subscription().units(), 3);
     }
 
     #[tokio::test]
@@ -1490,10 +1637,11 @@ mod tests {
         let fake = Arc::new(FakeClient::new());
         let mut app = app_with(&fake);
         app.conn = Connection::Ok;
-        // The system theme subscription is always there; the events one only while connected.
-        assert_eq!(app.subscription().units(), 2);
+        // The system theme and keyboard subscriptions are always there; the events one only while
+        // connected.
+        assert_eq!(app.subscription().units(), 3);
         app.conn = Connection::Checking;
-        assert_eq!(app.subscription().units(), 1);
+        assert_eq!(app.subscription().units(), 2);
     }
 
     #[tokio::test]
@@ -2129,5 +2277,363 @@ mod tests {
             }
         }
         let _ = app.subscription();
+    }
+
+    // ---- Actions and keyboard (task 2.6.1) ----
+
+    fn key_msg(c: &str, captured: bool) -> Message {
+        Message::Key {
+            key: iced::keyboard::Key::Character(c.into()),
+            mods: iced::keyboard::Modifiers::empty(),
+            captured,
+        }
+    }
+
+    /// Visible order of the sample data: running first by name, so `db`, `web`, `worker`.
+    fn selected_id(app: &App) -> Option<&str> {
+        app.containers.selected.as_deref()
+    }
+
+    #[tokio::test]
+    async fn select_next_prev_bounds() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        app.containers.selected = None;
+        let _ = app.run_action(ActionId::SelectNext);
+        assert_eq!(selected_id(&app), Some("db-id"), "no selection: first");
+        let _ = app.run_action(ActionId::SelectNext);
+        let _ = app.run_action(ActionId::SelectNext);
+        assert_eq!(selected_id(&app), Some("worker-id"));
+        let _ = app.run_action(ActionId::SelectNext);
+        assert_eq!(selected_id(&app), Some("worker-id"), "does not wrap around");
+
+        let _ = app.run_action(ActionId::SelectPrev);
+        let _ = app.run_action(ActionId::SelectPrev);
+        let _ = app.run_action(ActionId::SelectPrev);
+        assert_eq!(selected_id(&app), Some("db-id"), "does not wrap around");
+
+        app.containers.selected = None;
+        let _ = app.run_action(ActionId::SelectPrev);
+        assert_eq!(selected_id(&app), Some("worker-id"), "no selection: last");
+    }
+
+    #[tokio::test]
+    async fn select_follows_the_filtered_list() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        app.containers.show_stopped = false;
+        app.containers.selected = None;
+        let _ = app.run_action(ActionId::SelectPrev);
+        assert_eq!(selected_id(&app), Some("web-id"));
+    }
+
+    #[tokio::test]
+    async fn start_stop_toggles_by_state() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        app.containers.selected = Some("web-id".into());
+        settle(&mut app, Message::Action(ActionId::StartStopSelected)).await;
+        assert!(fake.calls().contains(&"stop:web-id".to_string()));
+
+        app.containers.selected = Some("worker-id".into());
+        settle(&mut app, Message::Action(ActionId::StartStopSelected)).await;
+        assert!(fake.calls().contains(&"start:worker-id".to_string()));
+    }
+
+    #[tokio::test]
+    async fn restart_selected_calls_the_client() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        app.containers.selected = Some("web-id".into());
+        settle(&mut app, Message::Action(ActionId::RestartSelected)).await;
+        assert!(fake.calls().contains(&"restart:web-id".to_string()));
+    }
+
+    #[tokio::test]
+    async fn container_actions_unavailable_without_connection_or_selection() {
+        const SELECTED: [ActionId; 4] = [
+            ActionId::OpenSelected,
+            ActionId::StartStopSelected,
+            ActionId::RestartSelected,
+            ActionId::RemoveSelected,
+        ];
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let calls_before = fake.calls().len();
+
+        // No selection.
+        app.containers.selected = None;
+        for id in SELECTED {
+            assert!(!actions::available(&app, id), "{id:?}");
+            assert!(run(app.run_action(id)).await.is_empty());
+        }
+        // A selection that is not in the list.
+        app.containers.selected = Some("gone-id".into());
+        for id in SELECTED {
+            assert!(!actions::available(&app, id), "{id:?}");
+        }
+        // Selection, but another screen.
+        app.containers.selected = Some("web-id".into());
+        app.screen = Screen::Volumes;
+        for id in SELECTED.into_iter().chain([ActionId::SelectNext]) {
+            assert!(!actions::available(&app, id), "{id:?}");
+        }
+        // Selection, but no Docker.
+        app.screen = Screen::Containers;
+        app.set_failed(DockerError::NotRunning);
+        app.containers.selected = Some("web-id".into());
+        for id in SELECTED.into_iter().chain([ActionId::SelectNext]) {
+            assert!(!actions::available(&app, id), "{id:?}");
+            let _ = app.run_action(id);
+        }
+        assert_eq!(app.containers.confirm_remove, None);
+        assert_eq!(app.dock, None);
+        assert_eq!(
+            fake.calls().len(),
+            calls_before,
+            "the client was not called"
+        );
+        assert!(app.toasts.is_empty());
+        assert!(app.containers.pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn action_availability_of_the_rest() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        for id in [
+            ActionId::GoContainers,
+            ActionId::GoVolumes,
+            ActionId::GoNetworks,
+            ActionId::ToggleSidebar,
+            ActionId::ToggleDock,
+            ActionId::FocusSearch,
+            ActionId::OpenPalette,
+            ActionId::ThemeSystem,
+            ActionId::ThemeDark,
+            ActionId::ThemeLight,
+            ActionId::Escape,
+        ] {
+            assert!(actions::available(&app, id), "{id:?}");
+        }
+        assert!(
+            !actions::available(&app, ActionId::Retry),
+            "Retry needs a failure"
+        );
+
+        app.set_failed(DockerError::NotRunning);
+        assert!(actions::available(&app, ActionId::Retry));
+        assert!(actions::available(&app, ActionId::GoVolumes));
+        assert!(actions::available(&app, ActionId::ThemeDark));
+        assert!(!actions::available(&app, ActionId::ToggleDock));
+        assert!(!actions::available(&app, ActionId::FocusSearch));
+    }
+
+    #[tokio::test]
+    async fn remove_selected_opens_confirmation() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        app.containers.selected = Some("web-id".into());
+        let calls_before = fake.calls().len();
+        settle(&mut app, Message::Action(ActionId::RemoveSelected)).await;
+        assert_eq!(app.containers.confirm_remove.as_deref(), Some("web-id"));
+        assert_eq!(fake.calls().len(), calls_before, "nothing removed yet");
+        assert!(!fake.calls().iter().any(|c| c.starts_with("remove")));
+    }
+
+    #[tokio::test]
+    async fn open_selected_opens_the_dock() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        app.containers.selected = Some("db-id".into());
+        let _ = app.run_action(ActionId::OpenSelected);
+        assert_eq!(
+            app.dock.as_ref().map(|d| d.container_id.as_str()),
+            Some("db-id")
+        );
+    }
+
+    #[tokio::test]
+    async fn escape_closes_top_layer_only() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        app.containers.selected = Some("web-id".into());
+        app.containers.query = "we".into();
+        app.containers.confirm_remove = Some("web-id".into());
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        assert!(app.dock.is_some());
+
+        let _ = app.run_action(ActionId::Escape);
+        assert_eq!(app.containers.confirm_remove, None, "the modal goes first");
+        assert!(app.dock.is_some());
+        assert_eq!(app.containers.query, "we");
+
+        let _ = app.run_action(ActionId::Escape);
+        assert!(app.dock.is_none(), "then the dock");
+        assert_eq!(app.containers.query, "we");
+
+        let _ = app.run_action(ActionId::Escape);
+        assert_eq!(app.containers.query, "", "then the search");
+
+        let _ = app.run_action(ActionId::Escape);
+        assert_eq!(app.containers.query, "");
+        assert_eq!(selected_id(&app), Some("web-id"), "nothing else changes");
+    }
+
+    #[tokio::test]
+    async fn escape_clearing_the_search_keeps_the_selection_visible() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        app.containers.selected = Some("db-id".into());
+        app.containers.query = "db".into();
+        let _ = app.run_action(ActionId::Escape);
+        assert_eq!(app.containers.query, "");
+        assert_eq!(selected_id(&app), Some("db-id"));
+    }
+
+    #[tokio::test]
+    async fn go_actions_navigate() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.run_action(ActionId::GoNetworks);
+        assert_eq!(app.screen, Screen::Networks);
+        let _ = app.run_action(ActionId::GoVolumes);
+        assert_eq!(app.screen, Screen::Volumes);
+        let _ = app.run_action(ActionId::GoContainers);
+        assert_eq!(app.screen, Screen::Containers);
+    }
+
+    #[tokio::test]
+    async fn layout_and_theme_actions() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.run_action(ActionId::ToggleSidebar);
+        assert!(app.sidebar_collapsed);
+        let _ = app.run_action(ActionId::ToggleSidebar);
+        assert!(!app.sidebar_collapsed);
+
+        app.containers.selected = Some("web-id".into());
+        let _ = app.run_action(ActionId::ToggleDock);
+        assert!(app.dock.is_some());
+        let _ = app.run_action(ActionId::ToggleDock);
+        assert!(app.dock.is_none());
+
+        let _ = app.run_action(ActionId::ThemeDark);
+        assert_eq!(app.theme_mode, ThemeMode::Dark);
+        let _ = app.run_action(ActionId::ThemeLight);
+        assert_eq!(app.theme_mode, ThemeMode::Light);
+        let _ = app.run_action(ActionId::ThemeSystem);
+        assert_eq!(app.theme_mode, ThemeMode::System);
+    }
+
+    #[tokio::test]
+    async fn retry_action_pings_again() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let calls_before = fake.calls().len();
+        // Connected: nothing to retry.
+        assert!(run(app.run_action(ActionId::Retry)).await.is_empty());
+        assert_eq!(fake.calls().len(), calls_before);
+
+        app.set_failed(DockerError::NotRunning);
+        settle(&mut app, Message::Action(ActionId::Retry)).await;
+        assert!(fake.calls().contains(&"ping".to_string()));
+        assert_eq!(app.conn, Connection::Ok);
+    }
+
+    #[tokio::test]
+    async fn keys_run_actions_through_the_keymap() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        app.containers.selected = None;
+        let _ = app.update(key_msg("j", false));
+        assert_eq!(selected_id(&app), Some("db-id"));
+
+        let _ = app.update(Message::Key {
+            key: iced::keyboard::Key::Character("2".into()),
+            mods: iced::keyboard::Modifiers::CTRL,
+            captured: false,
+        });
+        assert_eq!(app.screen, Screen::Volumes);
+    }
+
+    #[tokio::test]
+    async fn typing_in_the_search_triggers_no_action() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        app.containers.selected = Some("web-id".into());
+        let calls_before = fake.calls().len();
+        for c in ["s", "j", "k", "r", "/"] {
+            let produced = run(app.update(key_msg(c, true))).await;
+            assert!(produced.is_empty());
+        }
+        let _ = app.update(Message::Key {
+            key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Delete),
+            mods: iced::keyboard::Modifiers::empty(),
+            captured: true,
+        });
+        assert_eq!(fake.calls().len(), calls_before);
+        assert_eq!(selected_id(&app), Some("web-id"));
+        assert_eq!(app.containers.confirm_remove, None);
+        assert!(app.containers.pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn selected_actions_wait_while_the_removal_dialog_is_open() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        app.containers.selected = Some("web-id".into());
+        app.containers.confirm_remove = Some("web-id".into());
+        for id in [
+            ActionId::SelectNext,
+            ActionId::StartStopSelected,
+            ActionId::RestartSelected,
+            ActionId::OpenSelected,
+        ] {
+            assert!(!actions::available(&app, id), "{id:?}");
+        }
+        assert!(actions::available(&app, ActionId::Escape));
+    }
+
+    #[test]
+    fn keyboard_subscription_is_always_on() {
+        let fake = Arc::new(FakeClient::new());
+        let mut app = app_with(&fake);
+        // The system theme and the keyboard, plus the connection's own subscription.
+        for (conn, units) in [
+            (Connection::Checking, 2),
+            (Connection::Failed(DockerError::NotRunning), 3),
+            (Connection::Ok, 3),
+        ] {
+            app.conn = conn;
+            assert_eq!(app.subscription().units(), units);
+        }
+    }
+
+    #[test]
+    fn key_events_become_messages() {
+        use iced::event::{Event, Status};
+        use iced::keyboard;
+        let pressed = Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Character("j".into()),
+            modified_key: keyboard::Key::Character("j".into()),
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::KeyJ),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::empty(),
+            text: None,
+            repeat: false,
+        });
+        let id = iced::window::Id::unique();
+        match key_event(pressed.clone(), Status::Captured, id) {
+            Some(Message::Key { captured, .. }) => assert!(captured),
+            other => panic!("{other:?}"),
+        }
+        match key_event(pressed, Status::Ignored, id) {
+            Some(Message::Key { captured, .. }) => assert!(!captured),
+            other => panic!("{other:?}"),
+        }
+        let released =
+            Event::Keyboard(keyboard::Event::ModifiersChanged(keyboard::Modifiers::CTRL));
+        assert!(key_event(released, Status::Ignored, id).is_none());
     }
 }

@@ -4,6 +4,7 @@ use iced::widget::{button, container, row, space, text, tooltip};
 use iced::{Alignment, Color, Element, Length, Padding};
 use rust_i18n::t;
 
+use crate::actions::{self, ActionId};
 use crate::app::{Connection, Message};
 use crate::model::ContainerInfo;
 use crate::ui::components::{Shortcut, icon_button, kbd};
@@ -87,14 +88,14 @@ pub fn view<'a>(conn: &Connection, items: &[ContainerInfo]) -> Element<'a, Messa
             space().width(Length::Fill),
             icon_button(
                 Icon::PanelLeft,
-                Some(Message::ToggleSidebar),
-                t!("status.toggle_sidebar").into_owned(),
+                Some(Message::Action(ActionId::ToggleSidebar)),
+                actions::tip(ActionId::ToggleSidebar, &t!("status.toggle_sidebar")),
             ),
             icon_button(
                 Icon::PanelBottom,
                 // The dock needs Docker: it cannot be opened from the onboarding.
-                (*conn == Connection::Ok).then_some(Message::ToggleDock),
-                t!("status.toggle_dock").into_owned(),
+                (*conn == Connection::Ok).then_some(Message::Action(ActionId::ToggleDock)),
+                actions::tip(ActionId::ToggleDock, &t!("status.toggle_dock")),
             ),
             palette_hint,
         ]

@@ -9,6 +9,7 @@ use iced::widget::{
 use iced::{Alignment, Element, Length, Padding};
 use rust_i18n::t;
 
+use crate::actions::{self, ActionId};
 use crate::app::Message;
 use crate::error::DockerError;
 use crate::model::{ContainerInfo, ContainerState};
@@ -221,9 +222,17 @@ fn cell<'a>(content: impl Into<Element<'a, Message>>, width: Length) -> Element<
     container(content).width(width).clip(true).into()
 }
 
-fn row_actions<'a>(c: &ContainerInfo, busy: bool) -> Element<'a, Message> {
+fn row_actions<'a>(c: &ContainerInfo, busy: bool, selected: bool) -> Element<'a, Message> {
     let id = &c.id;
     let enabled = |m: Msg| (!busy).then(|| msg(m));
+    // The keys act on the selected row, so only that row's buttons advertise them.
+    let tip = |action: ActionId, label: &str| {
+        if selected {
+            actions::tip(action, label)
+        } else {
+            label.to_owned()
+        }
+    };
     let mut actions = row![space().width(Length::Fill)]
         .spacing(SPACE_1)
         .align_y(Alignment::Center);
@@ -232,24 +241,24 @@ fn row_actions<'a>(c: &ContainerInfo, busy: bool) -> Element<'a, Message> {
             .push(icon_button(
                 Icon::Square,
                 enabled(Msg::Stop(id.clone())),
-                t!("containers.stop").into_owned(),
+                tip(ActionId::StartStopSelected, &t!("containers.stop")),
             ))
             .push(icon_button(
                 Icon::RotateCw,
                 enabled(Msg::Restart(id.clone())),
-                t!("containers.restart").into_owned(),
+                tip(ActionId::RestartSelected, &t!("containers.restart")),
             ));
     } else {
         actions = actions.push(icon_button(
             Icon::Play,
             enabled(Msg::Start(id.clone())),
-            t!("containers.start").into_owned(),
+            tip(ActionId::StartStopSelected, &t!("containers.start")),
         ));
     }
     actions = actions.push(icon_button(
         Icon::Trash2,
         enabled(Msg::AskRemove(id.clone())),
-        t!("containers.remove").into_owned(),
+        tip(ActionId::RemoveSelected, &t!("containers.remove")),
     ));
     container(actions).width(ACTIONS_WIDTH).into()
 }
@@ -327,7 +336,7 @@ fn row_view<'a>(
     };
     list_row(
         cells.width(Length::Fill).into(),
-        Some(row_actions(c, busy)),
+        Some(row_actions(c, busy, selected)),
         selected,
         hovered,
         events,

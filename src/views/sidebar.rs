@@ -5,6 +5,7 @@ use iced::{Alignment, Element, Length, Padding};
 
 use rust_i18n::t;
 
+use crate::actions::{self, ActionId};
 use crate::app::{Message, Screen};
 use crate::ui::fonts::SANS_MEDIUM;
 use crate::ui::icons::{Icon, icon};
@@ -17,7 +18,7 @@ fn entry(
     glyph: Icon,
     label: String,
     count: Option<usize>,
-    target: Screen,
+    action: ActionId,
     active: bool,
     collapsed: bool,
 ) -> Element<'static, Message> {
@@ -47,11 +48,8 @@ fn entry(
         .height(ROW_HEIGHT)
         .padding(Padding::from([0.0, SPACE_2]))
         .style(style::button::nav(active))
-        .on_press(Message::Navigate(target));
-    if !collapsed {
-        return item.into();
-    }
-    let tip = container(text(label).size(TEXT_SM))
+        .on_press(Message::Action(action));
+    let tip = container(text(actions::tip(action, &label)).size(TEXT_SM))
         .padding(Padding::from([SPACE_1, SPACE_2]))
         .style(style::container::elevated);
     tooltip(item, tip, tooltip::Position::Right)
@@ -67,7 +65,7 @@ pub fn view(current: &Screen, collapsed: bool, containers: Option<usize>) -> Ele
             Icon::Box,
             t!("sidebar.containers").into_owned(),
             containers,
-            Screen::Containers,
+            ActionId::GoContainers,
             *current == Screen::Containers,
             collapsed,
         ),
@@ -75,7 +73,7 @@ pub fn view(current: &Screen, collapsed: bool, containers: Option<usize>) -> Ele
             Icon::Database,
             t!("sidebar.volumes").into_owned(),
             None,
-            Screen::Volumes,
+            ActionId::GoVolumes,
             *current == Screen::Volumes,
             collapsed,
         ),
@@ -83,7 +81,7 @@ pub fn view(current: &Screen, collapsed: bool, containers: Option<usize>) -> Ele
             Icon::Network,
             t!("sidebar.networks").into_owned(),
             None,
-            Screen::Networks,
+            ActionId::GoNetworks,
             *current == Screen::Networks,
             collapsed,
         ),
