@@ -32,6 +32,8 @@ pub enum ActionId {
     ThemeSystem,
     ThemeDark,
     ThemeLight,
+    /// Removes the volumes nobody uses (asks first); from any screen it goes to Volumes.
+    PruneVolumes,
     Retry,
     Escape,
 }
@@ -78,7 +80,7 @@ const fn def_of(
 }
 
 /// Every action, in the order the palette lists them when nothing else ranks them.
-static ALL: [ActionDef; 23] = [
+static ALL: [ActionDef; 24] = [
     def_of(
         ActionId::GoContainers,
         "actions.go_containers",
@@ -173,6 +175,7 @@ static ALL: [ActionDef; 23] = [
     def_of(ActionId::ThemeSystem, "actions.theme_system", None, true),
     def_of(ActionId::ThemeDark, "actions.theme_dark", None, true),
     def_of(ActionId::ThemeLight, "actions.theme_light", None, true),
+    def_of(ActionId::PruneVolumes, "actions.prune_volumes", None, true),
     def_of(ActionId::Retry, "actions.retry", None, true),
     def_of(ActionId::Escape, "actions.escape", key("Esc"), false),
 ];
@@ -192,17 +195,44 @@ pub fn def(id: ActionId) -> &'static ActionDef {
 pub fn available(app: &App, id: ActionId) -> bool {
     use ActionId::*;
     let connected = app.conn == Connection::Ok;
-    // The container list can be used: Docker answers, it is on screen (not hidden by the
-    // maximized dock) and no dialog covers it.
+    // A list can be used: Docker answers, it is on screen (not hidden by the maximized dock)
+    // and no dialog covers it. `on_containers`, `on_volumes` and `on_networks` say which screen it is.
+    let dialog_open = app.containers.confirm_remove.is_some()
+        || app.volumes.confirm.is_some()
+        || app.networks.confirm_remove.is_some();
     let list_usable = connected
-        && app.screen == Screen::Containers
-        && app.containers.confirm_remove.is_none()
+        && matches!(
+            app.screen,
+            Screen::Containers | Screen::Volumes | Screen::Networks
+        )
+        && !dialog_open
         && !app.dock.as_ref().is_some_and(|d| d.maximized);
+    let on_containers = list_usable && app.screen == Screen::Containers;
+    let on_volumes = list_usable && app.screen == Screen::Volumes;
+    let on_networks = list_usable && app.screen == Screen::Networks;
     let has_selection = || {
         app.containers
             .selected
             .as_deref()
             .is_some_and(|id| app.containers.items.iter().any(|c| c.id == id))
+    };
+    // Docker refuses to remove a volume in use, so it is not offered; nor one being removed.
+    let volume_removable = || {
+        app.volumes.selected.as_deref().is_some_and(|name| {
+            app.volumes
+                .items
+                .iter()
+                .any(|v| v.name == name && v.used_by.is_empty())
+                && !app.volumes.pending.contains(name)
+        })
+    };
+    // Docker's default networks are never offered, nor one being removed. One with containers
+    // connected is: the dialog warns and Docker has the last word.
+    let network_removable = || {
+        app.networks
+            .selected
+            .as_deref()
+            .is_some_and(|id| app.networks.removable(id))
     };
     // The Logs tab is on screen: its search, timestamps and copy only make sense then.
     let logs_open = connected
@@ -211,7 +241,7 @@ pub fn available(app: &App, id: ActionId) -> bool {
     match id {
         GoContainers | GoVolumes | GoNetworks | ToggleSidebar | OpenPalette | ThemeSystem
         | ThemeDark | ThemeLight | Escape => true,
-        ToggleDock => connected,
+        ToggleDock | PruneVolumes => connected,
         // Works from the maximized dock too: it does not need the list, only the selection.
         DockLogs | DockStats => {
             connected && app.containers.confirm_remove.is_none() && has_selection()
@@ -220,8 +250,12 @@ pub fn available(app: &App, id: ActionId) -> bool {
         CopyLogs => logs_open && app.detail.as_ref().is_some_and(|d| !d.logs.is_empty()),
         Retry => matches!(app.conn, Connection::Failed(_)),
         FocusSearch | SelectNext | SelectPrev => list_usable,
-        OpenSelected | StartStopSelected | RestartSelected | RemoveSelected => {
-            list_usable && has_selection()
+        // Volumes and networks have nothing to open, start or restart.
+        OpenSelected | StartStopSelected | RestartSelected => on_containers && has_selection(),
+        RemoveSelected => {
+            (on_containers && has_selection())
+                || (on_volumes && volume_removable())
+                || (on_networks && network_removable())
         }
     }
 }

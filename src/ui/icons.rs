@@ -28,6 +28,7 @@ pub enum Icon {
     ChevronUp,
     ChevronDown,
     ArrowDownToLine,
+    Lock,
 }
 
 impl Icon {
@@ -53,6 +54,7 @@ impl Icon {
         Icon::ChevronUp,
         Icon::ChevronDown,
         Icon::ArrowDownToLine,
+        Icon::Lock,
     ];
 
     /// Glyph in the Lucide font (private use area).
@@ -79,6 +81,7 @@ impl Icon {
             Icon::ChevronUp => '\u{e070}',
             Icon::ChevronDown => '\u{e06d}',
             Icon::ArrowDownToLine => '\u{e455}',
+            Icon::Lock => '\u{e10b}',
         }
     }
 }
@@ -100,6 +103,6 @@ mod tests {
             assert!(('\u{E000}'..='\u{F8FF}').contains(&c), "{i:?} -> {c:?}");
             assert!(seen.insert(c), "{i:?} repeats {c:?}");
         }
-        assert_eq!(seen.len(), 21);
+        assert_eq!(seen.len(), 22);
     }
 }
