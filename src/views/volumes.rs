@@ -72,7 +72,11 @@ pub enum Msg {
     Confirm,
     Cancel,
     Removed(String, Result<(), DockerError>),
-    Pruned(Result<Vec<String>, DockerError>),
+    /// The listed volumes were removed one by one: which went, and which Docker refused.
+    Pruned {
+        removed: Vec<String>,
+        failed: Vec<(String, DockerError)>,
+    },
     Scrolled {
         offset: f32,
         height: f32,
@@ -132,6 +136,10 @@ impl VolumesState {
         // The volume to remove is gone: nothing left to confirm.
         if matches!(&self.confirm, Some(VolumeConfirm::Remove(name)) if !exists(name)) {
             self.confirm = None;
+        }
+        // What the prune dialog lists is what will be removed, so it follows the list.
+        if matches!(self.confirm, Some(VolumeConfirm::Prune(_))) {
+            self.confirm = Some(VolumeConfirm::Prune(self.unused()));
         }
     }
 
@@ -539,6 +547,18 @@ mod tests {
         s.confirm = Some(VolumeConfirm::Remove("a".into()));
         s.set_items(vec![]);
         assert_eq!(s.confirm, None);
+    }
+
+    #[test]
+    fn set_items_refreshes_the_prune_list() {
+        let mut s = state_with(vec![vol("a", "local", &[]), vol("b", "local", &["web"])]);
+        s.confirm = Some(VolumeConfirm::Prune(s.unused()));
+        // `b` is free now, `a` was taken.
+        s.set_items(vec![vol("a", "local", &["db"]), vol("b", "local", &[])]);
+        assert_eq!(s.confirm, Some(VolumeConfirm::Prune(vec!["b".into()])));
+        s.set_items(vec![vol("a", "local", &["db"])]);
+        assert_eq!(s.confirm, Some(VolumeConfirm::Prune(vec![])));
+        assert!(!s.can_confirm());
     }
 
     #[test]

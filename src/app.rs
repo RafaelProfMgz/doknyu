@@ -981,12 +981,9 @@ impl App {
                 }
                 match self.volumes.confirm.take() {
                     Some(VolumeConfirm::Remove(name)) => self.remove_volume(name),
-                    Some(VolumeConfirm::Prune(_)) => {
-                        let client = self.client.clone();
-                        Task::perform(async move { client.prune_volumes().await }, |r| {
-                            Message::Volumes(Msg::Pruned(r))
-                        })
-                    }
+                    // Exactly the volumes the dialog listed, none else: Docker's own prune would
+                    // also take one that became free after the dialog opened.
+                    Some(VolumeConfirm::Prune(names)) => self.prune_volumes(names),
                     None => Task::none(),
                 }
             }
@@ -1002,16 +999,33 @@ impl App {
                     Err(e) => self.fail(e),
                 }
             }
-            Msg::Pruned(Ok(names)) => {
-                let text = if names.len() == 1 {
-                    t!("volumes.pruned_one", count = 1)
-                } else {
-                    t!("volumes.pruned", count = names.len())
-                };
-                self.push_toast_of(ToastKind::Info, text.into_owned(), None);
+            Msg::Pruned { removed, failed } => {
+                for (name, _) in &failed {
+                    self.volumes.pending.remove(name);
+                }
+                for name in &removed {
+                    self.volumes.pending.remove(name);
+                }
+                // The daemon is gone: the onboarding explains it, no need for more toasts.
+                if let Some((_, e)) = failed.iter().find(|(_, e)| e.is_connection()) {
+                    return self.fail(e.clone());
+                }
+                if !removed.is_empty() || failed.is_empty() {
+                    let text = if removed.len() == 1 {
+                        t!("volumes.pruned_one", count = 1)
+                    } else {
+                        t!("volumes.pruned", count = removed.len())
+                    };
+                    self.push_toast_of(ToastKind::Info, text.into_owned(), None);
+                }
+                // A volume that became used since the dialog opened is refused and stays.
+                if let Some((_, e)) = failed.first() {
+                    let names: Vec<&str> = failed.iter().map(|(n, _)| n.as_str()).collect();
+                    let details = format!("{}: {e:?}", names.join(", "));
+                    self.push_toast(friendly_error(e), Some(details));
+                }
                 Task::none()
             }
-            Msg::Pruned(Err(e)) => self.fail(e),
             Msg::Scrolled { offset, height } => {
                 self.volumes.scroll_y = offset;
                 self.volumes.viewport_h = height;
@@ -1036,6 +1050,30 @@ impl App {
                 (name, result)
             },
             |(name, result)| Message::Volumes(volumes::Msg::Removed(name, result)),
+        )
+    }
+
+    /// Removes the volumes one by one, without force, so one that is in use again is refused by
+    /// Docker and stays. The outcome comes back as a single `Pruned`.
+    fn prune_volumes(&mut self, names: Vec<String>) -> Task<Message> {
+        let names: Vec<String> = names
+            .into_iter()
+            .filter(|n| self.volumes.pending.insert(n.clone()))
+            .collect();
+        let client = self.client.clone();
+        Task::perform(
+            async move {
+                let mut removed = Vec::new();
+                let mut failed = Vec::new();
+                for name in names {
+                    match client.remove_volume(&name).await {
+                        Ok(()) => removed.push(name),
+                        Err(e) => failed.push((name, e)),
+                    }
+                }
+                (removed, failed)
+            },
+            |(removed, failed)| Message::Volumes(volumes::Msg::Pruned { removed, failed }),
         )
     }
 
@@ -4617,7 +4655,7 @@ mod tests {
         let _ = app.view();
         assert!(!fake.calls().contains(&"prune_volumes".to_string()));
         settle(&mut app, vol_msg(volumes::Msg::Confirm)).await;
-        assert!(fake.calls().contains(&"prune_volumes".to_string()));
+        assert!(fake.calls().contains(&"remove_volume:cache".to_string()));
         assert_eq!(app.volumes.confirm, None);
     }
 
@@ -4638,6 +4676,107 @@ mod tests {
         let _ = app.view();
     }
 
+    fn unused_volume(name: &str) -> crate::model::VolumeInfo {
+        crate::model::VolumeInfo {
+            name: name.into(),
+            driver: "local".into(),
+            mountpoint: format!("/var/lib/docker/volumes/{name}/_data"),
+            used_by: vec![],
+        }
+    }
+
+    fn removed_volumes(fake: &FakeClient) -> Vec<String> {
+        fake.calls()
+            .into_iter()
+            .filter(|c| c.starts_with("remove_volume:"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn prune_dialog_follows_reloads() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = volumes_app(&fake).await;
+        let _ = app.update(vol_msg(volumes::Msg::AskPrune));
+        assert_eq!(
+            app.volumes.confirm,
+            Some(volumes::VolumeConfirm::Prune(vec!["cache".into()]))
+        );
+        // `db` goes away, so `db_data` is free by the time the list is reloaded.
+        fake.remove("db-id", true).await.unwrap();
+        settle(&mut app, Message::ReloadVolumes).await;
+        assert_eq!(
+            app.volumes.confirm,
+            Some(volumes::VolumeConfirm::Prune(vec![
+                "cache".into(),
+                "db_data".into()
+            ]))
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_removes_only_listed_volumes() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = volumes_app(&fake).await;
+        let _ = app.update(vol_msg(volumes::Msg::AskPrune));
+        // Unused, but it showed up after the dialog opened: it was never listed.
+        fake.add_volume(unused_volume("tmp"));
+        settle(&mut app, vol_msg(volumes::Msg::Confirm)).await;
+        assert_eq!(removed_volumes(&fake), vec!["remove_volume:cache"]);
+        assert!(!fake.calls().contains(&"prune_volumes".to_string()));
+        let names: Vec<_> = fake
+            .list_volumes()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|v| v.name)
+            .collect();
+        assert!(names.contains(&"tmp".to_string()));
+    }
+
+    #[tokio::test]
+    async fn prune_keeps_volumes_that_became_used() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        fake.add_volume(unused_volume("tmp"));
+        let mut app = volumes_app(&fake).await;
+        let _ = app.update(vol_msg(volumes::Msg::AskPrune));
+        assert_eq!(
+            app.volumes.confirm,
+            Some(volumes::VolumeConfirm::Prune(vec![
+                "cache".into(),
+                "tmp".into()
+            ]))
+        );
+        // The first removal (`cache`) is refused, as if a container had just mounted it.
+        fake.fail_next(DockerError::Conflict("volume is in use".into()));
+        settle(&mut app, vol_msg(volumes::Msg::Confirm)).await;
+        assert_eq!(
+            removed_volumes(&fake),
+            vec!["remove_volume:cache", "remove_volume:tmp"]
+        );
+        let error = app.toasts.iter().find(|t| t.kind == ToastKind::Error);
+        let error = error.expect("an error toast");
+        assert_eq!(
+            error.text,
+            friendly_error(&DockerError::Conflict(String::new()))
+        );
+        assert!(
+            error
+                .details
+                .as_deref()
+                .is_some_and(|d| d.contains("cache"))
+        );
+        let info = app.toasts.iter().find(|t| t.kind == ToastKind::Info);
+        assert_eq!(
+            info.map(|t| t.text.clone()),
+            Some(t!("volumes.pruned_one", count = 1).into_owned())
+        );
+        assert!(app.volumes.pending.is_empty());
+        settle(&mut app, Message::ReloadVolumes).await;
+        let mut names: Vec<_> = app.volumes.items.iter().map(|v| v.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["cache", "db_data"]);
+    }
+
     #[tokio::test]
     async fn prune_result_toast_counts() {
         let fake = Arc::new(FakeClient::with_sample_data());
@@ -4650,8 +4789,11 @@ mod tests {
             }
         };
         for n in [3usize, 1, 0] {
-            let names = (0..n).map(|i| format!("v{i}")).collect();
-            let _ = app.update(vol_msg(volumes::Msg::Pruned(Ok(names))));
+            let removed = (0..n).map(|i| format!("v{i}")).collect();
+            let _ = app.update(vol_msg(volumes::Msg::Pruned {
+                removed,
+                failed: vec![],
+            }));
             let last = app.toasts.last().expect("a toast");
             assert_eq!(last.text, text(n));
             assert_eq!(last.kind, ToastKind::Info);
@@ -4857,7 +4999,7 @@ mod tests {
         let mut app = volumes_app(&fake).await;
         let _ = app.update(vol_msg(volumes::Msg::AskPrune));
         settle(&mut app, enter_key(false)).await;
-        assert!(fake.calls().contains(&"prune_volumes".to_string()));
+        assert!(fake.calls().contains(&"remove_volume:cache".to_string()));
         assert_eq!(app.volumes.confirm, None);
     }
 
