@@ -207,11 +207,45 @@ pub fn event_from(m: &EventMessage) -> Option<DockerEvent> {
     })
 }
 
-pub(super) fn docker_socket_path() -> String {
-    match std::env::var("DOCKER_HOST") {
-        Ok(h) if h.starts_with("unix://") => h["unix://".len()..].to_string(),
-        _ => "/var/run/docker.sock".to_string(),
+/// Standard rootful socket.
+const DEFAULT_SOCKET: &str = "/var/run/docker.sock";
+
+/// Sockets to try, in order. `DOCKER_HOST=unix://...` is the only candidate when set; otherwise
+/// the rootful socket, then the rootless one (`$XDG_RUNTIME_DIR/docker.sock`). Any other
+/// `DOCKER_HOST` (e.g. `tcp://`) is not supported and is ignored.
+pub(super) fn socket_candidates(
+    docker_host: Option<&str>,
+    runtime_dir: Option<&str>,
+) -> Vec<String> {
+    if let Some(path) = docker_host.and_then(|h| h.strip_prefix("unix://")) {
+        return vec![path.to_string()];
     }
+    let mut out = vec![DEFAULT_SOCKET.to_string()];
+    if let Some(dir) = runtime_dir.filter(|d| !d.is_empty()) {
+        out.push(format!("{}/docker.sock", dir.trim_end_matches('/')));
+    }
+    out
+}
+
+/// The first candidate that exists, or the first one (so errors name the usual path).
+pub(super) fn pick_socket(candidates: &[String], exists: impl Fn(&str) -> bool) -> String {
+    candidates
+        .iter()
+        .find(|c| exists(c))
+        .or(candidates.first())
+        .cloned()
+        .unwrap_or_else(|| DEFAULT_SOCKET.to_string())
+}
+
+/// Socket the app talks to, resolved from the environment each time it is called, so a daemon
+/// that appears later is found.
+pub(super) fn docker_socket_path() -> String {
+    let host = std::env::var("DOCKER_HOST").ok();
+    let runtime = std::env::var("XDG_RUNTIME_DIR").ok();
+    pick_socket(
+        &socket_candidates(host.as_deref(), runtime.as_deref()),
+        |p| std::path::Path::new(p).exists(),
+    )
 }
 
 fn docker_cli_installed() -> bool {
@@ -275,6 +309,36 @@ mod tests {
     use bollard::models::{
         ContainerStatsResponse, ContainerSummary, EventMessage, Network, Volume,
     };
+
+    #[test]
+    fn socket_candidates_follow_docker_host_then_rootful_then_rootless() {
+        assert_eq!(
+            socket_candidates(Some("unix:///x/d.sock"), Some("/run/user/1000")),
+            ["/x/d.sock"]
+        );
+        assert_eq!(
+            socket_candidates(None, Some("/run/user/1000")),
+            ["/var/run/docker.sock", "/run/user/1000/docker.sock"]
+        );
+        assert_eq!(socket_candidates(None, None), ["/var/run/docker.sock"]);
+        assert_eq!(socket_candidates(None, Some("")), ["/var/run/docker.sock"]);
+        // `tcp://` is not supported: ignored, like before.
+        assert_eq!(
+            socket_candidates(Some("tcp://1.2.3.4:2375"), Some("/run/user/1000/")),
+            ["/var/run/docker.sock", "/run/user/1000/docker.sock"]
+        );
+    }
+
+    #[test]
+    fn pick_socket_takes_the_first_that_exists_or_the_first() {
+        let c = socket_candidates(None, Some("/run/user/1000"));
+        assert_eq!(
+            pick_socket(&c, |p| p == "/run/user/1000/docker.sock"),
+            "/run/user/1000/docker.sock"
+        );
+        assert_eq!(pick_socket(&c, |_| true), "/var/run/docker.sock");
+        assert_eq!(pick_socket(&c, |_| false), "/var/run/docker.sock");
+    }
 
     const CONTAINERS: &str = include_str!("../../tests/fixtures/containers.json");
     const NO_NAME: &str = include_str!("../../tests/fixtures/container_no_name.json");

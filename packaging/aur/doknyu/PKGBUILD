@@ -1,0 +1,56 @@
+# Maintainer: RafaelProfMgz <RafaelProfMgz@users.noreply.github.com>
+# Builds from the tarball of the release tag. The checksum below is a placeholder until the tag
+# exists; packaging/aur/pin-release.sh <tag> replaces it (updpkgsums) and regenerates .SRCINFO.
+pkgname=doknyu
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Desktop manager for Docker containers: logs, stats, volumes, networks and a terminal'
+arch=('x86_64')
+url='https://github.com/RafaelProfMgz/doknyu'
+# The binary also embeds IBM Plex (OFL-1.1) and Lucide (ISC); the texts are in LICENSES-fonts.md.
+license=('MIT OR Apache-2.0' 'OFL-1.1' 'ISC')
+# The GUI stack (Wayland, xkbcommon, Vulkan) is loaded with dlopen, so it is not in the ldd output
+# that namcap reads, but the window does not open without it.
+# hicolor-icon-theme owns the icon directories (namcap E: needed for the hicolor theme hierarchy).
+depends=('gcc-libs' 'glibc' 'libxkbcommon' 'wayland' 'vulkan-icd-loader' 'fontconfig' 'hicolor-icon-theme')
+makedepends=('cargo')
+optdepends=('docker: manage local containers')
+options=('!lto')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('0000000000000000000000000000000000000000000000000000000000000000')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo test --frozen --release
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  local id=io.github.rafaelprofmgz.Doknyu size
+
+  install -Dm755 target/release/doknyu -t "$pkgdir/usr/bin/"
+  install -Dm644 "assets/$id.desktop" -t "$pkgdir/usr/share/applications/"
+  install -Dm644 "assets/$id.metainfo.xml" -t "$pkgdir/usr/share/metainfo/"
+  install -Dm644 "assets/icons/$id.svg" -t "$pkgdir/usr/share/icons/hicolor/scalable/apps/"
+  for size in 16 24 32 48 64 128 256 512; do
+    install -Dm644 "assets/icons/hicolor/${size}x${size}/apps/$id.png" \
+      -t "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/"
+  done
+  install -Dm644 LICENSE-MIT LICENSE-APACHE -t "$pkgdir/usr/share/licenses/$pkgname/"
+  install -Dm644 assets/fonts/LICENSES.md "$pkgdir/usr/share/licenses/$pkgname/LICENSES-fonts.md"
+}

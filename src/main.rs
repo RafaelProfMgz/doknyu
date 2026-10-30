@@ -55,7 +55,32 @@ fn window_settings() -> iced::window::Settings {
     }
 }
 
+/// The line `doknyu --version` prints, when that is what the arguments ask for (`args[0]` is the
+/// program). Packages run it as a smoke test of the installed binary.
+fn version_line(args: &[String]) -> Option<String> {
+    match args.get(1).map(String::as_str) {
+        Some("--version" | "-V") => Some(format!("doknyu {}", env!("CARGO_PKG_VERSION"))),
+        _ => None,
+    }
+}
+
 fn main() -> iced::Result {
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(line) = version_line(&args) {
+        println!("{line}");
+        return Ok(());
+    }
+
+    // `doknyu --exec-bridge <container>` is the shell of the terminals: nothing of the app runs.
+    match doknyu::exec_bridge::bridge_target(&args) {
+        Ok(Some(container)) => std::process::exit(doknyu::exec_bridge::main(&container)),
+        Ok(None) => {}
+        Err(usage) => {
+            eprintln!("{usage}");
+            std::process::exit(2);
+        }
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
@@ -83,6 +108,19 @@ fn main() -> iced::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_flag_prints_the_cargo_version() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let expected = Some(format!("doknyu {}", env!("CARGO_PKG_VERSION")));
+        assert_eq!(version_line(&args(&["doknyu", "--version"])), expected);
+        assert_eq!(version_line(&args(&["doknyu", "-V"])), expected);
+        assert_eq!(version_line(&args(&["doknyu"])), None);
+        assert_eq!(
+            version_line(&args(&["doknyu", "--exec-bridge", "web"])),
+            None
+        );
+    }
 
     #[test]
     fn window_icon_decodes() {

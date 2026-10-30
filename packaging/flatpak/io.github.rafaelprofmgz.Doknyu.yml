@@ -1,0 +1,54 @@
+# Manifesto do Flathub (ver packaging/README.md, seção Flathub).
+# Build offline: as crates vêm de cargo-sources.json (scripts/update-cargo-sources.sh).
+# Para testar o código da branch local, gere o manifesto `.local.yml` com
+# packaging/flatpak/make-local-manifest.sh (troca só o bloco de fonte abaixo por `type: dir`).
+app-id: io.github.rafaelprofmgz.Doknyu
+runtime: org.freedesktop.Platform
+runtime-version: '26.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: doknyu
+
+# Permissões mínimas (justificativa em packaging/README.md e no PR do Flathub).
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --share=ipc
+  # Docker padrão: /var/run é symlink para /run, então /run/docker.sock cobre os dois caminhos.
+  - --filesystem=/run/docker.sock
+  # Docker rootless: $XDG_RUNTIME_DIR/docker.sock (o Flatpak só aceita a forma xdg-run/).
+  - --filesystem=xdg-run/docker.sock
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/doknyu/cargo
+    CARGO_NET_OFFLINE: 'true'
+
+modules:
+  - name: doknyu
+    buildsystem: simple
+    build-commands:
+      - cargo --offline build --release --locked --bin doknyu
+      - install -Dm755 target/release/doknyu -t /app/bin
+      - install -Dm644 assets/io.github.rafaelprofmgz.Doknyu.desktop -t /app/share/applications
+      - install -Dm644 assets/io.github.rafaelprofmgz.Doknyu.metainfo.xml -t /app/share/metainfo
+      - install -Dm644 assets/icons/io.github.rafaelprofmgz.Doknyu.svg -t /app/share/icons/hicolor/scalable/apps
+      - |
+        for n in 16 24 32 48 64 128 256 512; do
+          install -Dm644 assets/icons/hicolor/${n}x${n}/apps/io.github.rafaelprofmgz.Doknyu.png \
+            -t /app/share/icons/hicolor/${n}x${n}/apps
+        done
+      - install -Dm644 LICENSE-MIT LICENSE-APACHE assets/fonts/LICENSES.md -t /app/share/licenses/io.github.rafaelprofmgz.Doknyu
+    sources:
+      # BEGIN-SOURCE
+      # Placeholder de propósito: não compila. Na release, rode packaging/flatpak/pin-release.sh
+      # <tag>, que preenche `tag` e `commit` e confere o cargo-sources.json.
+      - type: git
+        url: https://github.com/RafaelProfMgz/doknyu.git
+        tag: vX.Y.Z
+        commit: 0000000000000000000000000000000000000000
+      # END-SOURCE
+      - cargo-sources.json

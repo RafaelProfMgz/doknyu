@@ -1,3 +1,8 @@
 /target
 *.swp
 .env
+/packaging/flatpak/.tools/
+/packaging/flatpak/.flatpak-builder/
+/packaging/flatpak/*.local.yml
+/packaging/flatpak/build-dir/
+/packaging/flatpak/repo/

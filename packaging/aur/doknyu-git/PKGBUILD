@@ -1,0 +1,68 @@
+# Maintainer: RafaelProfMgz <RafaelProfMgz@users.noreply.github.com>
+# Follows the main branch. pkgver comes from `git describe` (0.1.0.r<commits since the tag>.g<hash>);
+# while there is no tag yet it falls back to r<commit count>.g<hash>.
+pkgname=doknyu-git
+pkgver=0.1.0.r0.g0000000
+pkgrel=1
+pkgdesc='Desktop manager for Docker containers: logs, stats, volumes, networks and a terminal (git version)'
+arch=('x86_64')
+url='https://github.com/RafaelProfMgz/doknyu'
+# The binary also embeds IBM Plex (OFL-1.1) and Lucide (ISC); the texts are in LICENSES-fonts.md.
+license=('MIT OR Apache-2.0' 'OFL-1.1' 'ISC')
+# The GUI stack (Wayland, xkbcommon, Vulkan) is loaded with dlopen, so it is not in the ldd output
+# that namcap reads, but the window does not open without it.
+# hicolor-icon-theme owns the icon directories (namcap E: needed for the hicolor theme hierarchy).
+depends=('gcc-libs' 'glibc' 'libxkbcommon' 'wayland' 'vulkan-icd-loader' 'fontconfig' 'hicolor-icon-theme')
+makedepends=('cargo' 'git')
+optdepends=('docker: manage local containers')
+provides=('doknyu')
+conflicts=('doknyu')
+options=('!lto')
+source=("$pkgname::git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$pkgname"
+  local desc
+  if desc="$(git describe --long --tags --abbrev=7 --match 'v[0-9]*' 2>/dev/null)"; then
+    sed 's/^v//; s/\([^-]*-g\)/r\1/; s/-/./g' <<< "$desc"
+  else
+    printf 'r%s.g%s\n' "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+  fi
+}
+
+prepare() {
+  cd "$pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release
+}
+
+check() {
+  cd "$pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo test --frozen --release
+}
+
+package() {
+  cd "$pkgname"
+  local id=io.github.rafaelprofmgz.Doknyu size
+
+  install -Dm755 target/release/doknyu -t "$pkgdir/usr/bin/"
+  install -Dm644 "assets/$id.desktop" -t "$pkgdir/usr/share/applications/"
+  install -Dm644 "assets/$id.metainfo.xml" -t "$pkgdir/usr/share/metainfo/"
+  install -Dm644 "assets/icons/$id.svg" -t "$pkgdir/usr/share/icons/hicolor/scalable/apps/"
+  for size in 16 24 32 48 64 128 256 512; do
+    install -Dm644 "assets/icons/hicolor/${size}x${size}/apps/$id.png" \
+      -t "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/"
+  done
+  install -Dm644 LICENSE-MIT LICENSE-APACHE -t "$pkgdir/usr/share/licenses/$pkgname/"
+  install -Dm644 assets/fonts/LICENSES.md "$pkgdir/usr/share/licenses/$pkgname/LICENSES-fonts.md"
+}

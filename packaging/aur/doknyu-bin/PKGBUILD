@@ -1,0 +1,46 @@
+# Maintainer: RafaelProfMgz <RafaelProfMgz@users.noreply.github.com>
+# Repackages the .deb of the GitHub release (built by .github/workflows/release.yml); nothing is
+# compiled here. The checksum below is a placeholder until the release exists;
+# packaging/aur/pin-release.sh <tag> replaces it (updpkgsums) and regenerates .SRCINFO.
+pkgname=doknyu-bin
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Desktop manager for Docker containers: logs, stats, volumes, networks and a terminal (prebuilt binary)'
+arch=('x86_64')
+url='https://github.com/RafaelProfMgz/doknyu'
+# The binary also embeds IBM Plex (OFL-1.1) and Lucide (ISC); the texts are in LICENSES-fonts.md.
+license=('MIT OR Apache-2.0' 'OFL-1.1' 'ISC')
+# The GUI stack (Wayland, xkbcommon, Vulkan) is loaded with dlopen, so it is not in the ldd output
+# that namcap reads, but the window does not open without it.
+# hicolor-icon-theme owns the icon directories (namcap E: needed for the hicolor theme hierarchy).
+depends=('gcc-libs' 'glibc' 'libxkbcommon' 'wayland' 'vulkan-icd-loader' 'fontconfig' 'hicolor-icon-theme')
+optdepends=('docker: manage local containers')
+provides=('doknyu')
+conflicts=('doknyu' 'doknyu-git')
+# makepkg would unpack the .deb (an ar archive) into control.tar and data.tar; prepare() does it.
+noextract=("$pkgname-$pkgver.deb")
+source=("$pkgname-$pkgver.deb::$url/releases/download/v$pkgver/doknyu_$pkgver-1_amd64.deb")
+sha256sums=('0000000000000000000000000000000000000000000000000000000000000000')
+
+prepare() {
+  mkdir -p root
+  bsdtar -xf "$pkgname-$pkgver.deb" 'data.tar.*'
+  bsdtar -xf data.tar.* -C root
+}
+
+package() {
+  local id=io.github.rafaelprofmgz.Doknyu size
+
+  install -Dm755 root/usr/bin/doknyu -t "$pkgdir/usr/bin/"
+  install -Dm644 "root/usr/share/applications/$id.desktop" -t "$pkgdir/usr/share/applications/"
+  install -Dm644 "root/usr/share/metainfo/$id.metainfo.xml" -t "$pkgdir/usr/share/metainfo/"
+  for size in 16 24 32 48 64 128 256 512; do
+    install -Dm644 "root/usr/share/icons/hicolor/${size}x${size}/apps/$id.png" \
+      -t "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/"
+  done
+  install -Dm644 "root/usr/share/icons/hicolor/scalable/apps/$id.svg" \
+    -t "$pkgdir/usr/share/icons/hicolor/scalable/apps/"
+  install -Dm644 root/usr/share/doc/doknyu/LICENSE-MIT root/usr/share/doc/doknyu/LICENSE-APACHE \
+    -t "$pkgdir/usr/share/licenses/$pkgname/"
+  install -Dm644 root/usr/share/doc/doknyu/LICENSES.md "$pkgdir/usr/share/licenses/$pkgname/LICENSES-fonts.md"
+}

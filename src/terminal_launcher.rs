@@ -1,5 +1,5 @@
 //! Opens a shell inside a container in the system terminal emulator. Pure and iced-free; the
-//! embedded Terminal tab (phase 5.2) reuses `exec_args` and `docker_cli_available`.
+//! shell is the exec bridge (`crate::exec_bridge`), the same one the embedded Terminal tab runs.
 
 use crate::error::DockerError;
 
@@ -55,20 +55,14 @@ pub fn detect_terminal(
         .map(|bin| run_prefix(bin, &[]))
 }
 
-/// The arguments after `docker` that open a shell in the container.
-pub fn exec_args(container_id: &str) -> Vec<String> {
-    [
-        "exec",
-        "-it",
-        "-e",
-        "TERM=xterm-256color",
-        container_id,
-        "sh",
-        "-c",
-        "command -v bash >/dev/null && exec bash || exec sh",
-    ]
-    .map(str::to_owned)
-    .to_vec()
+/// The full command line: the terminal's `prefix`, then this executable as the exec bridge.
+pub fn command_line(prefix: &[String], exe: &str, container_id: &str) -> Vec<String> {
+    prefix
+        .iter()
+        .cloned()
+        .chain(std::iter::once(exe.to_owned()))
+        .chain(crate::exec_bridge::bridge_args(container_id))
+        .collect()
 }
 
 /// Whether `bin` is an executable file in a `PATH` directory (or a path that is one).
@@ -85,30 +79,19 @@ fn on_path(bin: &str) -> bool {
         .is_some_and(|path| std::env::split_paths(&path).any(|dir| is_exec(&dir.join(bin))))
 }
 
-/// Whether the `docker` CLI is on `PATH`.
-pub fn docker_cli_available() -> bool {
-    on_path("docker")
-}
-
 /// Opens a system terminal running a shell in the container, without waiting for it.
 pub fn launch(container_id: &str) -> Result<(), DockerError> {
     use std::process::{Command, Stdio};
 
-    if !docker_cli_available() {
-        return Err(DockerError::Other(
-            "the docker command was not found in PATH".into(),
-        ));
-    }
     let env_terminal = std::env::var("TERMINAL").ok();
     let Some(prefix) = detect_terminal(env_terminal.as_deref(), &on_path) else {
         return Err(DockerError::Other(
             "no terminal emulator found (set $TERMINAL)".into(),
         ));
     };
-    let mut child = Command::new(&prefix[0])
-        .args(&prefix[1..])
-        .arg("docker")
-        .args(exec_args(container_id))
+    let line = command_line(&prefix, &crate::exec_bridge::program(), container_id);
+    let mut child = Command::new(&line[0])
+        .args(&line[1..])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -232,17 +215,11 @@ mod tests {
     }
 
     #[test]
-    fn exec_args_runs_a_shell_with_term_set() {
-        let args = exec_args("abc123");
+    fn launcher_runs_the_bridge() {
+        let prefix = vec!["kitty".to_string(), "-e".to_string()];
         assert_eq!(
-            &args[..6],
-            ["exec", "-it", "-e", "TERM=xterm-256color", "abc123", "sh"]
+            command_line(&prefix, "/opt/doknyu", "abc123"),
+            ["kitty", "-e", "/opt/doknyu", "--exec-bridge", "abc123"]
         );
-        assert_eq!(args[6], "-c");
-        assert_eq!(
-            args[7],
-            "command -v bash >/dev/null && exec bash || exec sh"
-        );
-        assert_eq!(args.len(), 8);
     }
 }

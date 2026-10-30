@@ -1,0 +1,50 @@
+name: Flatpak
+
+# Em PR e em tag: confere o cargo-sources.json e constrói o Flatpak a partir do código do
+# próprio checkout (manifesto `.local.yml`, gerado do manifesto do Flathub com `type: dir`).
+# Nada é publicado: o PR no flathub/flathub é um passo do humano (packaging/README.md).
+on:
+  pull_request:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-sources:
+    name: cargo-sources.json em dia com o Cargo.lock
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: scripts/update-cargo-sources.sh --check
+      # Só em tag: o commit fixado no manifesto do Flathub tem de ser o da tag. O manifesto da própria
+      # tag não pode conter o hash dela (circular), então o pin é refeito aqui com pin-release.sh
+      # (que também confere o cargo-sources.json da tag) e comparado com o commit do evento.
+      - name: O pin do manifesto do Flathub bate com o commit da tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          SHA: ${{ github.sha }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          packaging/flatpak/pin-release.sh "$TAG"
+          pinned="$(sed -n 's/^ *commit: *//p' packaging/flatpak/io.github.rafaelprofmgz.Doknyu.yml | head -n1)"
+          if [ "$pinned" != "$SHA" ]; then
+            echo "::error::O manifesto do Flathub fixaria o commit '$pinned', mas a tag $TAG aponta para '$SHA'."
+            exit 1
+          fi
+
+  build:
+    name: Build do Flatpak
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-26.08
+      options: --privileged
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Manifesto com a fonte local
+        run: packaging/flatpak/make-local-manifest.sh
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@79327416609af08178ad73b352877e51450790b3 # v6.8
+        with:
+          bundle: doknyu.flatpak
+          manifest-path: packaging/flatpak/io.github.rafaelprofmgz.Doknyu.local.yml

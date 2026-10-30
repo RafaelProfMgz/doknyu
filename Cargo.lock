@@ -868,6 +868,7 @@ dependencies = [
  "open",
  "png",
  "rust-i18n",
+ "rustix 1.1.6",
  "serde_json",
  "sys-locale",
  "thiserror 2.0.21",

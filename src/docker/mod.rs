@@ -14,6 +14,23 @@ pub use self::fake::FakeClient;
 
 pub type DockerStream<T> = futures::stream::BoxStream<'static, Result<T, DockerError>>;
 
+/// What an interactive exec needs once it runs: the terminal-side handles of the bridge.
+#[async_trait::async_trait]
+pub trait ExecControl: Send + Sync {
+    /// Tells the exec's PTY the size of the terminal in front of it.
+    async fn resize(&self, cols: u16, rows: u16) -> Result<(), DockerError>;
+    /// The exit code of the command once it ended; `None` if the daemon does not report one.
+    async fn exit_code(&self) -> Result<Option<i64>, DockerError>;
+}
+
+/// An exec with a TTY and stdin attached (`docker exec -it`), as the exec bridge uses it.
+/// `output` is the raw bytes of the PTY (stdout and stderr are merged by the TTY).
+pub struct ExecSession {
+    pub output: DockerStream<Vec<u8>>,
+    pub input: std::pin::Pin<Box<dyn tokio::io::AsyncWrite + Send>>,
+    pub control: Box<dyn ExecControl>,
+}
+
 #[async_trait::async_trait]
 pub trait DockerClient: Send + Sync + 'static {
     async fn ping(&self) -> Result<(), DockerError>;
@@ -30,6 +47,17 @@ pub trait DockerClient: Send + Sync + 'static {
     async fn prune_volumes(&self) -> Result<Vec<String>, DockerError>;
     async fn list_networks(&self) -> Result<Vec<NetworkInfo>, DockerError>;
     async fn remove_network(&self, id: &str) -> Result<(), DockerError>;
+    /// Runs `cmd` in the container with a TTY and stdin attached; `env` is `KEY=value` pairs.
+    /// Only the exec bridge uses it (covered by an integration test), so clients that cannot
+    /// (the fakes) keep this default.
+    async fn exec_interactive(
+        &self,
+        _id: &str,
+        _cmd: Vec<String>,
+        _env: Vec<String>,
+    ) -> Result<ExecSession, DockerError> {
+        Err(DockerError::Other("exec is not supported".into()))
+    }
 }
 
 /// Creates a client for the local daemon (`DOCKER_HOST` if `unix://`, else the

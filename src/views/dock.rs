@@ -28,14 +28,12 @@ fn tab_label(tab: DockTab) -> String {
 }
 
 /// The dock for `dock`; `info` is the container, if it is still in the list, `detail` what the
-/// tabs keep for it, `term` the shell session and `docker_cli` whether the `docker` command
-/// exists (the session needs it).
+/// tabs keep for it, and `term` the shell session.
 pub fn view<'a>(
     dock: &'a Dock,
     info: Option<&'a ContainerInfo>,
     detail: Option<&'a DetailState>,
     term: &'a TerminalState,
-    docker_cli: bool,
 ) -> Element<'a, Message> {
     let mut title = row![
         text(info.map_or(dock.container_id.as_str(), |c| c.name.as_str()))
@@ -55,7 +53,7 @@ pub fn view<'a>(
     };
     let running = info.is_some_and(|c| c.state.is_running());
     let mut actions = row![];
-    if running {
+    if running && !crate::sandbox::in_flatpak() {
         actions = actions.push(icon_button(
             Icon::SquareTerminal,
             Some(Message::Action(ActionId::OpenExternalTerminal)),
@@ -84,7 +82,7 @@ pub fn view<'a>(
             .height(Length::Fill)
             .style(style::container::bg)
             .into(),
-        (DockTab::Terminal, _) => terminal::view(term, running, docker_cli),
+        (DockTab::Terminal, _) => terminal::view(term, running),
         _ => container(text(t!("dock.empty_tab").into_owned()).style(style::text::muted))
             .center(Length::Fill)
             .padding(SPACE_4)
@@ -102,7 +100,7 @@ mod tests {
     #[test]
     fn view_builds_for_every_tab_and_size() {
         let term = TerminalState::default();
-        for docker_cli in [true, false] {
+        {
             for tab in TABS {
                 for maximized in [false, true] {
                     let dock = Dock {
@@ -121,9 +119,9 @@ mod tests {
                             ports: vec![],
                         };
                         let _: Element<'_, Message> =
-                            view(&dock, Some(&info), Some(&detail), &term, docker_cli);
+                            view(&dock, Some(&info), Some(&detail), &term);
                     }
-                    let _: Element<'_, Message> = view(&dock, None, None, &term, docker_cli);
+                    let _: Element<'_, Message> = view(&dock, None, None, &term);
                 }
             }
         }

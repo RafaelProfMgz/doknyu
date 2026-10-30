@@ -15,6 +15,12 @@ use crate::views::widgets::friendly_error;
 pub const INSTALL_URL: &str = "https://docs.docker.com/engine/install/";
 pub const START_COMMAND: &str = "sudo systemctl start docker";
 pub const GROUP_COMMAND: &str = "sudo usermod -aG docker $USER";
+/// Flatpak: lets the sandbox see the standard (rootful) socket.
+pub const FLATPAK_SOCKET_COMMAND: &str =
+    "flatpak override --user --filesystem=/run/docker.sock io.github.rafaelprofmgz.Doknyu";
+/// Flatpak: lets the sandbox see the rootless socket (`$XDG_RUNTIME_DIR/docker.sock`).
+pub const FLATPAK_ROOTLESS_COMMAND: &str =
+    "flatpak override --user --filesystem=xdg-run/docker.sock io.github.rafaelprofmgz.Doknyu";
 
 fn title<'a>(key: String) -> Element<'a, Message> {
     text(key).size(TEXT_LG).font(SANS_SEMIBOLD).into()
@@ -57,8 +63,29 @@ fn command_block(command: &'static str) -> Element<'static, Message> {
 
 /// Explains the connection problem and how to fix it, on a card in the middle of the area.
 pub fn view(err: &DockerError) -> Element<'_, Message> {
+    view_in(err, crate::sandbox::in_flatpak())
+}
+
+/// `view`, with the sandbox given (testable). Inside Flatpak there is never a `docker` CLI, so
+/// "not installed" really means "no socket visible": it explains how to open it.
+pub fn view_in(err: &DockerError, flatpak: bool) -> Element<'_, Message> {
     let mut card = column![].spacing(SPACE_3);
     match err {
+        DockerError::NotInstalled if flatpak => {
+            card = card
+                .push(title(t!("onboarding.flatpak_socket.title").into_owned()))
+                .push(body(t!("onboarding.flatpak_socket.body").into_owned()))
+                .push(body(t!("onboarding.flatpak_socket.default").into_owned()))
+                .push(command_block(FLATPAK_SOCKET_COMMAND))
+                .push(body(t!("onboarding.flatpak_socket.rootless").into_owned()))
+                .push(command_block(FLATPAK_ROOTLESS_COMMAND))
+                .push(body(t!("onboarding.flatpak_socket.after").into_owned()))
+                .push(action(
+                    t!("onboarding.not_installed.button").into_owned(),
+                    Message::OpenUrl(INSTALL_URL.to_owned()),
+                    style::button::ghost,
+                ));
+        }
         DockerError::NotInstalled => {
             card = card
                 .push(title(t!("onboarding.not_installed.title").into_owned()))
@@ -124,6 +151,7 @@ mod tests {
         ];
         for e in &all {
             let _: Element<'_, Message> = view(e);
+            let _: Element<'_, Message> = view_in(e, true);
         }
     }
 
@@ -138,6 +166,11 @@ mod tests {
             "onboarding.permission.title",
             "onboarding.permission.body",
             "onboarding.permission.warning",
+            "onboarding.flatpak_socket.title",
+            "onboarding.flatpak_socket.body",
+            "onboarding.flatpak_socket.default",
+            "onboarding.flatpak_socket.rootless",
+            "onboarding.flatpak_socket.after",
             "onboarding.other.title",
             "onboarding.retry",
             "onboarding.copy",
@@ -154,5 +187,15 @@ mod tests {
     fn command_blocks_match_the_spec() {
         assert_eq!(START_COMMAND, "sudo systemctl start docker");
         assert_eq!(GROUP_COMMAND, "sudo usermod -aG docker $USER");
+    }
+
+    #[test]
+    fn flatpak_commands_name_the_app_and_the_socket() {
+        assert!(FLATPAK_SOCKET_COMMAND.contains("--filesystem=/run/docker.sock"));
+        assert!(FLATPAK_ROOTLESS_COMMAND.contains("--filesystem=xdg-run/docker.sock"));
+        for c in [FLATPAK_SOCKET_COMMAND, FLATPAK_ROOTLESS_COMMAND] {
+            assert!(c.starts_with("flatpak override --user "));
+            assert!(c.ends_with(" io.github.rafaelprofmgz.Doknyu"));
+        }
     }
 }
