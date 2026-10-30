@@ -73,6 +73,42 @@ release `v0.1.0` com tarball).
 - [ ] **Passo 5:** Recomendação: seguir para 7.2 / ajustar o app antes / desistir do Flathub. Commit
   `docs: flatpak spike decision`.
 
+### Tarefa 7.1b: Ponte de exec própria (`doknyu --exec-bridge`)
+
+**Implementa:** `rust-implementer`. **Origem:** ADR 0002 (spike): no Flatpak não há CLI `docker`,
+então a aba Terminal (que roda `docker exec -it` num PTY, ADR 0001) não funciona. Decisão do
+humano: o próprio binário faz a ponte entre o PTY do `iced_term` e o exec da API do Docker.
+
+**Arquivos:**
+- Criar: `src/exec_bridge.rs`, `tests/exec_bridge.rs` (integração, `#[ignore]`)
+- Modificar: `src/main.rs` (modo `--exec-bridge`), `src/lib.rs`, `src/docker/mod.rs` e
+  `src/docker/bollard.rs` (operação de exec interativo, sem tipos do bollard fora de `docker/`),
+  `src/views/detail/terminal.rs` (`backend_settings`), `src/terminal_launcher.rs`, `Cargo.toml`
+
+**Comportamento:**
+- `doknyu --exec-bridge <container>`: conecta pelo mesmo `docker::connect()` do app (respeita
+  `DOCKER_HOST`), cria um exec com `tty: true`, stdin/stdout anexados, `Env=["TERM=xterm-256color",
+  "COLORTERM=truecolor"]` e o mesmo comando de `terminal_launcher` (`bash` se houver, senão `sh`).
+- Se o stdin for um TTY: põe em modo raw (restaura ao sair, inclusive em erro), lê o tamanho
+  (TIOCGWINSZ) e chama o resize do exec no início e a cada SIGWINCH.
+- Copia stdin → exec e exec → stdout até o exec terminar; sai com o código do exec
+  (`inspect_exec`), ou 1 com mensagem em stderr se a conexão falhar.
+- `terminal::backend_settings` passa a usar `std::env::current_exe()` com
+  `["--exec-bridge", id]`: a aba Terminal deixa de exigir a CLI `docker` (remover o aviso de
+  "CLI ausente" e o campo/checagem associados).
+- O terminal externo (`terminal_launcher`) também passa a executar `<exe> --exec-bridge <id>`.
+- Sem crates grandes novas: termios e ioctl via `rustix` (features `termios`) ou `libc`.
+
+- [ ] **Passo 1: Testes que falham:** `parses_exec_bridge_args` (`["doknyu","--exec-bridge","web"]`
+  → `Some("web")`; sem id → erro de uso); `backend_settings_runs_the_bridge` (program é o exe
+  atual, args `["--exec-bridge", id]`); `launcher_runs_the_bridge`; integração ignorada
+  `bridge_runs_a_command`: com stdin em pipe (não TTY), enviar `echo ponte-ok; exit\n` ao
+  `alpine` de teste e ver `ponte-ok` no stdout e código 0.
+- [ ] **Passo 2–4:** FAIL → implementar → PASS (`cargo test -- --ignored` com Docker no ar).
+- [ ] **Passo 5:** Manual: aba Terminal com `top`, `vi`, resize da janela (`stty size`), Ctrl+C,
+  `exit`; sem a CLI `docker` no PATH continua funcionando.
+- [ ] **Passo 6:** Commit `feat: built-in exec bridge for the terminal`.
+
 ### Tarefa 7.2: Manifesto Flatpak, adaptação do app e CI
 
 **Implementa:** `research-implementer`. **Só começa se o ADR 0002 recomendar seguir.**
@@ -85,6 +121,10 @@ release `v0.1.0` com tarball).
   `assets/*.metainfo.xml` (se o ADR pedir), `packaging/README.md`
 
 **Interfaces:**
+- Escopo extra vindo do ADR 0002: sem `DOCKER_HOST`, tentar também
+  `$XDG_RUNTIME_DIR/docker.sock` (Docker rootless) antes de desistir; em Flatpak, socket ausente
+  mostra o onboarding "sem acesso ao socket" (como liberar com `flatpak override`) em vez de
+  "Docker não instalado". O terminal embutido funciona via Tarefa 7.1b.
 - Produz: `pub fn in_flatpak() -> bool` (verifica `/.flatpak-info`) e
   `pub fn in_flatpak_at(root: &Path) -> bool` (testável).
   `actions::available(OpenExternalTerminal)` é `false` quando `in_flatpak()`.
