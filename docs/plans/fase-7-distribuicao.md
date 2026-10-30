@@ -1,4 +1,4 @@
-# Fase 7 — Distribuição: Flathub, AUR, COPR e nixpkgs
+# Fase 7 — Distribuição: Flathub, AUR, COPR, nixpkgs e Homebrew
 
 > **Para agentes:** SUB-SKILL OBRIGATÓRIA: use superpowers:subagent-driven-development (recomendado)
 > ou superpowers:executing-plans. Ver [README.md](README.md) e
@@ -26,7 +26,7 @@ release `v0.1.0` com tarball).
   licenças em `/usr/share/licenses/doknyu/`.
 - Docker é dependência **opcional** (o app abre e mostra o onboarding sem ele).
 - **Nada é publicado por agente.** Abrir PR no Flathub, dar push no AUR, criar projeto no COPR e
-  abrir PR no nixpkgs são passos do humano; os agentes deixam tudo pronto e documentado em
+  abrir PR no nixpkgs e publicar o tap do Homebrew são passos do humano; os agentes deixam tudo pronto e documentado em
   `packaging/README.md`.
 
 ## Foco de revisão
@@ -152,6 +152,32 @@ release `v0.1.0` com tarball).
 - [ ] **Passo 3:** `packaging/README.md`, seções COPR (criar projeto, `copr-cli build` com o
   `.spec` e o SRPM) e nixpkgs (copiar `package.nix` para `pkgs/by-name/do/doknyu/` e abrir PR).
 - [ ] **Passo 4:** Commit `build: rpm spec for copr and nix package`.
+
+
+### Tarefa 7.5: Tap do Homebrew (Linux)
+
+**Implementa:** `research-implementer`. Referência: https://docs.brew.sh/Adding-Software-to-Homebrew
+e https://docs.brew.sh/How-to-Create-and-Maintain-a-Tap.
+
+**Decisão:** `homebrew-core` exige notoriedade (estrelas, uso) que um projeto novo não tem; o
+caminho é um **tap próprio** `RafaelProfMgz/homebrew-tap` com a fórmula `doknyu`. A fórmula é
+Linux-only (`depends_on :linux`), compila do tarball da tag com `cargo install` via
+`std_cargo_args`, e instala `.desktop`, ícones e metainfo em `share/`.
+
+**Arquivos:**
+- Criar: `packaging/homebrew/doknyu.rb`, `scripts/brew-check.sh`
+- Modificar: `packaging/README.md`
+
+- [ ] **Passo 1:** Fórmula com `desc`, `homepage`, `url` do tarball `v0.1.0`, `sha256`,
+  `license any_of: ["MIT", "Apache-2.0"]`, `depends_on "rust" => :build`,
+  `depends_on :linux`, `install` e `test do` rodando `doknyu --version`.
+- [ ] **Passo 2:** `scripts/brew-check.sh` roda num container `homebrew/brew`:
+  `brew style`, `brew audit --strict --new` e `brew install --build-from-source` da fórmula
+  num tap local; `doknyu --version` responde.
+- [ ] **Passo 3:** `packaging/README.md`, seção Homebrew: criar o repositório
+  `homebrew-tap`, copiar a fórmula para `Formula/doknyu.rb`, `brew tap RafaelProfMgz/tap` e
+  `brew install doknyu`; como atualizar `url`/`sha256` a cada release.
+- [ ] **Passo 4:** Commit `build: homebrew tap formula`.
 
 ---
 
