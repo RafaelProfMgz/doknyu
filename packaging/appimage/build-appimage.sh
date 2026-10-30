@@ -84,6 +84,12 @@ export APPIMAGE_EXTRACT_AND_RUN=1
     --desktop-file "$ROOT/assets/$ID.desktop" \
     "${icon_args[@]}"
 
+# Fail early, with a clear message, if linuxdeploy did not leave a valid AppDir.
+[[ -e "$APPDIR/AppRun" ]] || { echo "error: $APPDIR/AppRun is missing" >&2; exit 1; }
+[[ -e "$APPDIR/$ID.desktop" ]] || { echo "error: $APPDIR/$ID.desktop is missing" >&2; exit 1; }
+[[ -e "$APPDIR/$ID.svg" || -e "$APPDIR/$ID.png" ]] \
+    || { echo "error: no icon ($ID.svg or $ID.png) in the root of $APPDIR" >&2; exit 1; }
+
 # AppRun: linuxdeploy creates a symlink to the binary, which is enough because nothing needs
 # LD_LIBRARY_PATH or env vars. Packing then adds the type 2 runtime (embedded in appimagetool).
 ARCH="$ARCH" "$APPIMAGETOOL" "$APPDIR" "$OUTPUT"
