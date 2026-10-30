@@ -17,7 +17,7 @@ use crate::ui::components::{ToastKind, modal};
 use crate::ui::fonts::SANS_SEMIBOLD;
 use crate::ui::prefs;
 use crate::ui::style;
-use crate::ui::theme::{ThemeMode, palette, resolve};
+use crate::ui::theme::{ThemeMode, resolve};
 use crate::ui::tokens::{BORDER_WIDTH, ROW_HEIGHT, SPACE_1, SPACE_2, SPACE_6, TEXT_LG};
 use crate::views::containers::{self, ContainersState};
 use crate::views::detail::{self, DetailState};
@@ -161,6 +161,9 @@ pub struct App {
     pinging: bool,
     /// Bumped on every successful ping so each (re)connection gets a fresh events subscription.
     events_generation: u64,
+    /// Containers this user asked to remove: when they are gone the dock closes without saying
+    /// so, since it was the user's own doing.
+    removing: std::collections::HashSet<String>,
     /// A reload is waiting for the debounce window to end; further events join it.
     reload_scheduled: bool,
     /// Number of the latest list reload; answers from older ones are discarded.
@@ -264,6 +267,7 @@ impl App {
             panes: initial_panes(),
             pinging: false,
             events_generation: 0,
+            removing: std::collections::HashSet::new(),
             reload_scheduled: false,
             load_seq: 0,
             events_started: None,
@@ -477,6 +481,13 @@ impl App {
                 }
                 None => Task::none(),
             },
+            DockStats => match self.containers.selected.clone() {
+                Some(id) => {
+                    let open = self.update(Message::OpenDock(id));
+                    Task::batch([open, self.update(Message::DockTab(DockTab::Stats))])
+                }
+                None => Task::none(),
+            },
             ToggleTimestamps => self.update(Message::Detail(detail::Msg::ToggleTimestamps)),
             CopyLogs => self.update(Message::Detail(detail::Msg::Copy)),
             OpenPalette => {
@@ -554,12 +565,21 @@ impl App {
     }
 
     /// Esc closes one layer, the topmost: the command palette, then the removal dialog, then the
-    /// dock (the log search first, if it has text), then the search.
+    /// dock (the selection in the logs first, then the log search, if it has text), then the
+    /// search.
     fn close_top_layer(&mut self) {
         if self.palette.take().is_some() {
             return;
         }
         if self.containers.confirm_remove.take().is_some() {
+            return;
+        }
+        // Selected text in the logs: Esc only deselects it.
+        if let Some(detail) = &mut self.detail
+            && self.dock.as_ref().is_some_and(|d| d.tab == DockTab::Logs)
+            && detail.has_selection()
+        {
+            detail.clear_selection();
             return;
         }
         // Esc in the log search clears it first; the next one closes the dock. The app does not
@@ -734,6 +754,11 @@ impl App {
                 }
                 Task::none()
             }
+            // The container of the dock is gone and the daemon says so.
+            Msg::Loaded(_, Err(DockerError::NotFound(_))) if self.dock.is_some() => {
+                self.close_gone_dock();
+                Task::none()
+            }
             Msg::Loaded(_, Err(e)) => self.fail(e),
             Msg::Query(query) => {
                 self.containers.query = query;
@@ -784,7 +809,11 @@ impl App {
                 self.containers.pending.remove(&id);
                 match result {
                     Ok(()) => Task::none(),
-                    Err(e) => self.fail(e),
+                    Err(e) => {
+                        // It is still there, so a later removal from outside is news.
+                        self.removing.remove(&id);
+                        self.fail(e)
+                    }
                 }
             }
             Msg::OpenPort(port) => {
@@ -812,10 +841,22 @@ impl App {
         // The stream is alive.
         self.events_backoff = EVENTS_BACKOFF_MIN;
         let mut rescroll = Task::none();
+        // The shown container was removed: nothing left to show. The reload that follows
+        // finds it missing from the list and has nothing more to say.
+        if ev.kind == ResourceKind::Container
+            && ev.action == "destroy"
+            && self.dock.as_ref().is_some_and(|d| d.container_id == ev.id)
+        {
+            self.close_gone_dock();
+        }
+        if ev.kind == ResourceKind::Container && ev.action == "destroy" {
+            self.removing.remove(&ev.id);
+        }
         // The shown container runs again: its streams ended with the old run, so it gets new
         // ones (a new generation), with the logs starting over.
         if ev.kind == ResourceKind::Container
-            && matches!(ev.action.as_str(), "start" | "restart")
+            // `docker restart` says `restart` and then `start`: one new run, one resubscription.
+            && ev.action == "start"
             && let Some(detail) = &mut self.detail
             && detail.id == ev.id
         {
@@ -855,6 +896,21 @@ impl App {
         self.close_dock();
     }
 
+    /// The container in the dock was removed: closes the dock and says so. A stream that ends
+    /// is not this (the container may only have stopped); only `destroy` or a `NotFound` is.
+    /// When the user removed it here, there is nothing to say.
+    fn close_gone_dock(&mut self) {
+        let by_user = self
+            .dock
+            .as_ref()
+            .is_some_and(|d| self.removing.remove(&d.container_id));
+        self.close_dock();
+        if by_user {
+            return;
+        }
+        self.push_toast_of(ToastKind::Warning, t!("dock.gone").into_owned(), None);
+    }
+
     /// Closes the dock and forgets what its tabs kept.
     fn close_dock(&mut self) {
         self.dock = None;
@@ -876,6 +932,9 @@ impl App {
         if !self.containers.pending.insert(id.clone()) {
             return Task::none();
         }
+        if matches!(action, ContainerAction::Remove { .. }) {
+            self.removing.insert(id.clone());
+        }
         let client = self.client.clone();
         Task::perform(run_action(client, id.clone(), action), move |r| {
             Message::Containers(containers::Msg::ActionDone(id.clone(), r))
@@ -893,6 +952,10 @@ impl App {
     /// Shows an error toast, unless one with the same text is already visible. At most
     /// `MAX_TOASTS` stay on screen; the oldest are dropped.
     pub fn push_toast(&mut self, text: String, details: Option<String>) {
+        self.push_toast_of(ToastKind::Error, text, details);
+    }
+
+    fn push_toast_of(&mut self, kind: ToastKind, text: String, details: Option<String>) {
         if self.toasts.iter().any(|t| t.text == text) {
             return;
         }
@@ -900,7 +963,7 @@ impl App {
             self.toasts.remove(0);
         }
         self.toasts.push(Toast {
-            kind: ToastKind::Error,
+            kind,
             text,
             details,
             expanded: false,
@@ -954,13 +1017,11 @@ impl App {
         let Some(open) = &self.dock else {
             return self.screen_content();
         };
-        let colors = palette(&self.theme());
         let dock_view = || {
             dock::view(
                 open,
-                self.container_name(&open.container_id),
+                self.container_info(&open.container_id),
                 self.detail.as_ref(),
-                colors,
             )
         };
         if open.maximized {
@@ -978,13 +1039,9 @@ impl App {
         .into()
     }
 
-    /// Name of a container, if it is in the list.
-    fn container_name(&self, id: &str) -> Option<&str> {
-        self.containers
-            .items
-            .iter()
-            .find(|c| c.id == id)
-            .map(|c| c.name.as_str())
+    /// A container of the list, by id.
+    fn container_info(&self, id: &str) -> Option<&ContainerInfo> {
+        self.containers.items.iter().find(|c| c.id == id)
     }
 
     fn screen_content(&self) -> Element<'_, Message> {
@@ -1022,7 +1079,10 @@ impl App {
         let logs = self
             .logs_source()
             .map_or_else(Subscription::none, detail::logs::subscription);
-        Subscription::batch([system_theme, conn, keys, logs])
+        let stats = self
+            .stats_source()
+            .map_or_else(Subscription::none, detail::stats::subscription);
+        Subscription::batch([system_theme, conn, keys, logs, stats])
     }
 
     /// The log stream wanted right now: only with Docker reachable, the dock open and its
@@ -1032,6 +1092,23 @@ impl App {
         let detail = self.detail.as_ref()?;
         let listed = self.containers.items.iter().any(|c| c.id == detail.id);
         (self.conn == Connection::Ok && listed).then(|| detail::logs::LogsSource {
+            client: self.client.clone(),
+            id: detail.id.clone(),
+            generation: detail.generation,
+        })
+    }
+
+    /// The stats stream wanted right now: like the logs, but only while the container runs
+    /// (a stopped one has no consumption). It runs whichever tab is on screen on purpose: the
+    /// history keeps filling, so the user finds the last 60 s already there when opening
+    /// Stats. When the container runs again the list says so and the generation is new,
+    /// which starts a new stream.
+    fn stats_source(&self) -> Option<detail::stats::StatsSource> {
+        let detail = self.detail.as_ref()?;
+        let running = self
+            .container_info(&detail.id)
+            .is_some_and(|c| c.state.is_running());
+        (self.conn == Connection::Ok && running).then(|| detail::stats::StatsSource {
             client: self.client.clone(),
             id: detail.id.clone(),
             generation: detail.generation,
@@ -3453,6 +3530,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restart_events_resubscribe_once() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        // `docker restart` makes the daemon say `restart` and `start`.
+        let _ = app.update(Message::Docker(container_event("restart")));
+        let _ = app.update(Message::Docker(container_event("start")));
+        assert_eq!(app.detail.as_ref().unwrap().generation, 1);
+    }
+
+    #[tokio::test]
+    async fn logs_resume_after_leaving_a_selection_on_another_tab() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        let _ = app.update(batch_msg("web-id", 0, &["a"]));
+        let _ = app.update(Message::Detail(detail::Msg::Editor(
+            iced::widget::text_editor::Action::SelectAll,
+        )));
+        let _ = app.update(Message::DockTab(DockTab::Stats));
+        let _ = app.update(Message::DockTab(DockTab::Logs));
+        let _ = app.update(batch_msg("web-id", 0, &["b"]));
+        let d = app.detail.as_ref().unwrap();
+        assert_eq!(d.editor_text(), "a\nb");
+        assert!(d.follow);
+    }
+
+    #[tokio::test]
     async fn events_of_other_containers_or_kinds_keep_the_logs() {
         let fake = Arc::new(FakeClient::with_sample_data());
         let mut app = loaded_app(&fake).await;
@@ -3535,6 +3640,37 @@ mod tests {
         assert!(app.dock.is_none(), "the next one closes the dock");
         let _ = app.run_action(ActionId::Escape);
         assert_eq!(app.containers.query, "");
+    }
+
+    #[tokio::test]
+    async fn escape_clears_log_selection_first() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        let _ = app.update(batch_msg("web-id", 0, &["error here", "and there"]));
+        let _ = app.update(Message::Detail(detail::Msg::Query("error".into())));
+        let _ = app.update(Message::Detail(detail::Msg::Editor(
+            iced::widget::text_editor::Action::SelectAll,
+        )));
+        assert!(app.detail.as_ref().unwrap().has_selection());
+
+        let _ = app.run_action(ActionId::Escape);
+        assert!(
+            app.dock.is_some(),
+            "the first Esc only clears the selection"
+        );
+        assert!(!app.detail.as_ref().unwrap().has_selection());
+        assert_eq!(
+            app.detail.as_ref().unwrap().query,
+            "error",
+            "the search text is still there"
+        );
+
+        let _ = app.run_action(ActionId::Escape);
+        assert!(app.detail.as_ref().unwrap().query.is_empty());
+        assert!(app.dock.is_some());
+        let _ = app.run_action(ActionId::Escape);
+        assert!(app.dock.is_none());
     }
 
     #[tokio::test]
@@ -3938,6 +4074,44 @@ mod tests {
         settle(&mut app, Message::ReloadContainers).await;
         assert_eq!(app.toasts.len(), 1);
         let _ = app.view();
+    }
+
+    #[tokio::test]
+    async fn removing_the_container_here_closes_the_dock_without_the_gone_toast() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        app.containers.confirm_remove = Some("web-id".into());
+        let _ = app.update(Message::Containers(containers::Msg::ConfirmRemove {
+            force: true,
+        }));
+        // The action can finish before the event that says it is gone.
+        let _ = app.update(Message::Containers(containers::Msg::ActionDone(
+            "web-id".into(),
+            Ok(()),
+        )));
+        let _ = app.update(Message::Docker(container_event("destroy")));
+        assert!(app.dock.is_none() && app.detail.is_none());
+        assert!(app.toasts.is_empty(), "the user knows: {:?}", app.toasts);
+    }
+
+    #[tokio::test]
+    async fn a_failed_removal_does_not_hide_a_later_external_one() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        app.containers.confirm_remove = Some("web-id".into());
+        let _ = app.update(Message::Containers(containers::Msg::ConfirmRemove {
+            force: true,
+        }));
+        let _ = app.update(Message::Containers(containers::Msg::ActionDone(
+            "web-id".into(),
+            Err(DockerError::Conflict("busy".into())),
+        )));
+        app.toasts.clear();
+        let _ = app.update(Message::Docker(container_event("destroy")));
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(app.toasts[0].text, t!("dock.gone"));
     }
 
     #[tokio::test]

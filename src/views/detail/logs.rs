@@ -1,10 +1,10 @@
 //! The Logs tab: the live stream, the bar with search and options, and the virtualized list.
 //!
 //! The list is a `scrollable` anchored to the bottom: its offset is the distance to the end of
-//! the logs, so a fresh list starts at the end and a growing one stays there (follow), while a
-//! list the user scrolled up keeps what is on screen when lines are appended. Every line has
-//! the same height, so only the lines in view (plus a few) are built and two spacers stand in
-//! for the rest.
+//! the logs, so a fresh list starts at the end and a growing one stays there (follow). Every
+//! line has the same height, so only the lines in view (plus a few) are built, as the text of a
+//! read-only `text_editor` (so they can be selected and copied), and two spacers stand in for
+//! the rest. The colors come from `log_highlight`.
 
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
@@ -12,24 +12,23 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::{Stream, StreamExt};
-use iced::widget::text::{Rich, Wrapping};
+use iced::widget::text::{LineHeight, Wrapping};
 use iced::widget::{
-    Column, Id, center, column, container, row, rule, scrollable, sensor, space, span, text,
+    Id, center, column, container, row, rule, scrollable, sensor, space, stack, text, text_editor,
 };
-use iced::{Alignment, Color, Element, Length, Padding, Subscription};
+use iced::{Alignment, Element, Length, Padding, Pixels, Subscription};
 use rust_i18n::t;
 
+use super::log_highlight::{LogHighlighter, LogHlSettings, log_format};
 use super::{DetailState, Msg};
 use crate::app::Message;
 use crate::docker::DockerClient;
-use crate::model::{LogLine, LogStream};
+use crate::model::LogLine;
 use crate::ui::components::{chip, icon_button, search_field};
 use crate::ui::fonts::MONO;
 use crate::ui::icons::Icon;
 use crate::ui::style;
-use crate::ui::tokens::{
-    ALPHA_SOFT, BORDER_WIDTH, LOG_LINE_HEIGHT, Palette, SPACE_2, SPACE_3, SPACE_4, TEXT_SM,
-};
+use crate::ui::tokens::{BORDER_WIDTH, LOG_LINE_HEIGHT, SPACE_2, SPACE_3, SPACE_4, TEXT_SM};
 
 /// Widget id of the search field of the logs, so `FocusLogSearch` can focus it.
 pub const SEARCH_ID: &str = "logs-search";
@@ -64,13 +63,28 @@ fn effective_height(viewport_h: f32) -> f32 {
 /// The lines to build: those in view, `from_bottom` pixels above the end of `count` lines in a
 /// list `viewport_h` tall, plus the overscan.
 pub fn visible_range(count: usize, viewport_h: f32, from_bottom: f32) -> Range<usize> {
+    visible_window(count, viewport_h, from_bottom, OVERSCAN)
+}
+
+/// Like [`visible_range`] with `overscan` lines above and below instead of the usual few.
+pub fn visible_window(
+    count: usize,
+    viewport_h: f32,
+    from_bottom: f32,
+    overscan: usize,
+) -> Range<usize> {
     let viewport_h = effective_height(viewport_h);
     let content = count as f32 * LOG_LINE_HEIGHT;
     let max = (content - viewport_h).max(0.0);
     let top = max - from_bottom.clamp(0.0, max);
     let first = (top / LOG_LINE_HEIGHT).floor() as usize;
     let last = ((top + viewport_h) / LOG_LINE_HEIGHT).ceil() as usize;
-    first.saturating_sub(OVERSCAN)..(last + OVERSCAN).min(count)
+    first.saturating_sub(overscan)..(last + overscan).min(count)
+}
+
+/// The largest `from_bottom` for `count` lines: the top of the logs.
+pub fn max_from_bottom(count: usize, viewport_h: f32) -> f32 {
+    (count as f32 * LOG_LINE_HEIGHT - effective_height(viewport_h)).max(0.0)
 }
 
 /// The `from_bottom` offset that puts line `line` in the middle of the list (or as close as
@@ -236,75 +250,41 @@ fn bar<'a>(d: &'a DetailState) -> Element<'a, Message> {
     .into()
 }
 
-/// One log line. `stderr` is drawn in `warning`, the query occurrences in `accent`, the match
-/// the user is on with a selected-row background.
-fn line_view<'a>(
-    line: &'a LogLine,
-    show_timestamp: bool,
-    query: &str,
-    current: bool,
-    p: &Palette,
-) -> Element<'a, Message> {
-    let base = match line.stream {
-        LogStream::Stdout => p.text,
-        LogStream::Stderr => p.warning,
-    };
-    let mut spans = Vec::new();
-    if let (true, Some(ts)) = (show_timestamp, &line.timestamp) {
-        spans.push(span(format!("{ts} ")).color(p.faint).font(MONO));
-    }
-    let chars: Vec<char> = line.text.chars().collect();
-    let piece = |range: Range<usize>| -> String { chars[range].iter().collect() };
-    let mut at = 0;
-    for hit in highlight_ranges(&line.text, query) {
-        if hit.start > at {
-            spans.push(span(piece(at..hit.start)).color(base).font(MONO));
-        }
-        at = hit.end;
-        spans.push(
-            span(piece(hit))
-                .color(p.accent)
-                .font(MONO)
-                .background(Color {
-                    a: ALPHA_SOFT,
-                    ..p.accent
-                }),
-        );
-    }
-    if at < chars.len() {
-        spans.push(span(piece(at..chars.len())).color(base).font(MONO));
-    }
-    let content: Rich<'a, (), Message> = Rich::with_spans(spans)
+/// The visible lines as a read-only editor, so text can be selected and copied like in a
+/// terminal, with a spacer above and below as tall as the lines left out. The editor takes
+/// the height of its text and leaves the wheel to the scrollable around it. The match the user
+/// is on gets a selected-row band behind the (transparent) editor.
+fn lines<'a>(d: &'a DetailState) -> Element<'a, Message> {
+    let w = &d.window;
+    let settings = LogHlSettings::new(w.version, w.lines.clone());
+    let editor = text_editor(&d.editor)
+        .font(MONO)
         .size(TEXT_SM)
-        .line_height(LOG_LINE_HEIGHT / TEXT_SM)
-        .height(LOG_LINE_HEIGHT)
-        .wrapping(Wrapping::None);
-    container(content)
+        .line_height(LineHeight::Absolute(Pixels(LOG_LINE_HEIGHT)))
         .padding(Padding::from([0.0, SPACE_3]))
+        .wrapping(Wrapping::None)
+        .height(Length::Shrink)
+        .style(style::text_editor_log)
+        .highlight_with::<LogHighlighter>(settings, log_format)
+        .on_action(|action| msg(Msg::Editor(action)));
+    let body: Element<'a, Message> = match w.current {
+        Some(i) => stack![
+            column![
+                space().height(i as f32 * LOG_LINE_HEIGHT),
+                container(space())
+                    .width(Length::Fill)
+                    .height(LOG_LINE_HEIGHT)
+                    .style(style::container::row(true, false)),
+            ],
+            editor,
+        ]
         .width(Length::Fill)
-        .height(LOG_LINE_HEIGHT)
-        .style(style::container::row(current, false))
-        .into()
-}
-
-/// The visible lines with a spacer above and below, as tall as the lines left out.
-fn lines<'a>(d: &'a DetailState, p: &Palette) -> Element<'a, Message> {
-    let count = d.logs.len();
-    let from_bottom = if d.follow { 0.0 } else { d.from_bottom };
-    let range = visible_range(count, d.viewport_h, from_bottom);
-    let current = d.matches.get(d.cursor).copied();
-    let mut rows = Column::new();
-    rows = rows.push(space().height(range.start as f32 * LOG_LINE_HEIGHT));
-    for (i, l) in d
-        .logs
-        .iter()
-        .enumerate()
-        .skip(range.start)
-        .take(range.len())
-    {
-        rows = rows.push(line_view(l, d.timestamps, &d.query, current == Some(i), p));
-    }
-    rows = rows.push(space().height((count - range.end) as f32 * LOG_LINE_HEIGHT));
+        .into(),
+        None => editor.into(),
+    };
+    let top = w.range.start as f32 * LOG_LINE_HEIGHT;
+    let bottom = w.count.saturating_sub(w.range.end) as f32 * LOG_LINE_HEIGHT;
+    let rows = column![space().height(top), body, space().height(bottom)];
     // The sensor reports the height of the area the lines scroll in.
     sensor(
         scrollable(rows)
@@ -326,13 +306,13 @@ fn lines<'a>(d: &'a DetailState, p: &Palette) -> Element<'a, Message> {
 }
 
 /// The Logs tab of the dock.
-pub fn view<'a>(d: &'a DetailState, p: &Palette) -> Element<'a, Message> {
+pub fn view<'a>(d: &'a DetailState) -> Element<'a, Message> {
     let body: Element<'a, Message> = if d.logs.is_empty() {
         center(text(t!("logs.empty").into_owned()).style(style::text::muted))
             .padding(SPACE_4)
             .into()
     } else {
-        lines(d, p)
+        lines(d)
     };
     column![bar(d), body]
         .width(Length::Fill)
@@ -351,7 +331,7 @@ mod tests {
     use crate::app::Message;
     use crate::docker::{DockerClient, FakeClient};
     use crate::model::{LogLine, LogStream};
-    use crate::ui::tokens::{DARK, LIGHT, LOG_LINE_HEIGHT};
+    use crate::ui::tokens::LOG_LINE_HEIGHT;
 
     fn line(text: &str) -> LogLine {
         LogLine {
@@ -513,30 +493,65 @@ mod tests {
     #[test]
     fn view_builds_for_every_state() {
         use crate::views::detail::DetailState;
-        for p in [&DARK, &LIGHT] {
-            let mut d = DetailState::new("web-id".into());
-            let _: iced::Element<'_, Message> = view(&d, p);
-            for i in 0..50 {
-                d.logs.push(LogLine {
-                    stream: if i % 3 == 0 {
-                        LogStream::Stderr
-                    } else {
-                        LogStream::Stdout
-                    },
-                    timestamp: Some("2026-10-29T12:00:00Z".into()),
-                    text: format!("line {i} error"),
-                });
-            }
-            let _: iced::Element<'_, Message> = view(&d, p);
-            d.timestamps = true;
-            d.set_query("error".into());
-            let _: iced::Element<'_, Message> = view(&d, p);
-            d.follow = false;
-            d.from_bottom = 100.0;
-            d.viewport_h = 200.0;
-            d.set_query("nothing".into());
-            let _: iced::Element<'_, Message> = view(&d, p);
+        let mut d = DetailState::new("web-id".into());
+        let _: iced::Element<'_, Message> = view(&d);
+        for i in 0..50 {
+            d.logs.push(LogLine {
+                stream: if i % 3 == 0 {
+                    LogStream::Stderr
+                } else {
+                    LogStream::Stdout
+                },
+                timestamp: Some("2026-10-29T12:00:00Z".into()),
+                text: format!("line {i} error"),
+            });
         }
+        d.rebuild_editor();
+        let _: iced::Element<'_, Message> = view(&d);
+        d.timestamps = true;
+        d.set_query("error".into());
+        assert!(d.window.current.is_some(), "the band behind the match");
+        let _: iced::Element<'_, Message> = view(&d);
+        d.follow = false;
+        d.from_bottom = 100.0;
+        d.viewport_h = 200.0;
+        d.set_query("nothing".into());
+        assert!(d.window.current.is_none());
+        let _: iced::Element<'_, Message> = view(&d);
+        // A selection holds the window while the buffer grows past it.
+        d.window.frozen = true;
+        d.logs.push(line("one more"));
+        let _: iced::Element<'_, Message> = view(&d);
+    }
+
+    #[test]
+    fn the_editor_has_one_line_per_log_line() {
+        use crate::views::detail::DetailState;
+        let mut d = DetailState::new("web-id".into());
+        for text in ["one", "", "tw\ro\u{2028}x", "three"] {
+            d.logs.push(line(text));
+        }
+        d.rebuild_editor();
+        assert_eq!(d.editor.line_count(), 4);
+        assert_eq!(d.window.range, 0..4);
+        assert_eq!(d.window.lines.len(), 4);
+    }
+
+    #[test]
+    fn the_window_is_only_the_visible_lines() {
+        use crate::views::detail::DetailState;
+        let mut d = DetailState::new("web-id".into());
+        for i in 0..1000 {
+            d.logs.push(line(&format!("line {i}")));
+        }
+        d.viewport_h = 10.0 * LOG_LINE_HEIGHT;
+        d.rebuild_editor();
+        assert_eq!(d.window.range, visible_range(1000, d.viewport_h, 0.0));
+        assert_eq!(d.editor.line_count(), d.window.range.len());
+        assert!(d.editor.line_count() < 30);
+        assert_eq!(d.window.count, 1000);
+        let last = d.editor.line(d.editor.line_count() - 1).unwrap();
+        assert_eq!(last.text, "line 999");
     }
 
     #[test]

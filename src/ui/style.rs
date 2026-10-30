@@ -1,6 +1,6 @@
 //! Style functions for iced widgets, all derived from the active [`Palette`].
 
-use iced::widget::{pane_grid, rule, scrollable, text_input};
+use iced::widget::{pane_grid, rule, scrollable, text_editor, text_input};
 use iced::{Background, Border, Color, Shadow, Theme, Vector, border};
 
 use crate::ui::theme::palette;
@@ -174,6 +174,15 @@ pub mod container {
         }
     }
 
+    /// A card on the background: the surface color inside a 1px border (the Stats cards).
+    pub fn card(t: &Theme) -> Style {
+        let p = palette(t);
+        Style {
+            border: rounded_border(p.border, BORDER_WIDTH),
+            ..surface(t)
+        }
+    }
+
     /// Floating things (modal, palette, toast, tooltip): border, large radius and shadow.
     pub fn elevated(t: &Theme) -> Style {
         let p = palette(t);
@@ -280,6 +289,19 @@ pub fn text_input_field(t: &Theme, s: text_input::Status) -> text_input::Style {
         } else {
             p.text
         },
+        selection: p.accent.scale_alpha(ALPHA_SELECTION),
+    }
+}
+
+/// The read-only editor of the logs: no frame, and no background of its own so the band behind
+/// the current search match shows through; the selection is the accent at low alpha.
+pub fn text_editor_log(t: &Theme, _s: text_editor::Status) -> text_editor::Style {
+    let p = palette(t);
+    text_editor::Style {
+        background: Background::Color(Color::TRANSPARENT),
+        border: Border::default(),
+        placeholder: p.faint,
+        value: p.text,
         selection: p.accent.scale_alpha(ALPHA_SELECTION),
     }
 }
