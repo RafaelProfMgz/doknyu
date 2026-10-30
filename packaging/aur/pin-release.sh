@@ -44,7 +44,7 @@ docker run --rm --name "doknyu-aur-pin-$$" -e "VER=$VER" -v "$DIR:/aur" archlinu
     # Confere o .deb contra o SHA256SUMS que a própria release publica.
     cd /home/builder/work/doknyu-bin
     deb_sum="$(sed -n "s/^sha256sums=(\x27\(.*\)\x27)/\1/p" PKGBUILD)"
-    curl -fsSL "https://github.com/RafaelProfMgz/doknyu/releases/download/v$VER/SHA256SUMS" \
+    curl --proto "=https" --tlsv1.2 -fsSL "https://github.com/RafaelProfMgz/doknyu/releases/download/v$VER/SHA256SUMS" \
         | grep -q "^$deb_sum  doknyu_$VER-1_amd64.deb\$" \
         || { echo "o sha256 do .deb nao bate com o SHA256SUMS da release" >&2; exit 1; }
 

@@ -26,7 +26,7 @@ esac
 
 mkdir -p "$TOOLS"
 if [ ! -f "$GEN" ]; then
-    curl -fsSL "$GEN_URL" -o "$GEN.part"
+    curl --proto "=https" --tlsv1.2 -fsSL "$GEN_URL" -o "$GEN.part"
     mv "$GEN.part" "$GEN"
 fi
 echo "$GEN_SHA256  $GEN" | sha256sum --check --quiet - \

@@ -45,7 +45,7 @@ fetch_tool() {
     if [[ ! -f "$file" ]]; then
         mkdir -p "$TOOLS_DIR"
         echo "Downloading $name from $url" >&2
-        curl --fail --location --silent --show-error --output "$file.part" "$url"
+        curl --proto "=https" --tlsv1.2 --fail --location --silent --show-error --output "$file.part" "$url"
         mv "$file.part" "$file"
     fi
     # Checked on every run, so a file left in $TOOLS_DIR cannot be swapped silently.
