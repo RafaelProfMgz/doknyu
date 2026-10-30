@@ -1,5 +1,5 @@
 //! The bottom dock: header with the container name, tabs and window buttons, and the tab body.
-//! The Logs tab is here; Stats and Terminal are filled in by phases 3.3 and 5.
+//! The Logs and Stats tabs are here; Terminal is filled in by phase 5.
 
 use iced::widget::{column, container, row, text};
 use iced::{Alignment, Element, Length};
@@ -7,12 +7,13 @@ use rust_i18n::t;
 
 use crate::actions::{self, ActionId};
 use crate::app::{Dock, DockTab, Message};
+use crate::model::ContainerInfo;
 use crate::ui::components::{chip, icon_button, panel_header};
 use crate::ui::fonts::SANS_MEDIUM;
 use crate::ui::icons::Icon;
 use crate::ui::style;
 use crate::ui::tokens::{Palette, SPACE_2, SPACE_4, TEXT};
-use crate::views::detail::{DetailState, logs};
+use crate::views::detail::{DetailState, logs, stats};
 
 const TABS: [DockTab; 3] = [DockTab::Logs, DockTab::Stats, DockTab::Terminal];
 
@@ -25,16 +26,16 @@ fn tab_label(tab: DockTab) -> String {
     .into_owned()
 }
 
-/// The dock for `dock`; `name` is the container's name, if it is still in the list, and
-/// `detail` what the tabs keep for it.
+/// The dock for `dock`; `info` is the container, if it is still in the list, and `detail`
+/// what the tabs keep for it.
 pub fn view<'a>(
     dock: &'a Dock,
-    name: Option<&'a str>,
+    info: Option<&'a ContainerInfo>,
     detail: Option<&'a DetailState>,
     palette: &Palette,
 ) -> Element<'a, Message> {
     let mut title = row![
-        text(name.unwrap_or(&dock.container_id))
+        text(info.map_or(dock.container_id.as_str(), |c| c.name.as_str()))
             .size(TEXT)
             .font(SANS_MEDIUM),
     ]
@@ -67,6 +68,14 @@ pub fn view<'a>(
         (DockTab::Logs, Some(detail)) => container(logs::view(detail, palette))
             .style(style::container::bg)
             .into(),
+        (DockTab::Stats, Some(detail)) => {
+            let running = info.is_some_and(|c| c.state.is_running());
+            container(stats::view(detail, running))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(style::container::bg)
+                .into()
+        }
         _ => container(text(t!("dock.empty_tab").into_owned()).style(style::text::muted))
             .center(Length::Fill)
             .padding(SPACE_4)
@@ -79,6 +88,7 @@ pub fn view<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::ContainerState;
     use crate::ui::tokens::{DARK, LIGHT};
 
     #[test]
@@ -91,7 +101,17 @@ mod tests {
                     maximized,
                 };
                 let detail = DetailState::new("web-id".into());
-                let _: Element<'_, Message> = view(&dock, Some("web"), Some(&detail), &DARK);
+                for state in [ContainerState::Running, ContainerState::Exited { code: 0 }] {
+                    let info = ContainerInfo {
+                        id: "web-id".into(),
+                        name: "web".into(),
+                        image: "nginx".into(),
+                        state,
+                        status_text: String::new(),
+                        ports: vec![],
+                    };
+                    let _: Element<'_, Message> = view(&dock, Some(&info), Some(&detail), &DARK);
+                }
                 let _: Element<'_, Message> = view(&dock, None, None, &LIGHT);
             }
         }

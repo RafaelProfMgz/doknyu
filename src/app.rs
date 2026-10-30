@@ -477,6 +477,13 @@ impl App {
                 }
                 None => Task::none(),
             },
+            DockStats => match self.containers.selected.clone() {
+                Some(id) => {
+                    let open = self.update(Message::OpenDock(id));
+                    Task::batch([open, self.update(Message::DockTab(DockTab::Stats))])
+                }
+                None => Task::none(),
+            },
             ToggleTimestamps => self.update(Message::Detail(detail::Msg::ToggleTimestamps)),
             CopyLogs => self.update(Message::Detail(detail::Msg::Copy)),
             OpenPalette => {
@@ -734,6 +741,11 @@ impl App {
                 }
                 Task::none()
             }
+            // The container of the dock is gone and the daemon says so.
+            Msg::Loaded(_, Err(DockerError::NotFound(_))) if self.dock.is_some() => {
+                self.close_gone_dock();
+                Task::none()
+            }
             Msg::Loaded(_, Err(e)) => self.fail(e),
             Msg::Query(query) => {
                 self.containers.query = query;
@@ -812,6 +824,14 @@ impl App {
         // The stream is alive.
         self.events_backoff = EVENTS_BACKOFF_MIN;
         let mut rescroll = Task::none();
+        // The shown container was removed: nothing left to show. The reload that follows
+        // finds it missing from the list and has nothing more to say.
+        if ev.kind == ResourceKind::Container
+            && ev.action == "destroy"
+            && self.dock.as_ref().is_some_and(|d| d.container_id == ev.id)
+        {
+            self.close_gone_dock();
+        }
         // The shown container runs again: its streams ended with the old run, so it gets new
         // ones (a new generation), with the logs starting over.
         if ev.kind == ResourceKind::Container
@@ -855,6 +875,13 @@ impl App {
         self.close_dock();
     }
 
+    /// The container in the dock was removed: closes the dock and says so. A stream that ends
+    /// is not this (the container may only have stopped); only `destroy` or a `NotFound` is.
+    fn close_gone_dock(&mut self) {
+        self.close_dock();
+        self.push_toast_of(ToastKind::Warning, t!("dock.gone").into_owned(), None);
+    }
+
     /// Closes the dock and forgets what its tabs kept.
     fn close_dock(&mut self) {
         self.dock = None;
@@ -893,6 +920,10 @@ impl App {
     /// Shows an error toast, unless one with the same text is already visible. At most
     /// `MAX_TOASTS` stay on screen; the oldest are dropped.
     pub fn push_toast(&mut self, text: String, details: Option<String>) {
+        self.push_toast_of(ToastKind::Error, text, details);
+    }
+
+    fn push_toast_of(&mut self, kind: ToastKind, text: String, details: Option<String>) {
         if self.toasts.iter().any(|t| t.text == text) {
             return;
         }
@@ -900,7 +931,7 @@ impl App {
             self.toasts.remove(0);
         }
         self.toasts.push(Toast {
-            kind: ToastKind::Error,
+            kind,
             text,
             details,
             expanded: false,
@@ -958,7 +989,7 @@ impl App {
         let dock_view = || {
             dock::view(
                 open,
-                self.container_name(&open.container_id),
+                self.container_info(&open.container_id),
                 self.detail.as_ref(),
                 colors,
             )
@@ -978,13 +1009,9 @@ impl App {
         .into()
     }
 
-    /// Name of a container, if it is in the list.
-    fn container_name(&self, id: &str) -> Option<&str> {
-        self.containers
-            .items
-            .iter()
-            .find(|c| c.id == id)
-            .map(|c| c.name.as_str())
+    /// A container of the list, by id.
+    fn container_info(&self, id: &str) -> Option<&ContainerInfo> {
+        self.containers.items.iter().find(|c| c.id == id)
     }
 
     fn screen_content(&self) -> Element<'_, Message> {
@@ -1022,7 +1049,10 @@ impl App {
         let logs = self
             .logs_source()
             .map_or_else(Subscription::none, detail::logs::subscription);
-        Subscription::batch([system_theme, conn, keys, logs])
+        let stats = self
+            .stats_source()
+            .map_or_else(Subscription::none, detail::stats::subscription);
+        Subscription::batch([system_theme, conn, keys, logs, stats])
     }
 
     /// The log stream wanted right now: only with Docker reachable, the dock open and its
@@ -1032,6 +1062,21 @@ impl App {
         let detail = self.detail.as_ref()?;
         let listed = self.containers.items.iter().any(|c| c.id == detail.id);
         (self.conn == Connection::Ok && listed).then(|| detail::logs::LogsSource {
+            client: self.client.clone(),
+            id: detail.id.clone(),
+            generation: detail.generation,
+        })
+    }
+
+    /// The stats stream wanted right now: like the logs, but only while the container runs
+    /// (a stopped one has no consumption), whichever tab is on screen. When the container
+    /// runs again the list says so and the generation is new, which starts a new stream.
+    fn stats_source(&self) -> Option<detail::stats::StatsSource> {
+        let detail = self.detail.as_ref()?;
+        let running = self
+            .container_info(&detail.id)
+            .is_some_and(|c| c.state.is_running());
+        (self.conn == Connection::Ok && running).then(|| detail::stats::StatsSource {
             client: self.client.clone(),
             id: detail.id.clone(),
             generation: detail.generation,

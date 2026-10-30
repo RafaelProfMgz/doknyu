@@ -174,6 +174,15 @@ pub mod container {
         }
     }
 
+    /// A card on the background: the surface color inside a 1px border (the Stats cards).
+    pub fn card(t: &Theme) -> Style {
+        let p = palette(t);
+        Style {
+            border: rounded_border(p.border, BORDER_WIDTH),
+            ..surface(t)
+        }
+    }
+
     /// Floating things (modal, palette, toast, tooltip): border, large radius and shadow.
     pub fn elevated(t: &Theme) -> Style {
         let p = palette(t);

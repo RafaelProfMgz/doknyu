@@ -34,6 +34,7 @@ fn with_ctrl(key: &Key, mods: Modifiers) -> Option<ActionId> {
     match (c.to_lowercase().as_str(), mods.shift()) {
         ("p", true) => Some(ActionId::OpenPalette),
         ("l", true) => Some(ActionId::DockLogs),
+        ("s", true) => Some(ActionId::DockStats),
         ("1", false) => Some(ActionId::GoContainers),
         ("2", false) => Some(ActionId::GoVolumes),
         ("3", false) => Some(ActionId::GoNetworks),

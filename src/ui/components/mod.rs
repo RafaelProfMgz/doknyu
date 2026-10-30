@@ -58,6 +58,7 @@ mod tests {
             }
             let _ = style::container::bg(&t);
             let _ = style::container::surface(&t);
+            let _ = style::container::card(&t);
             let _ = style::container::elevated(&t);
             let _ = style::container::scrim(&t);
             for (selected, hovered) in [(false, false), (false, true), (true, false), (true, true)]

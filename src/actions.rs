@@ -18,6 +18,8 @@ pub enum ActionId {
     FocusLogSearch,
     /// Shows the logs of the selected container in the dock.
     DockLogs,
+    /// Shows the stats of the selected container in the dock.
+    DockStats,
     ToggleTimestamps,
     CopyLogs,
     OpenPalette,
@@ -76,7 +78,7 @@ const fn def_of(
 }
 
 /// Every action, in the order the palette lists them when nothing else ranks them.
-static ALL: [ActionDef; 22] = [
+static ALL: [ActionDef; 23] = [
     def_of(
         ActionId::GoContainers,
         "actions.go_containers",
@@ -112,6 +114,16 @@ static ALL: [ActionDef; 22] = [
             ctrl: true,
             shift: true,
             key: "L",
+        }),
+        true,
+    ),
+    def_of(
+        ActionId::DockStats,
+        "actions.dock_stats",
+        Some(Shortcut {
+            ctrl: true,
+            shift: true,
+            key: "S",
         }),
         true,
     ),
@@ -201,7 +213,9 @@ pub fn available(app: &App, id: ActionId) -> bool {
         | ThemeDark | ThemeLight | Escape => true,
         ToggleDock => connected,
         // Works from the maximized dock too: it does not need the list, only the selection.
-        DockLogs => connected && app.containers.confirm_remove.is_none() && has_selection(),
+        DockLogs | DockStats => {
+            connected && app.containers.confirm_remove.is_none() && has_selection()
+        }
         ToggleTimestamps | FocusLogSearch => logs_open,
         CopyLogs => logs_open && app.detail.as_ref().is_some_and(|d| !d.logs.is_empty()),
         Retry => matches!(app.conn, Connection::Failed(_)),

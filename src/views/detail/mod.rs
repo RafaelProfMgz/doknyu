@@ -1,10 +1,11 @@
-//! State of the container shown in the dock: the live logs today, the stats in phase 3.3.
+//! State of the container shown in the dock: the live logs and the stats history.
 //!
 //! The dock only says which container and which tab; this is what the tabs keep while it is
 //! open. `App` creates it when the dock opens (or switches container) and drops it when it
 //! closes, so nothing outlives the container on screen.
 
 pub mod logs;
+pub mod stats;
 
 use iced::Task;
 use iced::widget::Id;
@@ -12,7 +13,8 @@ use iced::widget::operation::{AbsoluteOffset, scroll_to};
 
 use crate::app::Message;
 use crate::logbuf::LogBuffer;
-use crate::model::LogLine;
+use crate::model::{LogLine, RawStats};
+use crate::stats::{StatsHistory, sample_from_raw};
 
 #[derive(Debug, Clone)]
 pub enum Msg {
@@ -43,13 +45,25 @@ pub enum Msg {
     PrevMatch,
     /// Copies the logs to the clipboard.
     Copy,
+    /// A reading of the stats stream of `(id, generation)`; dropped if that is not the one
+    /// being followed.
+    StatsSample {
+        id: String,
+        generation: u64,
+        raw: RawStats,
+    },
+    /// The stats stream of `(id, generation)` ended (the container stopped, or it is gone).
+    StatsEnded {
+        id: String,
+        generation: u64,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub struct DetailState {
     pub id: String,
-    /// Bumped each time the container runs again; part of the identity of the log
-    /// subscription, so a new run gets a new stream.
+    /// Bumped each time the container runs again; part of the identity of the log and stats
+    /// subscriptions, so a new run gets new streams.
     pub generation: u64,
     pub logs: LogBuffer,
     /// The stream of the current generation ended.
@@ -66,6 +80,12 @@ pub struct DetailState {
     pub matches: Vec<usize>,
     /// The match the user is on, an index into `matches`.
     pub cursor: usize,
+    /// The latest stats samples (a window of 60, one per second).
+    pub stats: StatsHistory,
+    /// The stats stream of the current generation ended.
+    pub stats_ended: bool,
+    /// CPUs the daemon reported in the last sample; the CPU chart goes up to 100% of each.
+    pub cpus: u32,
 }
 
 impl DetailState {
@@ -82,6 +102,9 @@ impl DetailState {
             query: String::new(),
             matches: Vec::new(),
             cursor: 0,
+            stats: StatsHistory::new(),
+            stats_ended: false,
+            cpus: 1,
         }
     }
 
@@ -91,6 +114,8 @@ impl DetailState {
         self.generation += 1;
         self.logs = LogBuffer::new();
         self.logs_ended = false;
+        self.stats = StatsHistory::new();
+        self.stats_ended = false;
         self.matches.clear();
         self.cursor = 0;
         self.follow = true;
@@ -163,6 +188,23 @@ impl DetailState {
             Msg::NextMatch => self.step_match(true),
             Msg::PrevMatch => self.step_match(false),
             Msg::Copy => iced::clipboard::write(self.logs.to_text(self.timestamps)),
+            Msg::StatsSample {
+                id,
+                generation,
+                raw,
+            } => {
+                if id == self.id && generation == self.generation {
+                    self.cpus = raw.online_cpus.max(1);
+                    self.stats.push(sample_from_raw(&raw));
+                }
+                Task::none()
+            }
+            Msg::StatsEnded { id, generation } => {
+                if id == self.id && generation == self.generation {
+                    self.stats_ended = true;
+                }
+                Task::none()
+            }
         }
     }
 
