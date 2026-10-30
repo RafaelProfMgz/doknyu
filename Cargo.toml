@@ -25,6 +25,8 @@ rust-i18n = "4"
 sys-locale = "0.3"
 open = "5"
 iced_term = "0.8"
+# Decodifica o PNG do ícone da janela (já presente no Cargo.lock via iced/resvg).
+png = "0.18"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

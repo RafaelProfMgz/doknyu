@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=doknyu
+Comment=Manage your Docker containers
+Comment[pt_BR]=Gerencie seus containers Docker
+Exec=doknyu
+Icon=io.github.rafaelprofmgz.Doknyu
+Terminal=false
+Categories=Development;System;
+Keywords=docker;container;devops;
+StartupWMClass=io.github.rafaelprofmgz.Doknyu

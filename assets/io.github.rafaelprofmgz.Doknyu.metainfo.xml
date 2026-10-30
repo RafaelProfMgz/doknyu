@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.rafaelprofmgz.Doknyu</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <name>doknyu</name>
+  <developer id="io.github.rafaelprofmgz">
+    <name>RafaelProfMgz</name>
+  </developer>
+  <summary>Manage your Docker containers</summary>
+  <summary xml:lang="pt-BR">Gerencie seus containers Docker</summary>
+  <description>
+    <p>doknyu is a fast, keyboard-friendly desktop app to manage Docker containers, logs, stats, volumes and networks, with an embedded terminal for each container.</p>
+    <p xml:lang="pt-BR">doknyu é um app desktop rápido e amigável ao teclado para gerenciar containers, logs, estatísticas, volumes e redes do Docker, com um terminal embutido para cada container.</p>
+  </description>
+  <launchable type="desktop-id">io.github.rafaelprofmgz.Doknyu.desktop</launchable>
+  <url type="homepage">https://github.com/RafaelProfMgz/doknyu</url>
+  <url type="bugtracker">https://github.com/RafaelProfMgz/doknyu/issues</url>
+  <provides>
+    <binary>doknyu</binary>
+  </provides>
+  <content_rating type="oars-1.1"/>
+  <branding>
+    <color type="primary" scheme_preference="light">#74ade8</color>
+    <color type="primary" scheme_preference="dark">#282c33</color>
+  </branding>
+  <requires>
+    <display_length compare="ge">900</display_length>
+  </requires>
+  <recommends>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </recommends>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/RafaelProfMgz/doknyu/main/docs/screenshots/list-dark.png</image>
+      <caption>Container list in the dark theme</caption>
+      <caption xml:lang="pt-BR">Lista de containers no tema escuro</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/RafaelProfMgz/doknyu/main/docs/screenshots/dock.png</image>
+      <caption>Container details in the dock</caption>
+      <caption xml:lang="pt-BR">Detalhes do container no dock</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/RafaelProfMgz/doknyu/main/docs/screenshots/palette-light.png</image>
+      <caption>Command palette in the light theme</caption>
+      <caption xml:lang="pt-BR">Paleta de comandos no tema claro</caption>
+    </screenshot>
+  </screenshots>
+  <releases>
+    <release version="0.1.0" date="2026-10-30"/>
+  </releases>
+</component>
