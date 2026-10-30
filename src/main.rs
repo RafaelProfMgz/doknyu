@@ -56,6 +56,17 @@ fn window_settings() -> iced::window::Settings {
 }
 
 fn main() -> iced::Result {
+    // `doknyu --exec-bridge <container>` is the shell of the terminals: nothing of the app runs.
+    let args: Vec<String> = std::env::args().collect();
+    match doknyu::exec_bridge::bridge_target(&args) {
+        Ok(Some(container)) => std::process::exit(doknyu::exec_bridge::main(&container)),
+        Ok(None) => {}
+        Err(usage) => {
+            eprintln!("{usage}");
+            std::process::exit(2);
+        }
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();

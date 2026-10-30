@@ -1,7 +1,7 @@
 //! The Terminal tab: a shell in the container, drawn by `iced_term`.
 //!
 //! `iced_term` 0.8 can only run a local program in a PTY (see `docs/decisions/0001-terminal.md`),
-//! so the session is `docker exec -it ... sh -c '...'` there. The rules that keep it from hanging
+//! so the session is the exec bridge (`doknyu --exec-bridge`, `crate::exec_bridge`) there. The rules that keep it from hanging
 //! the app, all of them in `App`:
 //!
 //! * the subscription of the terminal lives exactly as long as `TerminalState::session` does,
@@ -23,10 +23,9 @@ use iced_term::settings::{BackendSettings, FontSettings, Settings, ThemeSettings
 use iced_term::{BackendCommand, ColorPalette, Command, TermMode, Terminal, TerminalView};
 use rust_i18n::t;
 
-use crate::actions::ActionId;
 use crate::app::Message;
+use crate::exec_bridge;
 use crate::keymap::TERMINAL_RESERVED;
-use crate::terminal_launcher::exec_args;
 use crate::ui::fonts::MONO;
 use crate::ui::style;
 use crate::ui::tokens::{
@@ -34,13 +33,13 @@ use crate::ui::tokens::{
     TEXT,
 };
 
-/// How `docker exec` starts: the CLI is the program of the PTY, so the terminal inside the
-/// container sees the size of the PTY. `TERM` is set here and in the arguments (the CLI does not
-/// pass its own on), as an app started from a launcher has none.
+/// How the session starts: the PTY runs this executable as the exec bridge, which connects it to
+/// a shell in the container through the Docker API (no `docker` CLI needed). `TERM` is set for
+/// the bridge too, as an app started from a launcher has none.
 pub fn backend_settings(container_id: &str) -> BackendSettings {
     BackendSettings {
-        program: "docker".to_owned(),
-        args: exec_args(container_id),
+        program: exec_bridge::program(),
+        args: exec_bridge::bridge_args(container_id),
         env: [("TERM", "xterm-256color"), ("COLORTERM", "truecolor")]
             .into_iter()
             .map(|(k, v)| (k.to_owned(), v.to_owned()))
@@ -232,17 +231,14 @@ pub enum Content {
     /// The terminal itself.
     Session,
     NotRunning,
-    NoCli,
     Ended,
 }
 
-/// Picks what the tab shows: a live session always wins; without one, no `docker` CLI is the
-/// news, then a stopped container; a running one with no session means the last one ended.
-pub fn content(session: bool, running: bool, docker_cli: bool) -> Content {
+/// Picks what the tab shows: a live session always wins; without one, a stopped container is the
+/// news; a running one with no session means the last one ended.
+pub fn content(session: bool, running: bool) -> Content {
     if session {
         Content::Session
-    } else if !docker_cli {
-        Content::NoCli
     } else if !running {
         Content::NotRunning
     } else {
@@ -274,23 +270,10 @@ fn action<'a>(label: String, on_press: Message) -> Element<'a, Message> {
 }
 
 /// The body of the Terminal tab.
-pub fn view<'a>(state: &'a TerminalState, running: bool, docker_cli: bool) -> Element<'a, Message> {
-    match (
-        content(state.session.is_some(), running, docker_cli),
-        &state.session,
-    ) {
+pub fn view<'a>(state: &'a TerminalState, running: bool) -> Element<'a, Message> {
+    match (content(state.session.is_some(), running), &state.session) {
         (Content::Session, Some(session)) => TerminalView::show(session).map(Message::Terminal),
         (Content::NotRunning, _) => notice(vec![hint("terminal.not_running")]),
-        (Content::NoCli, _) => {
-            let mut lines = vec![hint("terminal.no_cli")];
-            if running {
-                lines.push(action(
-                    t!("dock.open_terminal").into_owned(),
-                    Message::Action(ActionId::OpenExternalTerminal),
-                ));
-            }
-            notice(lines)
-        }
         // `Session` without a session cannot happen; if it ever did, offering a new one is right.
         (Content::Ended, _) | (Content::Session, None) => notice(vec![
             hint("terminal.ended"),
@@ -308,22 +291,11 @@ mod tests {
     use crate::ui::tokens::{DARK, LIGHT, Palette};
 
     #[test]
-    fn backend_settings_runs_docker_exec() {
+    fn backend_settings_runs_the_bridge() {
         let settings = backend_settings("web-id");
-        assert_eq!(settings.program, "docker");
-        assert_eq!(
-            settings.args[..7],
-            [
-                "exec",
-                "-it",
-                "-e",
-                "TERM=xterm-256color",
-                "web-id",
-                "sh",
-                "-c"
-            ]
-        );
-        assert_eq!(settings.args, crate::terminal_launcher::exec_args("web-id"));
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(settings.program, exe.to_string_lossy());
+        assert_eq!(settings.args, ["--exec-bridge", "web-id"]);
         assert_eq!(settings.env["TERM"], "xterm-256color");
         assert_eq!(settings.env["COLORTERM"], "truecolor");
     }
@@ -455,7 +427,7 @@ mod tests {
     fn settings_use_the_mono_font_and_the_container() {
         let s = settings("web-id", &DARK);
         assert_eq!(s.font.font_type, crate::ui::fonts::MONO);
-        assert_eq!(s.backend.args[4], "web-id");
+        assert_eq!(s.backend.args[1], "web-id");
         assert_eq!(s.theme.color_pallete.background, hex(DARK.bg));
     }
 
@@ -533,24 +505,18 @@ mod tests {
 
     #[test]
     fn stopped_container_shows_hint() {
-        assert_eq!(content(false, false, true), Content::NotRunning);
-    }
-
-    #[test]
-    fn docker_cli_missing_shows_hint() {
-        assert_eq!(content(false, true, false), Content::NoCli);
-        assert_eq!(content(false, false, false), Content::NoCli);
+        assert_eq!(content(false, false), Content::NotRunning);
     }
 
     #[test]
     fn running_container_without_session_offers_a_new_one() {
-        assert_eq!(content(false, true, true), Content::Ended);
+        assert_eq!(content(false, true), Content::Ended);
     }
 
     #[test]
     fn a_live_session_is_always_shown() {
-        for (running, docker_cli) in [(true, true), (false, true), (false, false)] {
-            assert_eq!(content(true, running, docker_cli), Content::Session);
+        for running in [true, false] {
+            assert_eq!(content(true, running), Content::Session);
         }
     }
 
@@ -558,7 +524,6 @@ mod tests {
     fn texts_are_translated() {
         for key in [
             "terminal.not_running",
-            "terminal.no_cli",
             "terminal.ended",
             "terminal.new_session",
             "terminal.start_failed",
@@ -571,17 +536,12 @@ mod tests {
 
     #[test]
     fn view_builds_for_every_state_without_a_session() {
-        for (running, docker_cli, ended) in [
-            (false, true, false),
-            (true, false, false),
-            (false, false, false),
-            (true, true, true),
-        ] {
+        for (running, ended) in [(false, false), (true, false), (true, true)] {
             let state = TerminalState {
                 ended,
                 ..TerminalState::default()
             };
-            let _: iced::Element<'_, crate::app::Message> = view(&state, running, docker_cli);
+            let _: iced::Element<'_, crate::app::Message> = view(&state, running);
         }
     }
 }

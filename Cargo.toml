@@ -27,6 +27,8 @@ open = "5"
 iced_term = "0.8"
 # Decodifica o PNG do ícone da janela (dependência direta; nenhuma outra crate do grafo a usa).
 png = "0.18"
+# Raw mode and the window size of the terminal for the exec bridge (already in the graph via iced_term).
+rustix = { version = "1", features = ["termios", "stdio"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

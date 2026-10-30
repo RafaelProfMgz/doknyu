@@ -181,8 +181,9 @@ pub struct App {
     /// by `MousePressed` asking the widget after each click, so a click outside clears it; false
     /// whenever the tab is not on screen or the palette is.
     pub terminal_focused: bool,
-    /// The `docker` CLI is on `PATH` (the embedded terminal runs it); read once at start.
-    pub docker_cli: bool,
+    /// Whether the Terminal tab may open sessions. Always true in the app; tests turn it off so
+    /// that no PTY running the exec bridge is started.
+    pub terminal_enabled: bool,
     /// The command palette, while it is open.
     pub palette: Option<PaletteState>,
     /// Scroll offset of the palette results, to keep the cursor in view.
@@ -340,7 +341,7 @@ impl App {
             detail: None,
             terminal: TerminalState::default(),
             terminal_focused: false,
-            docker_cli: terminal_launcher::docker_cli_available(),
+            terminal_enabled: true,
             palette: None,
             palette_scroll_y: 0.0,
             config_dir,
@@ -1527,10 +1528,10 @@ impl App {
     }
 
     /// A session is due: the Terminal tab is on screen without one, the container runs and the
-    /// `docker` CLI exists. Not after one ended, until the user asks for another.
+    /// session is enabled. Not after one ended, until the user asks for another.
     pub fn wants_terminal_session(&self) -> bool {
         self.conn == Connection::Ok
-            && self.docker_cli
+            && self.terminal_enabled
             && !self.terminal.ended
             && self.terminal.active_id.is_none()
             && self.terminal_tab_shown()
@@ -1715,7 +1716,6 @@ impl App {
                 self.container_info(&open.container_id),
                 self.detail.as_ref(),
                 &self.terminal,
-                self.docker_cli,
             )
         };
         if open.maximized {
@@ -1916,9 +1916,9 @@ mod tests {
     fn app_with(fake: &Arc<FakeClient>) -> App {
         let mut app = App::new(fake.clone()).0;
         app.pinging = false;
-        // The Terminal tab would open a PTY and run `docker`: tests that want the session to be
-        // started (none does) have to ask for it.
-        app.docker_cli = false;
+        // The Terminal tab would open a PTY and run the exec bridge: tests that want the session
+        // to be started (none does) have to ask for it.
+        app.terminal_enabled = false;
         app
     }
 
@@ -6156,8 +6156,8 @@ mod tests {
 
     // ---- Terminal tab (task 5.2) ----
     //
-    // These never build a real `Terminal` (that opens a PTY and runs `docker`): they stand in for
-    // a live session with `active_id`, and keep `docker_cli` false or the container stopped
+    // These never build a real `Terminal` (that opens a PTY and runs the exec bridge): they stand in for
+    // a live session with `active_id`, and keep `terminal_enabled` false or the container stopped
     // wherever a session would otherwise start.
 
     use iced::keyboard::Modifiers;
@@ -6177,18 +6177,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_session_is_wanted_only_for_a_running_container_with_the_cli_on_its_tab() {
+    async fn a_session_is_wanted_only_for_a_running_container_on_its_tab() {
         let fake = Arc::new(FakeClient::with_sample_data());
         let mut app = loaded_app(&fake).await;
         let _ = app.update(Message::OpenDock("web-id".into()));
         assert!(!app.wants_terminal_session(), "the Logs tab is on screen");
         app.dock.as_mut().unwrap().tab = DockTab::Terminal;
-        app.docker_cli = true;
+        app.terminal_enabled = true;
         assert!(app.wants_terminal_session());
 
-        app.docker_cli = false;
-        assert!(!app.wants_terminal_session(), "no docker command");
-        app.docker_cli = true;
+        app.terminal_enabled = false;
+        assert!(!app.wants_terminal_session(), "sessions are disabled");
+        app.terminal_enabled = true;
         app.terminal.ended = true;
         assert!(
             !app.wants_terminal_session(),
@@ -6211,22 +6211,11 @@ mod tests {
     async fn stopped_container_tab_starts_nothing_and_says_so() {
         let fake = Arc::new(FakeClient::with_sample_data());
         let mut app = loaded_app(&fake).await;
-        app.docker_cli = true;
+        app.terminal_enabled = true;
         let _ = app.update(Message::OpenDock("worker-id".into()));
         let _ = app.update(Message::DockTab(DockTab::Terminal));
         assert_eq!(app.terminal.active_id, None);
         assert!(!app.terminal.ended);
-        assert!(!app.terminal_focused);
-        let _ = app.view();
-    }
-
-    #[tokio::test]
-    async fn tab_without_the_docker_cli_starts_nothing() {
-        let fake = Arc::new(FakeClient::with_sample_data());
-        let mut app = loaded_app(&fake).await;
-        let _ = app.update(Message::OpenDock("web-id".into()));
-        let _ = app.update(Message::DockTab(DockTab::Terminal));
-        assert_eq!(app.terminal.active_id, None);
         assert!(!app.terminal_focused);
         let _ = app.view();
     }
@@ -6301,7 +6290,7 @@ mod tests {
         assert!(app.terminal.ended);
         assert!(!app.terminal_focused);
         // And it stays that way: a reload of the list does not start another one.
-        app.docker_cli = true;
+        app.terminal_enabled = true;
         assert!(!app.wants_terminal_session());
         let _ = app.view();
     }
@@ -6330,7 +6319,7 @@ mod tests {
     async fn new_session_forgets_the_end() {
         let fake = Arc::new(FakeClient::with_sample_data());
         let mut app = loaded_app(&fake).await;
-        app.docker_cli = true;
+        app.terminal_enabled = true;
         // Stopped, so nothing starts for real.
         let _ = app.update(Message::OpenDock("worker-id".into()));
         let _ = app.update(Message::DockTab(DockTab::Terminal));

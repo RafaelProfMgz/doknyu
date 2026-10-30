@@ -146,7 +146,6 @@ networks.remove_dialog.in_use: "Ainda conectados: %{names}. O Docker vai recusar
 networks.remove_dialog.confirm: "Remover"
 actions.dock_terminal: "Mostrar o shell do container selecionado"
 terminal.not_running: "Inicie o container para abrir um terminal"
-terminal.no_cli: "O comando docker não foi encontrado, então o terminal não abre dentro do app. Instale a CLI do Docker ou abra um terminal fora do app."
 terminal.ended: "Sessão encerrada"
 terminal.new_session: "Nova sessão"
 terminal.start_failed: "Não foi possível abrir o terminal"

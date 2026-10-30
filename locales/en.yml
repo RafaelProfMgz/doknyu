@@ -146,7 +146,6 @@ networks.remove_dialog.in_use: "Still connected: %{names}. Docker will refuse to
 networks.remove_dialog.confirm: "Remove"
 actions.dock_terminal: "Show the shell of the selected container"
 terminal.not_running: "Start the container to open a terminal"
-terminal.no_cli: "The docker command was not found, so the terminal cannot open inside the app. Install the Docker CLI or open a terminal outside the app."
 terminal.ended: "Session ended"
 terminal.new_session: "New session"
 terminal.start_failed: "Could not open the terminal"

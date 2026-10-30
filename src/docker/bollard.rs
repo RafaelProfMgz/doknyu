@@ -3,6 +3,8 @@
 use std::collections::HashMap;
 
 use ::bollard::Docker;
+use ::bollard::exec::{ResizeExecOptions, StartExecOptions, StartExecResults};
+use ::bollard::models::ExecConfig;
 use ::bollard::query_parameters::{
     EventsOptionsBuilder, ListContainersOptionsBuilder, LogsOptionsBuilder,
     RemoveContainerOptionsBuilder, StatsOptionsBuilder, StopContainerOptionsBuilder,
@@ -11,7 +13,7 @@ use async_trait::async_trait;
 use futures::{StreamExt, stream};
 
 use super::convert::{self, api_error_with_socket};
-use super::{DockerClient, DockerStream};
+use super::{DockerClient, DockerStream, ExecControl, ExecSession};
 use crate::error::DockerError;
 use crate::model::*;
 
@@ -272,6 +274,91 @@ impl DockerClient for BollardClient {
 
     async fn remove_network(&self, id: &str) -> Result<(), DockerError> {
         self.docker()?.remove_network(id).await.map_err(self.err())
+    }
+
+    async fn exec_interactive(
+        &self,
+        id: &str,
+        cmd: Vec<String>,
+        env: Vec<String>,
+    ) -> Result<ExecSession, DockerError> {
+        let docker = self.docker()?;
+        let err = self.err();
+        let config = ExecConfig {
+            attach_stdin: Some(true),
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            tty: Some(true),
+            env: Some(env),
+            cmd: Some(cmd),
+            ..Default::default()
+        };
+        let created = docker.create_exec(id, config).await.map_err(err.clone())?;
+        let options = StartExecOptions {
+            detach: false,
+            tty: true,
+            output_capacity: Some(16 * 1024),
+        };
+        match docker
+            .start_exec(&created.id, Some(options))
+            .await
+            .map_err(err.clone())?
+        {
+            StartExecResults::Attached { output, input } => Ok(ExecSession {
+                output: output
+                    .map(move |r| {
+                        r.map(|chunk| chunk.into_bytes().to_vec())
+                            .map_err(err.clone())
+                    })
+                    .boxed(),
+                input,
+                control: Box::new(BollardExec {
+                    docker,
+                    exec_id: created.id,
+                    err: Box::new(self.err()),
+                }),
+            }),
+            StartExecResults::Detached => {
+                Err(DockerError::Other("the exec started detached".into()))
+            }
+        }
+    }
+}
+
+/// Resize and exit code of one exec.
+struct BollardExec {
+    docker: Docker,
+    exec_id: String,
+    err: Box<dyn Fn(::bollard::errors::Error) -> DockerError + Send + Sync>,
+}
+
+#[async_trait]
+impl ExecControl for BollardExec {
+    async fn resize(&self, cols: u16, rows: u16) -> Result<(), DockerError> {
+        let options = ResizeExecOptions {
+            width: cols,
+            height: rows,
+        };
+        self.docker
+            .resize_exec(&self.exec_id, options)
+            .await
+            .map_err(&self.err)
+    }
+
+    async fn exit_code(&self) -> Result<Option<i64>, DockerError> {
+        // The output can end a moment before the daemon records the exit.
+        for _ in 0..20 {
+            let info = self
+                .docker
+                .inspect_exec(&self.exec_id)
+                .await
+                .map_err(&self.err)?;
+            if info.running != Some(true) {
+                return Ok(info.exit_code);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        Ok(None)
     }
 }
 
