@@ -86,6 +86,9 @@ pub struct LogWindow {
     pub current: Option<usize>,
     /// Counts the times the editor was built (see `LogHlSettings`).
     pub version: u64,
+    /// `DetailState::pushed` when the editor was built: with a full buffer the count stays the
+    /// same while the lines move, so this tells whether the editor is out of date.
+    pub pushed: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -119,6 +122,8 @@ pub struct DetailState {
     /// terminal. Built again by [`Self::rebuild_editor`]; `window` says what is in it.
     pub editor: text_editor::Content,
     pub window: LogWindow,
+    /// Lines received since the detail opened; only grows (see `LogWindow::pushed`).
+    pub pushed: u64,
 }
 
 impl DetailState {
@@ -146,7 +151,9 @@ impl DetailState {
                 lines: Vec::new(),
                 current: None,
                 version: 0,
+                pushed: 0,
             },
+            pushed: 0,
         }
     }
 
@@ -201,16 +208,28 @@ impl DetailState {
             lines,
             current: current_in_window,
             version: self.window.version + 1,
+            pushed: self.pushed,
         };
     }
 
     /// Keeps the editor up to date with the logs: it is built again unless a selection holds
     /// it, and even then when the view moved to lines it does not have.
+    /// Building it is costly (the text is shaped again), so it is skipped when it would show the
+    /// same lines it already has.
     fn sync_editor(&mut self) {
+        let from_bottom = if self.follow { 0.0 } else { self.from_bottom };
         if self.window.frozen {
-            let from_bottom = if self.follow { 0.0 } else { self.from_bottom };
             let seen = logs::visible_window(self.window.count, self.viewport_h, from_bottom, 0);
             if seen.start >= self.window.range.start && seen.end <= self.window.range.end {
+                return;
+            }
+        } else {
+            let count = self.logs.len();
+            let range = logs::visible_range(count, self.viewport_h, from_bottom);
+            if self.window.pushed == self.pushed
+                && self.window.count == count
+                && self.window.range == range
+            {
                 return;
             }
         }
@@ -293,7 +312,7 @@ impl DetailState {
                     self.viewport_h = viewport_h;
                 }
                 // Back at the end: follow the lines again, even over a selection.
-                if self.follow {
+                if self.follow && self.window.frozen {
                     self.rebuild_editor();
                 } else {
                     self.sync_editor();
@@ -373,6 +392,7 @@ impl DetailState {
     fn push_lines(&mut self, lines: Vec<LogLine>) {
         let before = self.logs.len();
         let added = lines.len();
+        self.pushed += added as u64;
         for line in lines {
             self.logs.push(line);
         }
@@ -689,6 +709,41 @@ mod tests {
         assert_eq!(d.editor_text(), "alpha\nbeta\ngamma\ndelta");
         assert!(!d.has_selection());
         assert!(d.follow);
+    }
+
+    #[test]
+    fn an_up_to_date_editor_is_not_built_again() {
+        let mut d = DetailState::new("web-id".into());
+        let _ = d.update(Msg::Resized(400.0));
+        let _ = d.update(batch("web-id", 0, &["a", "b"]));
+        let built = d.window.version;
+        // The list growing makes the scrollable report its viewport again, at the bottom.
+        let _ = d.update(Msg::Scrolled {
+            from_bottom: 0.0,
+            viewport_h: 400.0,
+        });
+        let _ = d.update(Msg::Resized(400.0));
+        assert_eq!(d.window.version, built);
+        let _ = d.update(batch("web-id", 0, &["c"]));
+        assert_eq!(d.window.version, built + 1);
+    }
+
+    #[test]
+    fn a_full_buffer_still_shows_new_lines() {
+        use crate::logbuf::MAX_LINES;
+        let mut d = DetailState::new("web-id".into());
+        let _ = d.update(Msg::Resized(400.0));
+        let _ = d.update(Msg::LogBatch {
+            id: "web-id".into(),
+            generation: 0,
+            lines: numbered(0, MAX_LINES),
+        });
+        let _ = d.update(Msg::LogBatch {
+            id: "web-id".into(),
+            generation: 0,
+            lines: numbered(MAX_LINES, MAX_LINES + 1),
+        });
+        assert!(d.editor_text().ends_with(&format!("line {MAX_LINES}")));
     }
 
     #[test]

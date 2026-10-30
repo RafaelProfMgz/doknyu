@@ -31,3 +31,8 @@ tokio = { version = "1", features = ["full", "test-util"] }
 serde_json = "1"
 # Executa a Task retornada por `App::update` nos testes (ver `app::test_support`).
 iced_runtime = "0.14"
+
+# Dependências otimizadas também no build de desenvolvimento: sem isso, a formatação de
+# texto (cosmic-text) e o desenho ficam lentos demais e o `cargo run` trava.
+[profile.dev.package."*"]
+opt-level = 3
