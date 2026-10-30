@@ -1,9 +1,11 @@
 pub mod containers;
 pub mod detail;
 pub mod dock;
+pub mod networks;
 pub mod onboarding;
 pub mod palette;
 pub mod sidebar;
 pub mod status_bar;
 pub mod toolbar;
+pub mod volumes;
 pub mod widgets;

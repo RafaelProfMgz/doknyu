@@ -7,6 +7,7 @@
 pub mod log_highlight;
 pub mod logs;
 pub mod stats;
+pub mod terminal;
 
 use std::ops::Range;
 

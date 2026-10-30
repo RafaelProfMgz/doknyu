@@ -37,7 +37,10 @@
   - Ordem de detecção: `$TERMINAL`; `x-terminal-emulator`; `gnome-terminal`; `konsole`; `kitty`;
     `alacritty`; `wezterm`; `foot`; `xfce4-terminal`; `xterm`.
   - Argumentos de execução por terminal: `gnome-terminal` → `["gnome-terminal", "--"]`;
-    `wezterm` → `["wezterm", "start", "--"]`; demais → `[<bin>, "-e"]`.
+    `wezterm` → `["wezterm", "start", "--"]`; `xfce4-terminal` → `["xfce4-terminal", "-x"]`
+    (o `-e` dele recebe uma string única); demais → `[<bin>, "-e"]`. `$TERMINAL` pode trazer
+    argumentos (`kitty --single-instance`): a primeira palavra é o programa, procurado no PATH, e
+    as demais ficam antes da flag de execução.
   - Comando executado: `docker exec -it -e TERM=xterm-256color <id> sh -c 'command -v bash >/dev/null && exec bash || exec sh'`.
   - Produzir também `pub fn exec_args(container_id: &str) -> Vec<String>` (args após `docker`,
     reutilizados pela 5.2) e `pub fn docker_cli_available() -> bool`.

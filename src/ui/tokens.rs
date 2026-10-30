@@ -90,6 +90,8 @@ pub const DOT_SIZE: f32 = 8.0;
 /// Square icon button.
 pub const ICON_BUTTON_SIZE: f32 = 24.0;
 pub const MODAL_WIDTH: f32 = 420.0;
+/// Tallest list inside a dialog; longer ones scroll.
+pub const DIALOG_LIST_HEIGHT: f32 = 8.0 * ROW_HEIGHT;
 /// Widest content card, for example the onboarding.
 pub const CARD_MAX_WIDTH: f32 = 520.0;
 pub const TOAST_WIDTH: f32 = 360.0;
@@ -108,3 +110,13 @@ pub const ALPHA_SCRIM: f32 = 0.5;
 pub const SHADOW_ALPHA: f32 = 0.3;
 pub const SHADOW_BLUR: f32 = 12.0;
 pub const SHADOW_OFFSET_Y: f32 = 4.0;
+
+/// Terminal tab: line height as a multiple of the font size (the emulator's cell height).
+pub const TERM_LINE_SCALE: f32 = 1.3;
+/// How far the "bright" ANSI colors move toward the text color, and the "dim" ones toward the
+/// background.
+pub const TERM_BRIGHT_MIX: f32 = 0.25;
+pub const TERM_DIM_MIX: f32 = 0.4;
+/// The palette has no magenta or cyan: each is this blend of two neighbors (accent with
+/// danger, accent with success).
+pub const ANSI_MIX: f32 = 0.5;

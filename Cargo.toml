@@ -3,7 +3,7 @@ name = "doknyu"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
-description = "Gerenciador desktop de containers Docker para Linux"
+description = "Desktop manager for Docker containers on Linux"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 
@@ -25,12 +25,50 @@ rust-i18n = "4"
 sys-locale = "0.3"
 open = "5"
 iced_term = "0.8"
+# Decodifica o PNG do ícone da janela (dependência direta; nenhuma outra crate do grafo a usa).
+png = "0.18"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
 serde_json = "1"
 # Executa a Task retornada por `App::update` nos testes (ver `app::test_support`).
 iced_runtime = "0.14"
+
+# Pacote .deb (`cargo deb`, ver `.github/workflows/release.yml`). As dependências de bibliotecas
+# vêm de `$auto` (ldd do binário: libc6, libgcc-s1); Wayland/X11/Vulkan/GL são carregados com
+# dlopen e ficam por conta do sistema desktop.
+[package.metadata.deb]
+name = "doknyu"
+maintainer = "RafaelProfMgz <RafaelProfMgz@users.noreply.github.com>"
+copyright = "doknyu contributors"
+license-file = ["LICENSE-MIT", "0"]
+extended-description = """\
+doknyu is a fast, keyboard-friendly desktop app to manage Docker containers, logs, stats, \
+volumes and networks, with an embedded terminal for each container."""
+section = "utils"
+priority = "optional"
+depends = "$auto"
+# Recommends, not Depends: the daemon may be remote or come from another source (rootless,
+# Docker Desktop), but a regular install wants one. The CLI is also needed by the terminal tab.
+recommends = "docker.io | docker-ce"
+assets = [
+    ["target/release/doknyu", "usr/bin/doknyu", "755"],
+    ["assets/io.github.rafaelprofmgz.Doknyu.desktop", "usr/share/applications/", "644"],
+    ["assets/io.github.rafaelprofmgz.Doknyu.metainfo.xml", "usr/share/metainfo/", "644"],
+    ["assets/icons/io.github.rafaelprofmgz.Doknyu.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+    ["assets/icons/hicolor/16x16/apps/io.github.rafaelprofmgz.Doknyu.png", "usr/share/icons/hicolor/16x16/apps/", "644"],
+    ["assets/icons/hicolor/24x24/apps/io.github.rafaelprofmgz.Doknyu.png", "usr/share/icons/hicolor/24x24/apps/", "644"],
+    ["assets/icons/hicolor/32x32/apps/io.github.rafaelprofmgz.Doknyu.png", "usr/share/icons/hicolor/32x32/apps/", "644"],
+    ["assets/icons/hicolor/48x48/apps/io.github.rafaelprofmgz.Doknyu.png", "usr/share/icons/hicolor/48x48/apps/", "644"],
+    ["assets/icons/hicolor/64x64/apps/io.github.rafaelprofmgz.Doknyu.png", "usr/share/icons/hicolor/64x64/apps/", "644"],
+    ["assets/icons/hicolor/128x128/apps/io.github.rafaelprofmgz.Doknyu.png", "usr/share/icons/hicolor/128x128/apps/", "644"],
+    ["assets/icons/hicolor/256x256/apps/io.github.rafaelprofmgz.Doknyu.png", "usr/share/icons/hicolor/256x256/apps/", "644"],
+    ["assets/icons/hicolor/512x512/apps/io.github.rafaelprofmgz.Doknyu.png", "usr/share/icons/hicolor/512x512/apps/", "644"],
+    ["LICENSE-MIT", "usr/share/doc/doknyu/", "644"],
+    ["LICENSE-APACHE", "usr/share/doc/doknyu/", "644"],
+    # A OFL (IBM Plex) e a ISC (Lucide) exigem que o texto da licença acompanhe a distribuição.
+    ["assets/fonts/LICENSES.md", "usr/share/doc/doknyu/", "644"],
+]
 
 # Dependências otimizadas também no build de desenvolvimento: sem isso, a formatação de
 # texto (cosmic-text) e o desenho ficam lentos demais e o `cargo run` trava.
