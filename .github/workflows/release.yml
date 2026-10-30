@@ -1,0 +1,89 @@
+name: Release
+
+# Roda ao empurrar uma tag `v*` (ex.: v0.1.0). Gera o .deb, o AppImage e o SHA256SUMS e os anexa
+# a um GitHub Release. Criar a tag é decisão do mantenedor; nada aqui cria tags.
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+  # Versões fixadas das ferramentas de empacotamento. O linuxdeploy e o appimagetool ficam
+  # fixados (com checksum) em packaging/appimage/build-appimage.sh.
+  CARGO_DEB_VERSION: "3.8.0"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # 22.04 de propósito: o binário é ligado à glibc 2.35, a mais antiga que ainda tem suporte,
+    # e por isso roda também em Ubuntu/Debian/Fedora mais novos.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+        with:
+          toolchain: 1.95.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Tag e versão do Cargo.toml batem
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "::error::a tag ${GITHUB_REF_NAME} não bate com a versão ${version} do Cargo.toml"
+            exit 1
+          fi
+          if ! grep -q "<release version=\"${version}\"" assets/io.github.rafaelprofmgz.Doknyu.metainfo.xml; then
+            echo "::error::falta <release version=\"${version}\"> no metainfo"
+            exit 1
+          fi
+
+      # Mesmas dependências do ci.yml (iced/winit: xkbcommon, wayland; wgpu: vulkan).
+      - name: Dependências de sistema
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libvulkan-dev pkg-config
+
+      - name: Build release
+        run: cargo build --release --locked
+
+      - name: .deb
+        run: |
+          cargo install cargo-deb --locked --version "${CARGO_DEB_VERSION}"
+          cargo deb --no-build
+          dpkg-deb --info target/debian/*.deb
+          dpkg-deb --contents target/debian/*.deb
+
+      - name: AppImage
+        run: packaging/appimage/build-appimage.sh
+
+      - name: Reúne os artefatos e gera o SHA256SUMS
+        run: |
+          mkdir dist
+          cp target/debian/*.deb target/appimage/doknyu-x86_64.AppImage dist/
+          cd dist
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          files: dist/*
+          generate_release_notes: true
