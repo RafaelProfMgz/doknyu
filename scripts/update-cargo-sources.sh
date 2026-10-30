@@ -34,7 +34,7 @@ echo "$GEN_SHA256  $GEN" | sha256sum --check --quiet - \
 
 if [ ! -x "$TOOLS/venv/bin/python" ]; then
     python3 -m venv "$TOOLS/venv"
-    "$TOOLS/venv/bin/pip" install --quiet aiohttp tomlkit
+    "$TOOLS/venv/bin/pip" install --quiet 'aiohttp==3.14.5' 'tomlkit==0.15.2'
 fi
 
 tmp="$(mktemp)"

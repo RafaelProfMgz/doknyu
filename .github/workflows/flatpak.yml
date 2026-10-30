@@ -18,6 +18,21 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: scripts/update-cargo-sources.sh --check
+      # Só em tag: o commit fixado no manifesto do Flathub tem de ser o da tag. O manifesto da própria
+      # tag não pode conter o hash dela (circular), então o pin é refeito aqui com pin-release.sh
+      # (que também confere o cargo-sources.json da tag) e comparado com o commit do evento.
+      - name: O pin do manifesto do Flathub bate com o commit da tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          SHA: ${{ github.sha }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          packaging/flatpak/pin-release.sh "$TAG"
+          pinned="$(sed -n 's/^ *commit: *//p' packaging/flatpak/io.github.rafaelprofmgz.Doknyu.yml | head -n1)"
+          if [ "$pinned" != "$SHA" ]; then
+            echo "::error::O manifesto do Flathub fixaria o commit '$pinned', mas a tag $TAG aponta para '$SHA'."
+            exit 1
+          fi
 
   build:
     name: Build do Flatpak

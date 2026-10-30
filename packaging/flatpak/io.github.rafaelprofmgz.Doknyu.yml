@@ -44,12 +44,11 @@ modules:
       - install -Dm644 LICENSE-MIT LICENSE-APACHE assets/fonts/LICENSES.md -t /app/share/licenses/io.github.rafaelprofmgz.Doknyu
     sources:
       # BEGIN-SOURCE
-      # TODO(release): trocar por `tag: v0.1.0` + `commit: <hash da tag>` quando a tag existir.
-      # Enquanto isso, `commit` é um HEAD de `main` já publicado (sem `tag`, o Flathub não
-      # acompanha versões). O commit tem de conter o código da Tarefa 7.2 e um Cargo.lock igual
-      # ao que gerou cargo-sources.json (confira com scripts/update-cargo-sources.sh --check).
+      # Placeholder de propósito: não compila. Na release, rode packaging/flatpak/pin-release.sh
+      # <tag>, que preenche `tag` e `commit` e confere o cargo-sources.json.
       - type: git
         url: https://github.com/RafaelProfMgz/doknyu.git
-        commit: 59773694aba6370c65f9f84062c9fbb04a508ca5
+        tag: vX.Y.Z
+        commit: 0000000000000000000000000000000000000000
       # END-SOURCE
       - cargo-sources.json

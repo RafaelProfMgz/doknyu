@@ -13,6 +13,7 @@ Flathub, dar push em AUR, criar projeto no COPR etc. são passos do humano.
 | Arquivo | Para quê |
 |---|---|
 | `flatpak/io.github.rafaelprofmgz.Doknyu.yml` | Manifesto que vai para o Flathub. Fonte `type: git` (`url` + `commit`). |
+| `flatpak/pin-release.sh` | Na release: fixa `tag` + `commit` no manifesto a partir de uma tag local e confere o `cargo-sources.json` da tag. |
 | `flatpak/make-local-manifest.sh` | Gera `...Doknyu.local.yml` (ignorado pelo git): o mesmo manifesto, com a fonte trocada por `type: dir` (a árvore atual), para testar a branch. O CI do PR usa esse. |
 | `flatpak/cargo-sources.json` | Crates do `Cargo.lock` (build offline). Gerado, não editar à mão. |
 | `scripts/update-cargo-sources.sh` | Regenera o `cargo-sources.json`; com `--check` só confere (o CI falha se estiver velho). O gerador (`flatpak-cargo-generator.py`, flatpak-builder-tools `41c20aa1…`) tem commit e SHA-256 fixos no script. |
@@ -94,10 +95,13 @@ Flatpak (sem emulador do host): a ação some da palette e do dock.
 Antes: leia a *Generative AI policy* e os *requirements* do Flathub
 (<https://docs.flathub.org/docs/for-app-authors/submission>); o texto do PR deve ser escrito por você.
 
-1. Publique a release `v0.1.0` (Fase 6) com os screenshots acessíveis nas URLs do metainfo.
-2. No `io.github.rafaelprofmgz.Doknyu.yml`, troque o bloco de fonte (entre `BEGIN-SOURCE`/`END-SOURCE`)
-   por `tag: v0.1.0` + `commit: <hash da tag>`; confira `scripts/update-cargo-sources.sh --check`
-   **nesse commit** e rode `flatpak-builder-lint manifest` e `repo` (devem ficar limpos).
+1. Publique a release `v0.1.0` (Fase 6): crie a tag (screenshots acessíveis nas URLs do metainfo).
+2. Com a tag criada localmente, rode `packaging/flatpak/pin-release.sh v0.1.0`: ele preenche `tag` e
+   `commit` do manifesto (o repositório guarda o placeholder `vX.Y.Z`/`0000…` de propósito, para o
+   manifesto não compilar por engano) e confere o `cargo-sources.json` contra o `Cargo.lock` **da
+   tag**, num worktree temporário. Faça commit do manifesto fixado; no CI da tag, o mesmo pin é
+   refeito e comparado com `github.sha`.
+   Rode `flatpak-builder-lint manifest` e `repo` (devem ficar limpos).
 3. Faça o fork de `flathub/flathub` com **"Copy the master branch only" desmarcado**
    (`gh repo fork --clone flathub/flathub`).
 4. `git clone --branch=new-pr git@github.com:<usuario>/flathub.git && cd flathub`, depois
@@ -114,7 +118,8 @@ Antes: leia a *Generative AI policy* e os *requirements* do Flathub
 Checklist:
 
 - [ ] Tag `v0.1.0` publicada, screenshots do metainfo abrem (200, não 404)
-- [ ] Manifesto com `tag` + `commit`, `cargo-sources.json` em dia (`--check`)
+- [ ] Ordem seguida: tag, `pin-release.sh <tag>`, commit do manifesto, PR no Flathub
+- [ ] Manifesto sem placeholder (`vX.Y.Z`/`0000…`), `cargo-sources.json` em dia (o `pin-release.sh` já confere)
 - [ ] `flatpak-builder-lint manifest` e `repo` limpos
 - [ ] Build local instalado e testado com `flatpak run` (lista containers, aba Terminal abre)
 - [ ] Policy de IA e requirements lidos; PR contra `new-pr`, título `Add <app id>`
@@ -123,4 +128,4 @@ Checklist:
 
 ### A cada release
 
-Atualize `tag` + `commit` no manifesto, `scripts/update-cargo-sources.sh` e o `<release>` do metainfo.
+Crie a tag, rode `pin-release.sh <tag>` e atualize o `<release>` do metainfo (antes da tag).
