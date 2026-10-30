@@ -49,32 +49,37 @@ pub fn view<'a>(
     } else {
         (Icon::Maximize2, t!("dock.maximize"))
     };
-    let actions = row![
-        icon_button(
+    let running = info.is_some_and(|c| c.state.is_running());
+    let mut actions = row![];
+    if running {
+        actions = actions.push(icon_button(
+            Icon::SquareTerminal,
+            Some(Message::Action(ActionId::OpenExternalTerminal)),
+            actions::tip(ActionId::OpenExternalTerminal, &t!("dock.open_terminal")),
+        ));
+    }
+    let actions = actions
+        .push(icon_button(
             size_icon,
             Some(Message::ToggleMaximize),
-            size_tip.into_owned()
-        ),
-        icon_button(
+            size_tip.into_owned(),
+        ))
+        .push(icon_button(
             Icon::X,
             // With the dock open, toggling it closes it.
             Some(Message::Action(ActionId::ToggleDock)),
-            actions::tip(ActionId::ToggleDock, &t!("dock.close"))
-        ),
-    ];
+            actions::tip(ActionId::ToggleDock, &t!("dock.close")),
+        ));
 
     let body: Element<'a, Message> = match (dock.tab, detail) {
         (DockTab::Logs, Some(detail)) => container(logs::view(detail))
             .style(style::container::bg)
             .into(),
-        (DockTab::Stats, Some(detail)) => {
-            let running = info.is_some_and(|c| c.state.is_running());
-            container(stats::view(detail, running))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .style(style::container::bg)
-                .into()
-        }
+        (DockTab::Stats, Some(detail)) => container(stats::view(detail, running))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(style::container::bg)
+            .into(),
         _ => container(text(t!("dock.empty_tab").into_owned()).style(style::text::muted))
             .center(Length::Fill)
             .padding(SPACE_4)

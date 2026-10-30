@@ -22,6 +22,8 @@ pub enum ActionId {
     DockStats,
     ToggleTimestamps,
     CopyLogs,
+    /// Opens a shell in the dock's (or selected) running container in the system terminal.
+    OpenExternalTerminal,
     OpenPalette,
     SelectNext,
     SelectPrev,
@@ -80,7 +82,7 @@ const fn def_of(
 }
 
 /// Every action, in the order the palette lists them when nothing else ranks them.
-static ALL: [ActionDef; 24] = [
+static ALL: [ActionDef; 25] = [
     def_of(
         ActionId::GoContainers,
         "actions.go_containers",
@@ -136,6 +138,12 @@ static ALL: [ActionDef; 24] = [
         true,
     ),
     def_of(ActionId::CopyLogs, "actions.copy_logs", None, true),
+    def_of(
+        ActionId::OpenExternalTerminal,
+        "actions.open_external_terminal",
+        None,
+        true,
+    ),
     def_of(
         ActionId::OpenPalette,
         "actions.open_palette",
@@ -248,6 +256,9 @@ pub fn available(app: &App, id: ActionId) -> bool {
         }
         ToggleTimestamps | FocusLogSearch => logs_open,
         CopyLogs => logs_open && app.detail.as_ref().is_some_and(|d| !d.logs.is_empty()),
+        OpenExternalTerminal => {
+            connected && app.terminal_target().is_some_and(|c| c.state.is_running())
+        }
         Retry => matches!(app.conn, Connection::Failed(_)),
         FocusSearch | SelectNext | SelectPrev => list_usable,
         // Volumes and networks have nothing to open, start or restart.

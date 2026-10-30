@@ -13,6 +13,7 @@ use crate::docker::DockerClient;
 use crate::error::DockerError;
 use crate::keymap;
 use crate::model::{ContainerInfo, DockerEvent, ResourceKind};
+use crate::terminal_launcher;
 use crate::ui::components::{ToastKind, modal};
 use crate::ui::prefs;
 use crate::ui::style;
@@ -127,6 +128,8 @@ pub enum Message {
     PaneResized(pane_grid::ResizeEvent),
     /// A button, shortcut or the palette asked for an action; the only way to run one.
     Action(ActionId),
+    /// The system terminal was asked to open (or failed to).
+    TerminalLaunched(Result<(), DockerError>),
     /// A key was pressed. `captured` is true when a widget (a text input) already used it.
     Key {
         key: iced::keyboard::Key,
@@ -512,6 +515,12 @@ impl App {
                 Task::none()
             }
             Message::Action(id) => self.run_action(id),
+            Message::TerminalLaunched(result) => {
+                if let Err(e) = result {
+                    self.push_toast(friendly_error(&e), Some(format!("{e:?}")));
+                }
+                Task::none()
+            }
             Message::Key {
                 key,
                 mods,
@@ -611,6 +620,17 @@ impl App {
                 let go = self.update(Message::Navigate(Screen::Volumes));
                 Task::batch([go, self.update_volumes(volumes::Msg::AskPrune)])
             }
+            OpenExternalTerminal => match self.terminal_target().map(|c| c.id.clone()) {
+                Some(id) => Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || terminal_launcher::launch(&id))
+                            .await
+                            .unwrap_or_else(|e| Err(DockerError::Other(e.to_string())))
+                    },
+                    Message::TerminalLaunched,
+                ),
+                None => Task::none(),
+            },
             ThemeSystem => self.set_theme_mode(ThemeMode::System),
             ThemeDark => self.set_theme_mode(ThemeMode::Dark),
             ThemeLight => self.set_theme_mode(ThemeMode::Light),
@@ -630,6 +650,14 @@ impl App {
     /// The number the sidebar shows beside Networks; none unless connected.
     fn network_count(&self) -> Option<usize> {
         (self.conn == Connection::Ok).then_some(self.networks.items.len())
+    }
+
+    /// The container a terminal would open in: the dock's, else the selected one.
+    pub fn terminal_target(&self) -> Option<&ContainerInfo> {
+        match &self.dock {
+            Some(dock) => self.container_info(&dock.container_id),
+            None => self.selected_container(),
+        }
     }
 
     /// The selected container, if it is in the list.
@@ -4196,6 +4224,73 @@ mod tests {
         assert_eq!(
             app.dock.as_ref().map(|d| d.container_id.as_str()),
             Some("db-id")
+        );
+    }
+
+    #[tokio::test]
+    async fn open_external_terminal_needs_a_running_container() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        assert!(actions::def(ActionId::OpenExternalTerminal).in_palette);
+        assert!(
+            actions::def(ActionId::OpenExternalTerminal)
+                .shortcut
+                .is_none()
+        );
+        let running = app
+            .containers
+            .items
+            .iter()
+            .find(|c| c.state.is_running())
+            .unwrap()
+            .id
+            .clone();
+        let stopped = app
+            .containers
+            .items
+            .iter()
+            .find(|c| !c.state.is_running())
+            .unwrap()
+            .id
+            .clone();
+
+        app.containers.selected = None;
+        assert!(!actions::available(&app, ActionId::OpenExternalTerminal));
+        app.containers.selected = Some(stopped.clone());
+        assert!(!actions::available(&app, ActionId::OpenExternalTerminal));
+        app.containers.selected = Some(running.clone());
+        assert!(actions::available(&app, ActionId::OpenExternalTerminal));
+
+        // The dock's container wins over the selection.
+        app.dock = Some(Dock {
+            container_id: stopped,
+            tab: DockTab::Logs,
+            maximized: false,
+        });
+        assert!(!actions::available(&app, ActionId::OpenExternalTerminal));
+        app.dock.as_mut().unwrap().container_id = running;
+        assert!(actions::available(&app, ActionId::OpenExternalTerminal));
+
+        app.set_failed(DockerError::NotRunning);
+        assert!(!actions::available(&app, ActionId::OpenExternalTerminal));
+    }
+
+    #[tokio::test]
+    async fn failed_terminal_launch_becomes_a_toast_with_details() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::TerminalLaunched(Ok(())));
+        assert!(app.toasts.is_empty());
+        let _ = app.update(Message::TerminalLaunched(Err(DockerError::Other(
+            "no terminal emulator found".into(),
+        ))));
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(app.toasts[0].kind, ToastKind::Error);
+        assert!(
+            app.toasts[0]
+                .details
+                .as_deref()
+                .is_some_and(|d| d.contains("no terminal emulator found"))
         );
     }
 
