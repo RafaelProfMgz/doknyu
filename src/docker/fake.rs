@@ -290,6 +290,24 @@ impl FakeClient {
         emit(&mut st, ResourceKind::Volume, "create", &name);
     }
 
+    /// Adds a network (its id is `<name>-id`), with the `create` event the daemon sends; `members`
+    /// are names of containers attached to it. A name that exists is replaced. Returns the id.
+    pub fn add_network(
+        &self,
+        name: &str,
+        driver: &str,
+        subnet: Option<&str>,
+        members: &[&str],
+    ) -> String {
+        let mut st = self.lock();
+        let entry = network(name, driver, subnet, members);
+        let id = entry.info.id.clone();
+        st.networks.retain(|o| o.info.name != name);
+        st.networks.push(entry);
+        emit(&mut st, ResourceKind::Network, "create", &id);
+        id
+    }
+
     /// Appends to the container's log history and to live log streams.
     pub fn push_log(&self, id: &str, line: LogLine) {
         let mut st = self.lock();
@@ -911,6 +929,34 @@ mod tests {
         assert_eq!(
             vols.iter().find(|v| v.name == "tmp").unwrap().used_by,
             vec!["web"]
+        );
+    }
+
+    #[tokio::test]
+    async fn add_network_lists_it_and_emits_create() {
+        let c = FakeClient::with_sample_data();
+        let mut e = c.events();
+        let id = c.add_network("scratch", "bridge", Some("172.30.0.0/16"), &["web"]);
+        assert_eq!(id, "scratch-id");
+        assert_eq!(
+            drain(&mut e, 1).await,
+            vec![ev(ResourceKind::Network, "create", "scratch-id")]
+        );
+        let nets = c.list_networks().await.unwrap();
+        assert_eq!(nets.len(), 5);
+        let scratch = nets.iter().find(|n| n.name == "scratch").unwrap();
+        assert_eq!(scratch.subnet.as_deref(), Some("172.30.0.0/16"));
+        assert_eq!(scratch.containers, vec!["web"]);
+        // Same name: replaced, not duplicated.
+        c.add_network("scratch", "bridge", None, &[]);
+        let nets = c.list_networks().await.unwrap();
+        assert_eq!(nets.len(), 5);
+        assert!(
+            nets.iter()
+                .find(|n| n.name == "scratch")
+                .unwrap()
+                .containers
+                .is_empty()
         );
     }
 

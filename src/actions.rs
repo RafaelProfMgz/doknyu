@@ -196,14 +196,20 @@ pub fn available(app: &App, id: ActionId) -> bool {
     use ActionId::*;
     let connected = app.conn == Connection::Ok;
     // A list can be used: Docker answers, it is on screen (not hidden by the maximized dock)
-    // and no dialog covers it. `on_containers` and `on_volumes` say which screen it is.
-    let dialog_open = app.containers.confirm_remove.is_some() || app.volumes.confirm.is_some();
+    // and no dialog covers it. `on_containers`, `on_volumes` and `on_networks` say which screen it is.
+    let dialog_open = app.containers.confirm_remove.is_some()
+        || app.volumes.confirm.is_some()
+        || app.networks.confirm_remove.is_some();
     let list_usable = connected
-        && matches!(app.screen, Screen::Containers | Screen::Volumes)
+        && matches!(
+            app.screen,
+            Screen::Containers | Screen::Volumes | Screen::Networks
+        )
         && !dialog_open
         && !app.dock.as_ref().is_some_and(|d| d.maximized);
     let on_containers = list_usable && app.screen == Screen::Containers;
     let on_volumes = list_usable && app.screen == Screen::Volumes;
+    let on_networks = list_usable && app.screen == Screen::Networks;
     let has_selection = || {
         app.containers
             .selected
@@ -219,6 +225,14 @@ pub fn available(app: &App, id: ActionId) -> bool {
                 .any(|v| v.name == name && v.used_by.is_empty())
                 && !app.volumes.pending.contains(name)
         })
+    };
+    // Docker's default networks are never offered, nor one being removed. One with containers
+    // connected is: the dialog warns and Docker has the last word.
+    let network_removable = || {
+        app.networks
+            .selected
+            .as_deref()
+            .is_some_and(|id| app.networks.removable(id))
     };
     // The Logs tab is on screen: its search, timestamps and copy only make sense then.
     let logs_open = connected
@@ -236,9 +250,13 @@ pub fn available(app: &App, id: ActionId) -> bool {
         CopyLogs => logs_open && app.detail.as_ref().is_some_and(|d| !d.logs.is_empty()),
         Retry => matches!(app.conn, Connection::Failed(_)),
         FocusSearch | SelectNext | SelectPrev => list_usable,
-        // Volumes have nothing to open, start or restart.
+        // Volumes and networks have nothing to open, start or restart.
         OpenSelected | StartStopSelected | RestartSelected => on_containers && has_selection(),
-        RemoveSelected => (on_containers && has_selection()) || (on_volumes && volume_removable()),
+        RemoveSelected => {
+            (on_containers && has_selection())
+                || (on_volumes && volume_removable())
+                || (on_networks && network_removable())
+        }
     }
 }
 

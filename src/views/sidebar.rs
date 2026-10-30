@@ -58,13 +58,14 @@ fn entry(
         .into()
 }
 
-/// Navigation column. `containers` and `volumes` are the numbers shown beside their entries;
-/// Networks has no count until task 4.2.
+/// Navigation column. `containers`, `volumes` and `networks` are the numbers shown beside their
+/// entries.
 pub fn view(
     current: &Screen,
     collapsed: bool,
     containers: Option<usize>,
     volumes: Option<usize>,
+    networks: Option<usize>,
 ) -> Element<'_, Message> {
     let entries = column![
         entry(
@@ -86,7 +87,7 @@ pub fn view(
         entry(
             Icon::Network,
             t!("sidebar.networks").into_owned(),
-            None,
+            networks,
             ActionId::GoNetworks,
             *current == Screen::Networks,
             collapsed,
@@ -118,7 +119,7 @@ mod tests {
         for screen in [Screen::Containers, Screen::Volumes, Screen::Networks] {
             for collapsed in [false, true] {
                 for count in [None, Some(0), Some(12)] {
-                    let _: Element<'_, Message> = view(&screen, collapsed, count, count);
+                    let _: Element<'_, Message> = view(&screen, collapsed, count, count, count);
                 }
             }
         }

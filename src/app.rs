@@ -14,13 +14,13 @@ use crate::error::DockerError;
 use crate::keymap;
 use crate::model::{ContainerInfo, DockerEvent, ResourceKind};
 use crate::ui::components::{ToastKind, modal};
-use crate::ui::fonts::SANS_SEMIBOLD;
 use crate::ui::prefs;
 use crate::ui::style;
 use crate::ui::theme::{ThemeMode, resolve};
-use crate::ui::tokens::{BORDER_WIDTH, ROW_HEIGHT, SPACE_1, SPACE_2, SPACE_6, TEXT_LG};
+use crate::ui::tokens::{BORDER_WIDTH, ROW_HEIGHT, SPACE_1};
 use crate::views::containers::{self, ContainersState};
 use crate::views::detail::{self, DetailState};
+use crate::views::networks::{self, NetworksState};
 use crate::views::palette::{self, PaletteState};
 use crate::views::volumes::{self, VolumesState};
 use crate::views::widgets::{friendly_error, toast_stack};
@@ -100,6 +100,7 @@ pub enum Message {
     ToggleToast(usize),
     Containers(containers::Msg),
     Volumes(volumes::Msg),
+    Networks(networks::Msg),
     /// Something in the container shown in the dock (logs today).
     Detail(detail::Msg),
     Docker(DockerEvent),
@@ -110,6 +111,8 @@ pub enum Message {
     ReloadContainers,
     /// The debounce window after a volume event is over: reload the volumes.
     ReloadVolumes,
+    /// The debounce window after a network event is over: reload the networks.
+    ReloadNetworks,
     /// The system theme (light/dark) was read or changed.
     SystemTheme(iced::theme::Mode),
     ToggleSidebar,
@@ -146,6 +149,7 @@ pub struct App {
     pub screen: Screen,
     pub containers: ContainersState,
     pub volumes: VolumesState,
+    pub networks: NetworksState,
     pub toasts: Vec<Toast>,
     pub theme_mode: ThemeMode,
     /// Last theme reported by the system; `Mode::None` until it answers or has no preference.
@@ -176,6 +180,9 @@ pub struct App {
     /// Same as `reload_scheduled` and `load_seq`, for the volume list.
     volumes_reload_scheduled: bool,
     volumes_load_seq: u64,
+    /// Same again, for the network list.
+    networks_reload_scheduled: bool,
+    networks_load_seq: u64,
     /// When the current events subscription was opened.
     events_started: Option<tokio::time::Instant>,
     /// How long to wait the next time the events stream ends.
@@ -296,6 +303,7 @@ impl App {
             screen: Screen::Containers,
             containers: ContainersState::default(),
             volumes: VolumesState::default(),
+            networks: NetworksState::default(),
             toasts: Vec::new(),
             theme_mode: config_dir
                 .as_deref()
@@ -316,6 +324,8 @@ impl App {
             load_seq: 0,
             volumes_reload_scheduled: false,
             volumes_load_seq: 0,
+            networks_reload_scheduled: false,
+            networks_load_seq: 0,
             events_started: None,
             events_backoff: EVENTS_BACKOFF_MIN,
         };
@@ -350,13 +360,18 @@ impl App {
                 // The row under the cursor is not drawn on the new screen, so no exit comes.
                 self.containers.hovered = None;
                 self.volumes.hovered = None;
+                self.networks.hovered = None;
                 Task::none()
             }
             Message::Pinged(Ok(())) => {
                 self.conn = Connection::Ok;
                 self.events_generation += 1;
                 self.events_started = Some(tokio::time::Instant::now());
-                Task::batch([self.load_containers(), self.load_volumes()])
+                Task::batch([
+                    self.load_containers(),
+                    self.load_volumes(),
+                    self.load_networks(),
+                ])
             }
             // Whatever the error, the daemon is not usable: the onboarding explains it and the
             // retry timer checks again. Carrying on would reopen the events stream in a loop.
@@ -390,6 +405,15 @@ impl App {
                 self.volumes_reload_scheduled = false;
                 if self.conn == Connection::Ok {
                     self.load_volumes()
+                } else {
+                    Task::none()
+                }
+            }
+            Message::Networks(m) => self.update_networks(m),
+            Message::ReloadNetworks => {
+                self.networks_reload_scheduled = false;
+                if self.conn == Connection::Ok {
+                    self.load_networks()
                 } else {
                     Task::none()
                 }
@@ -530,6 +554,7 @@ impl App {
             ToggleDock => self.update(Message::ToggleDock),
             FocusSearch => iced::widget::operation::focus(Id::new(match self.screen {
                 Screen::Volumes => volumes::SEARCH_ID,
+                Screen::Networks => networks::SEARCH_ID,
                 _ => containers::SEARCH_ID,
             })),
             FocusLogSearch => iced::widget::operation::focus(Id::new(detail::logs::SEARCH_ID)),
@@ -571,6 +596,12 @@ impl App {
                     None => Task::none(),
                 }
             }
+            RemoveSelected if self.screen == Screen::Networks => {
+                match self.networks.selected.clone() {
+                    Some(id) => self.update_networks(networks::Msg::AskRemove(id)),
+                    None => Task::none(),
+                }
+            }
             RemoveSelected => on_selected(self, Msg::AskRemove),
             PruneVolumes => {
                 let go = self.update(Message::Navigate(Screen::Volumes));
@@ -590,6 +621,11 @@ impl App {
     /// The number the sidebar shows beside Volumes; none unless connected.
     fn volume_count(&self) -> Option<usize> {
         (self.conn == Connection::Ok).then_some(self.volumes.items.len())
+    }
+
+    /// The number the sidebar shows beside Networks; none unless connected.
+    fn network_count(&self) -> Option<usize> {
+        (self.conn == Connection::Ok).then_some(self.networks.items.len())
     }
 
     /// The selected container, if it is in the list.
@@ -641,7 +677,25 @@ impl App {
                     &mut self.volumes.scroll_y,
                 )
             }
-            Screen::Networks => Task::none(),
+            Screen::Networks => {
+                let visible = self.networks.visible();
+                let current = self
+                    .networks
+                    .selected
+                    .as_deref()
+                    .and_then(|id| visible.iter().position(|n| n.id == id));
+                let Some(target) = step_target(visible.len(), current, forward) else {
+                    return Task::none();
+                };
+                let id = visible[target].id.clone();
+                self.networks.selected = Some(id);
+                scroll_row_into_view(
+                    networks::LIST_ID,
+                    target,
+                    self.networks.viewport_h,
+                    &mut self.networks.scroll_y,
+                )
+            }
         }
     }
 
@@ -652,7 +706,9 @@ impl App {
         if self.palette.take().is_some() {
             return;
         }
-        if self.containers.confirm_remove.take().is_some() || self.volumes.confirm.take().is_some()
+        if self.containers.confirm_remove.take().is_some()
+            || self.volumes.confirm.take().is_some()
+            || self.networks.confirm_remove.take().is_some()
         {
             return;
         }
@@ -685,6 +741,10 @@ impl App {
             Screen::Volumes if !self.volumes.query.is_empty() => {
                 self.volumes.query.clear();
                 self.volumes.keep_selection_visible();
+            }
+            Screen::Networks if !self.networks.query.is_empty() => {
+                self.networks.query.clear();
+                self.networks.keep_selection_visible();
             }
             _ => {}
         }
@@ -782,13 +842,18 @@ impl App {
         // With the removal dialog open, Enter presses its main button, even if a text input
         // still holds the event. Esc is left to the keymap and cancels.
         let remove_force = containers::remove_force(&self.containers);
-        let dialog_open = remove_force.is_some() || self.volumes.confirm.is_some();
+        let dialog_open = remove_force.is_some()
+            || self.volumes.confirm.is_some()
+            || self.networks.confirm_remove.is_some();
         if dialog_open
             && *key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter)
             && mods.is_empty()
         {
             return match remove_force {
                 Some(force) => self.update_containers(containers::Msg::ConfirmRemove { force }),
+                None if self.networks.confirm_remove.is_some() => {
+                    self.update_networks(networks::Msg::Confirm)
+                }
                 // Does nothing if the dialog has nothing to confirm (nothing to prune).
                 None => self.update_volumes(volumes::Msg::Confirm),
             };
@@ -1077,6 +1142,95 @@ impl App {
         )
     }
 
+    fn load_networks(&mut self) -> Task<Message> {
+        self.networks_load_seq += 1;
+        let seq = self.networks_load_seq;
+        let client = self.client.clone();
+        Task::perform(async move { client.list_networks().await }, move |r| {
+            Message::Networks(networks::Msg::Loaded(seq, r))
+        })
+    }
+
+    fn update_networks(&mut self, m: networks::Msg) -> Task<Message> {
+        use networks::Msg;
+        match m {
+            // Reloads can overlap: only the latest one counts.
+            Msg::Loaded(seq, _) if seq != self.networks_load_seq => Task::none(),
+            Msg::Loaded(_, Ok(items)) => {
+                self.networks.set_items(items);
+                Task::none()
+            }
+            Msg::Loaded(_, Err(e)) => self.fail(e),
+            Msg::Query(query) => {
+                self.networks.query = query;
+                self.networks.keep_selection_visible();
+                Task::none()
+            }
+            Msg::Select(id) => {
+                self.networks.selected = Some(id);
+                Task::none()
+            }
+            Msg::Hover(id) => {
+                self.networks.hovered = Some(id);
+                Task::none()
+            }
+            Msg::Leave(id) => {
+                if self.networks.hovered.as_deref() == Some(id.as_str()) {
+                    self.networks.hovered = None;
+                }
+                Task::none()
+            }
+            // Docker's default networks are never offered. One with containers connected is: the
+            // dialog warns, and Docker answers `Conflict` if they are still there.
+            Msg::AskRemove(id) => {
+                if self.networks.removable(&id) {
+                    self.networks.confirm_remove = Some(id);
+                }
+                Task::none()
+            }
+            Msg::Confirm => match self.networks.confirm_remove.take() {
+                Some(id) if self.networks.removable(&id) => self.remove_network(id),
+                _ => Task::none(),
+            },
+            Msg::Cancel => {
+                self.networks.confirm_remove = None;
+                Task::none()
+            }
+            // The list is refreshed by the Docker events the removal causes.
+            Msg::Removed(id, result) => {
+                self.networks.pending.remove(&id);
+                match result {
+                    Ok(()) => Task::none(),
+                    Err(e) => self.fail(e),
+                }
+            }
+            Msg::Scrolled { offset, height } => {
+                self.networks.scroll_y = offset;
+                self.networks.viewport_h = height;
+                Task::none()
+            }
+            Msg::Resized(height) => {
+                self.networks.viewport_h = height;
+                Task::none()
+            }
+        }
+    }
+
+    /// Removes a network unless a removal of it is already running.
+    fn remove_network(&mut self, id: String) -> Task<Message> {
+        if !self.networks.pending.insert(id.clone()) {
+            return Task::none();
+        }
+        let client = self.client.clone();
+        Task::perform(
+            async move {
+                let result = client.remove_network(&id).await;
+                (id, result)
+            },
+            |(id, result)| Message::Networks(networks::Msg::Removed(id, result)),
+        )
+    }
+
     fn load_volumes(&mut self) -> Task<Message> {
         self.volumes_load_seq += 1;
         let seq = self.volumes_load_seq;
@@ -1086,7 +1240,8 @@ impl App {
         })
     }
 
-    /// Container events refresh the container list, volume events the volume list; each is
+    /// Container events refresh the container list, volume events the volume list, network events
+    /// the network list; each is
     /// debounced so a burst causes a single reload. A container created or removed also
     /// changes who uses each volume, so it refreshes the volumes too.
     fn on_docker_event(&mut self, ev: DockerEvent) -> Task<Message> {
@@ -1131,6 +1286,17 @@ impl App {
                 Message::ReloadVolumes
             }));
         }
+        // Docker reports a container joining or leaving a network as a network event; one
+        // created or removed also changes who is connected, so that reloads the networks too.
+        let changes_networks = ev.kind == ResourceKind::Network
+            || (ev.kind == ResourceKind::Container
+                && matches!(ev.action.as_str(), "create" | "destroy"));
+        if changes_networks && !self.networks_reload_scheduled {
+            self.networks_reload_scheduled = true;
+            tasks.push(Task::perform(tokio::time::sleep(RELOAD_DEBOUNCE), |()| {
+                Message::ReloadNetworks
+            }));
+        }
         Task::batch(tasks)
     }
 
@@ -1154,6 +1320,8 @@ impl App {
         self.containers.hovered = None;
         self.volumes.confirm = None;
         self.volumes.hovered = None;
+        self.networks.confirm_remove = None;
+        self.networks.hovered = None;
         self.close_dock();
     }
 
@@ -1239,9 +1407,16 @@ impl App {
         };
         let count = (self.conn == Connection::Ok).then_some(self.containers.items.len());
         let volumes = self.volume_count();
+        let networks = self.network_count();
         let body = column![
             row![
-                sidebar::view(&self.screen, self.sidebar_collapsed, count, volumes),
+                sidebar::view(
+                    &self.screen,
+                    self.sidebar_collapsed,
+                    count,
+                    volumes,
+                    networks
+                ),
                 container(main).width(Length::Fill).height(Length::Fill),
             ]
             .height(Length::Fill),
@@ -1264,6 +1439,10 @@ impl App {
         };
         let body = match volumes::dialog(&self.volumes) {
             Some(card) => modal(body, card, Message::Volumes(volumes::Msg::Cancel)),
+            None => body,
+        };
+        let body = match networks::dialog(&self.networks) {
+            Some(card) => modal(body, card, Message::Networks(networks::Msg::Cancel)),
             None => body,
         };
         let body = match &self.palette {
@@ -1311,22 +1490,11 @@ impl App {
     }
 
     fn screen_content(&self) -> Element<'_, Message> {
-        let title = match &self.screen {
-            Screen::Containers => return containers::view(&self.containers),
-            Screen::Volumes => return volumes::view(&self.volumes),
-            Screen::Networks => t!("sidebar.networks"),
-        };
-        container(
-            column![
-                text(title.into_owned()).size(TEXT_LG).font(SANS_SEMIBOLD),
-                text(t!("common.coming_soon").into_owned()).style(style::text::muted),
-            ]
-            .spacing(SPACE_2),
-        )
-        .padding(SPACE_6)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+        match &self.screen {
+            Screen::Containers => containers::view(&self.containers),
+            Screen::Volumes => volumes::view(&self.volumes),
+            Screen::Networks => networks::view(&self.networks),
+        }
     }
 
     /// While Docker is reachable, listen to its events; while it is not, ping again every few
@@ -2085,21 +2253,6 @@ mod tests {
         assert!(matches!(produced[..], [Message::ReloadContainers]));
         // Nothing is listed until the debounce message is handled.
         assert_eq!(list_calls(&fake), before);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn network_events_do_not_reload() {
-        let fake = Arc::new(FakeClient::with_sample_data());
-        let mut app = loaded_app(&fake).await;
-        let before = fake.calls().len();
-        let ev = DockerEvent {
-            kind: ResourceKind::Network,
-            action: "create".into(),
-            id: "x".into(),
-        };
-        let handled = settle(&mut app, Message::Docker(ev)).await;
-        assert_eq!(handled.len(), 1);
-        assert_eq!(fake.calls().len(), before);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2990,16 +3143,14 @@ mod tests {
         for id in SELECTED {
             assert!(!actions::available(&app, id), "{id:?}");
         }
-        // Selection, but another screen: Volumes has its own selection (and no container
-        // actions), Networks has no list yet.
+        // Selection, but another screen: Volumes and Networks have their own selection (and no
+        // container actions).
         app.containers.selected = Some("web-id".into());
-        app.screen = Screen::Volumes;
-        for id in SELECTED {
-            assert!(!actions::available(&app, id), "{id:?}");
-        }
-        app.screen = Screen::Networks;
-        for id in SELECTED.into_iter().chain([ActionId::SelectNext]) {
-            assert!(!actions::available(&app, id), "{id:?}");
+        for screen in [Screen::Volumes, Screen::Networks] {
+            app.screen = screen;
+            for id in SELECTED {
+                assert!(!actions::available(&app, id), "{id:?}");
+            }
         }
         // Selection, but no Docker.
         app.screen = Screen::Containers;
@@ -5057,8 +5208,9 @@ mod tests {
         let mut app = volumes_app(&fake).await;
         assert!(actions::available(&app, ActionId::FocusSearch));
         app.screen = Screen::Networks;
-        assert!(!actions::available(&app, ActionId::FocusSearch));
-        assert!(!actions::available(&app, ActionId::SelectNext));
+        // Networks have a search and a list of their own now.
+        assert!(actions::available(&app, ActionId::FocusSearch));
+        assert!(actions::available(&app, ActionId::SelectNext));
     }
 
     #[tokio::test]
@@ -5149,5 +5301,466 @@ mod tests {
         assert_eq!(app.volumes.hovered.as_deref(), Some("cache"), "stale exit");
         let _ = app.update(Message::Navigate(Screen::Containers));
         assert_eq!(app.volumes.hovered, None);
+    }
+
+    // ---- Networks screen (task 4.2) ----
+
+    fn network_event(action: &str, id: &str) -> DockerEvent {
+        DockerEvent {
+            kind: ResourceKind::Network,
+            action: action.into(),
+            id: id.into(),
+        }
+    }
+
+    fn network_list_calls(fake: &FakeClient) -> usize {
+        fake.calls()
+            .iter()
+            .filter(|c| *c == "list_networks")
+            .count()
+    }
+
+    fn net_msg(m: networks::Msg) -> Message {
+        Message::Networks(m)
+    }
+
+    /// Connected, on the Networks screen: `bridge`, `host`, `none` (protected) and `app_net`
+    /// (with `web` and `db` connected). By name: `app_net`, `bridge`, `host`, `none`.
+    async fn networks_app(fake: &Arc<FakeClient>) -> App {
+        let mut app = loaded_app(fake).await;
+        let _ = app.run_action(ActionId::GoNetworks);
+        assert_eq!(app.screen, Screen::Networks);
+        app
+    }
+
+    fn network_names(app: &App) -> Vec<&str> {
+        app.networks.items.iter().map(|n| n.name.as_str()).collect()
+    }
+
+    /// The sample daemon plus an unused `scratch` network, already listed by the app.
+    async fn networks_app_with_scratch(fake: &Arc<FakeClient>) -> App {
+        let mut app = networks_app(fake).await;
+        fake.add_network("scratch", "bridge", Some("172.30.0.0/16"), &[]);
+        settle(&mut app, Message::ReloadNetworks).await;
+        assert!(network_names(&app).contains(&"scratch"));
+        app
+    }
+
+    #[tokio::test]
+    async fn connecting_loads_the_networks() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let app = loaded_app(&fake).await;
+        assert_eq!(app.networks.items.len(), 4);
+        assert_eq!(network_list_calls(&fake), 1);
+    }
+
+    #[tokio::test]
+    async fn ask_remove_on_protected_is_ignored() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = networks_app(&fake).await;
+        for id in ["bridge-id", "host-id", "none-id"] {
+            let _ = app.update(net_msg(networks::Msg::AskRemove(id.into())));
+            assert_eq!(app.networks.confirm_remove, None, "{id}");
+            // Not even the keyboard offers it.
+            app.networks.selected = Some(id.into());
+            assert!(!actions::available(&app, ActionId::RemoveSelected), "{id}");
+            settle(&mut app, key(iced::keyboard::key::Named::Delete, false)).await;
+            assert_eq!(app.networks.confirm_remove, None, "{id}");
+        }
+        // A confirmation forced open still removes nothing.
+        let _ = app.update(net_msg(networks::Msg::Confirm));
+        assert!(!fake.calls().iter().any(|c| c.starts_with("remove_network")));
+        // Nor an id nobody knows.
+        let _ = app.update(net_msg(networks::Msg::AskRemove("gone-id".into())));
+        assert_eq!(app.networks.confirm_remove, None);
+    }
+
+    #[tokio::test]
+    async fn confirm_never_removes_a_protected_network() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = networks_app(&fake).await;
+        app.networks.confirm_remove = Some("bridge-id".into());
+        settle(&mut app, net_msg(networks::Msg::Confirm)).await;
+        assert!(!fake.calls().iter().any(|c| c.starts_with("remove_network")));
+        assert_eq!(app.networks.confirm_remove, None);
+    }
+
+    #[tokio::test]
+    async fn unused_network_is_removed_after_confirming() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = networks_app_with_scratch(&fake).await;
+        let _ = app.update(net_msg(networks::Msg::AskRemove("scratch-id".into())));
+        assert_eq!(app.networks.confirm_remove.as_deref(), Some("scratch-id"));
+        assert!(!fake.calls().iter().any(|c| c.starts_with("remove_network")));
+        settle(&mut app, net_msg(networks::Msg::Confirm)).await;
+        assert!(
+            fake.calls()
+                .contains(&"remove_network:scratch-id".to_string())
+        );
+        assert_eq!(app.networks.confirm_remove, None);
+        assert!(app.networks.pending.is_empty());
+        assert!(app.toasts.is_empty());
+        // The daemon's `destroy` event refreshes the list.
+        settle(
+            &mut app,
+            Message::Docker(network_event("destroy", "scratch-id")),
+        )
+        .await;
+        assert!(!network_names(&app).contains(&"scratch"));
+    }
+
+    #[tokio::test]
+    async fn removing_a_network_in_use_asks_and_docker_refuses() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = networks_app(&fake).await;
+        // The plan allows trying: the dialog warns, Docker has the last word.
+        let _ = app.update(net_msg(networks::Msg::AskRemove("app_net-id".into())));
+        assert_eq!(app.networks.confirm_remove.as_deref(), Some("app_net-id"));
+        let _ = app.view();
+        settle(&mut app, net_msg(networks::Msg::Confirm)).await;
+        assert!(network_names(&app).contains(&"app_net"), "still listed");
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(
+            app.toasts[0].text,
+            friendly_error(&DockerError::Conflict(String::new()))
+        );
+        assert_eq!(app.conn, Connection::Ok);
+    }
+
+    #[tokio::test]
+    async fn network_remove_conflict_keeps_item_and_toasts() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = networks_app_with_scratch(&fake).await;
+        let _ = app.update(net_msg(networks::Msg::AskRemove("scratch-id".into())));
+        fake.fail_next(DockerError::Conflict("network has active endpoints".into()));
+        settle(&mut app, net_msg(networks::Msg::Confirm)).await;
+        assert!(network_names(&app).contains(&"scratch"));
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(
+            app.toasts[0].text,
+            friendly_error(&DockerError::Conflict(String::new()))
+        );
+        assert!(app.networks.pending.is_empty(), "the row is usable again");
+        assert_eq!(app.conn, Connection::Ok);
+    }
+
+    #[tokio::test]
+    async fn removing_a_network_twice_runs_one_call() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = networks_app_with_scratch(&fake).await;
+        let _ = app.update(net_msg(networks::Msg::AskRemove("scratch-id".into())));
+        let first = app.update(net_msg(networks::Msg::Confirm));
+        let _ = app.update(net_msg(networks::Msg::AskRemove("scratch-id".into())));
+        assert_eq!(app.networks.confirm_remove, None, "busy rows are not asked");
+        let _ = run(first).await;
+        assert_eq!(
+            fake.calls()
+                .iter()
+                .filter(|c| *c == "remove_network:scratch-id")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn network_event_triggers_reload() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let before = network_list_calls(&fake);
+        fake.add_network("scratch", "bridge", None, &[]);
+        settle(
+            &mut app,
+            Message::Docker(network_event("create", "scratch-id")),
+        )
+        .await;
+        assert_eq!(network_list_calls(&fake), before + 1);
+        assert_eq!(app.networks.items.len(), 5);
+        assert_eq!(list_calls(&fake), 1, "containers are not reloaded for it");
+        assert_eq!(volume_list_calls(&fake), 1, "nor are volumes");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn burst_of_network_events_reloads_once() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let before = network_list_calls(&fake);
+        let tasks: Vec<_> = (0..5)
+            .map(|_| app.update(Message::Docker(network_event("connect", "app_net-id"))))
+            .collect();
+        let mut produced = Vec::new();
+        for task in tasks {
+            produced.extend(run(task).await);
+        }
+        assert_eq!(produced.len(), 1, "only the first event schedules a reload");
+        for m in produced {
+            settle(&mut app, m).await;
+        }
+        assert_eq!(network_list_calls(&fake), before + 1);
+        // The window is over: the next event schedules again.
+        settle(
+            &mut app,
+            Message::Docker(network_event("disconnect", "app_net-id")),
+        )
+        .await;
+        assert_eq!(network_list_calls(&fake), before + 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn container_create_and_destroy_refresh_the_connected_containers() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        for action in ["create", "destroy"] {
+            let before = network_list_calls(&fake);
+            settle(&mut app, Message::Docker(container_event(action))).await;
+            assert_eq!(network_list_calls(&fake), before + 1, "{action}");
+        }
+        // A stop does not change what is attached: Docker says `disconnect` for that.
+        let before = network_list_calls(&fake);
+        settle(&mut app, Message::Docker(container_event("die"))).await;
+        assert_eq!(network_list_calls(&fake), before);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn network_reload_is_skipped_when_docker_is_unreachable() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::Docker(network_event("create", "x")));
+        app.conn = Connection::Failed(DockerError::NotRunning);
+        let before = network_list_calls(&fake);
+        assert!(run(app.update(Message::ReloadNetworks)).await.is_empty());
+        assert_eq!(network_list_calls(&fake), before);
+        // The flag was cleared: a later event can schedule again.
+        app.conn = Connection::Ok;
+        let produced = run(app.update(Message::Docker(network_event("create", "y")))).await;
+        assert_eq!(produced.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_older_network_load_cannot_overwrite_a_newer_one() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = networks_app(&fake).await;
+        let stale = app.networks_load_seq;
+        settle(&mut app, Message::ReloadNetworks).await;
+        assert!(app.networks_load_seq > stale);
+        let _ = app.update(net_msg(networks::Msg::Loaded(stale, Ok(vec![]))));
+        assert_eq!(app.networks.items.len(), 4);
+        let _ = app.update(net_msg(networks::Msg::Loaded(
+            stale,
+            Err(DockerError::NotRunning),
+        )));
+        assert_eq!(app.conn, Connection::Ok);
+    }
+
+    #[tokio::test]
+    async fn network_load_connection_error_goes_to_onboarding() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = networks_app(&fake).await;
+        app.networks.confirm_remove = Some("app_net-id".into());
+        let seq = app.networks_load_seq;
+        let _ = app.update(net_msg(networks::Msg::Loaded(
+            seq,
+            Err(DockerError::NotRunning),
+        )));
+        assert_eq!(app.conn, Connection::Failed(DockerError::NotRunning));
+        assert_eq!(app.networks.confirm_remove, None);
+        let _ = app.view();
+    }
+
+    #[tokio::test]
+    async fn network_keyboard_selection_moves_in_the_visible_list() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = networks_app(&fake).await;
+        assert_eq!(app.networks.selected, None);
+        let _ = app.update(key_msg("j", false));
+        assert_eq!(app.networks.selected.as_deref(), Some("app_net-id"));
+        let _ = app.update(named_key(iced::keyboard::key::Named::ArrowDown));
+        assert_eq!(app.networks.selected.as_deref(), Some("bridge-id"));
+        let _ = app.update(key_msg("k", false));
+        assert_eq!(app.networks.selected.as_deref(), Some("app_net-id"));
+        let _ = app.update(key_msg("k", false));
+        assert_eq!(
+            app.networks.selected.as_deref(),
+            Some("app_net-id"),
+            "no wrap"
+        );
+        assert_eq!(app.containers.selected, None, "containers are untouched");
+        assert_eq!(app.volumes.selected, None, "volumes are untouched");
+        app.networks.selected = None;
+        let _ = app.run_action(ActionId::SelectPrev);
+        assert_eq!(app.networks.selected.as_deref(), Some("none-id"));
+    }
+
+    #[tokio::test]
+    async fn network_selection_scrolls_the_row_into_view() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = networks_app(&fake).await;
+        let row = crate::ui::tokens::ROW_HEIGHT;
+        app.networks.selected = Some("app_net-id".into());
+        let _ = app.update(net_msg(networks::Msg::Scrolled {
+            offset: 0.0,
+            height: row,
+        }));
+        let _ = app.run_action(ActionId::SelectNext);
+        assert_eq!(app.networks.scroll_y, row, "bridge is the second row");
+        let _ = app.run_action(ActionId::SelectPrev);
+        assert_eq!(app.networks.scroll_y, 0.0);
+    }
+
+    #[tokio::test]
+    async fn delete_enter_and_escape_drive_the_network_dialog() {
+        use iced::keyboard::key::Named;
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = networks_app_with_scratch(&fake).await;
+        app.networks.selected = Some("scratch-id".into());
+        settle(&mut app, key(Named::Delete, false)).await;
+        assert_eq!(app.networks.confirm_remove.as_deref(), Some("scratch-id"));
+        let _ = app.view();
+
+        // Esc cancels and removes nothing.
+        settle(&mut app, key(Named::Escape, false)).await;
+        assert_eq!(app.networks.confirm_remove, None);
+        assert!(!fake.calls().iter().any(|c| c.starts_with("remove_network")));
+
+        // Behind the dialog the keys do nothing but Enter and Esc.
+        settle(&mut app, key(Named::Delete, false)).await;
+        let _ = app.update(key_msg("j", false));
+        assert_eq!(app.networks.selected.as_deref(), Some("scratch-id"));
+        assert!(!actions::available(&app, ActionId::SelectNext));
+
+        // Enter confirms, even if a text input holds the event.
+        settle(&mut app, enter_key(true)).await;
+        assert_eq!(app.networks.confirm_remove, None);
+        assert!(
+            fake.calls()
+                .contains(&"remove_network:scratch-id".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn enter_on_networks_does_not_open_the_dock() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = networks_app(&fake).await;
+        app.containers.selected = Some("web-id".into());
+        app.networks.selected = Some("app_net-id".into());
+        for id in [
+            ActionId::OpenSelected,
+            ActionId::StartStopSelected,
+            ActionId::RestartSelected,
+        ] {
+            assert!(!actions::available(&app, id), "{id:?}");
+        }
+        settle(&mut app, enter_key(false)).await;
+        assert!(app.dock.is_none());
+        assert!(!fake.calls().iter().any(|c| c.starts_with("start")));
+    }
+
+    #[tokio::test]
+    async fn escape_on_networks_closes_layers_in_order() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = networks_app(&fake).await;
+        app.networks.query = "app".into();
+        app.volumes.query = "ca".into();
+        app.containers.query = "we".into();
+        app.networks.selected = Some("app_net-id".into());
+        app.networks.confirm_remove = Some("app_net-id".into());
+        let _ = app.run_action(ActionId::Escape);
+        assert_eq!(app.networks.confirm_remove, None, "the dialog goes first");
+        assert_eq!(app.networks.query, "app");
+        let _ = app.run_action(ActionId::Escape);
+        assert_eq!(app.networks.query, "", "then the search");
+        assert_eq!(app.volumes.query, "ca", "other searches stay");
+        assert_eq!(app.containers.query, "we", "other searches stay");
+    }
+
+    #[tokio::test]
+    async fn search_filters_networks_and_keeps_the_selection_visible() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = networks_app(&fake).await;
+        app.networks.selected = Some("none-id".into());
+        let _ = app.update(net_msg(networks::Msg::Query("host".into())));
+        assert_eq!(app.networks.selected.as_deref(), Some("host-id"));
+        let _ = app.view();
+    }
+
+    #[tokio::test]
+    async fn network_search_is_focusable_only_on_the_networks_screen() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = networks_app(&fake).await;
+        assert!(actions::available(&app, ActionId::FocusSearch));
+        let _ = app.run_action(ActionId::FocusSearch);
+        app.conn = Connection::Failed(DockerError::NotRunning);
+        assert!(!actions::available(&app, ActionId::FocusSearch));
+    }
+
+    #[tokio::test]
+    async fn remove_selected_on_networks_opens_the_network_dialog_only() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = networks_app(&fake).await;
+        app.containers.selected = Some("web-id".into());
+        app.volumes.selected = Some("cache".into());
+        app.networks.selected = Some("app_net-id".into());
+        settle(&mut app, Message::Action(ActionId::RemoveSelected)).await;
+        assert_eq!(app.containers.confirm_remove, None);
+        assert_eq!(app.volumes.confirm, None);
+        assert_eq!(app.networks.confirm_remove.as_deref(), Some("app_net-id"));
+    }
+
+    #[tokio::test]
+    async fn a_dialog_of_another_screen_blocks_remove_selected_on_networks() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = networks_app_with_scratch(&fake).await;
+        app.networks.selected = Some("scratch-id".into());
+        app.volumes.confirm = Some(volumes::VolumeConfirm::Prune(vec![]));
+        assert!(!actions::available(&app, ActionId::RemoveSelected));
+        assert!(!actions::available(&app, ActionId::SelectNext));
+    }
+
+    #[tokio::test]
+    async fn sidebar_counts_the_networks_while_connected() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        assert_eq!(app.network_count(), Some(4));
+        app.conn = Connection::Failed(DockerError::NotRunning);
+        assert_eq!(app.network_count(), None);
+        app.conn = Connection::Checking;
+        assert_eq!(app.network_count(), None);
+        let _ = app.view();
+    }
+
+    #[tokio::test]
+    async fn networks_view_builds_with_dock_dialog_and_toasts() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = networks_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        app.networks.selected = Some("app_net-id".into());
+        app.networks.hovered = Some("bridge-id".into());
+        app.networks.pending.insert("app_net-id".into());
+        for confirm in [
+            None,
+            Some("app_net-id".to_string()),
+            Some("bridge-id".into()),
+        ] {
+            app.networks.confirm_remove = confirm;
+            let _ = app.view();
+        }
+        app.push_toast("x".into(), None);
+        let _ = app.update(Message::ToggleMaximize);
+        let _ = app.view();
+    }
+
+    #[tokio::test]
+    async fn navigating_away_clears_the_network_hover() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = networks_app(&fake).await;
+        let _ = app.update(net_msg(networks::Msg::Hover("bridge-id".into())));
+        assert_eq!(app.networks.hovered.as_deref(), Some("bridge-id"));
+        let _ = app.update(net_msg(networks::Msg::Leave("other".into())));
+        assert_eq!(
+            app.networks.hovered.as_deref(),
+            Some("bridge-id"),
+            "stale exit"
+        );
+        let _ = app.update(Message::Navigate(Screen::Containers));
+        assert_eq!(app.networks.hovered, None);
     }
 }
