@@ -33,17 +33,17 @@
   </recommends>
   <screenshots>
     <screenshot type="default">
-      <image>https://raw.githubusercontent.com/RafaelProfMgz/doknyu/main/docs/screenshots/list-dark.png</image>
+      <image>https://raw.githubusercontent.com/RafaelProfMgz/doknyu/v0.1.0/docs/screenshots/list-dark.png</image>
       <caption>Container list in the dark theme</caption>
       <caption xml:lang="pt-BR">Lista de containers no tema escuro</caption>
     </screenshot>
     <screenshot>
-      <image>https://raw.githubusercontent.com/RafaelProfMgz/doknyu/main/docs/screenshots/dock.png</image>
+      <image>https://raw.githubusercontent.com/RafaelProfMgz/doknyu/v0.1.0/docs/screenshots/dock.png</image>
       <caption>Container details in the dock</caption>
       <caption xml:lang="pt-BR">Detalhes do container no dock</caption>
     </screenshot>
     <screenshot>
-      <image>https://raw.githubusercontent.com/RafaelProfMgz/doknyu/main/docs/screenshots/palette-light.png</image>
+      <image>https://raw.githubusercontent.com/RafaelProfMgz/doknyu/v0.1.0/docs/screenshots/palette-light.png</image>
       <caption>Command palette in the light theme</caption>
       <caption xml:lang="pt-BR">Paleta de comandos no tema claro</caption>
     </screenshot>

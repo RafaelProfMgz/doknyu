@@ -61,10 +61,14 @@ LINUXDEPLOY="${LINUXDEPLOY:-$(fetch_tool linuxdeploy "$LINUXDEPLOY_URL" "$LINUXD
 APPIMAGETOOL="${APPIMAGETOOL:-$(fetch_tool appimagetool "$APPIMAGETOOL_URL" "$APPIMAGETOOL_SHA256")}"
 
 rm -rf "$APPDIR"
-mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/metainfo"
+mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/metainfo" "$APPDIR/usr/share/doc/doknyu"
 
 install -m 755 "$BIN" "$APPDIR/usr/bin/doknyu"
 install -m 644 "$ROOT/assets/$ID.metainfo.xml" "$APPDIR/usr/share/metainfo/"
+# Licenses travel with the binary: the OFL (IBM Plex) and ISC (Lucide) fonts embedded in it
+# require their license text to accompany the distribution.
+install -m 644 "$ROOT/LICENSE-MIT" "$ROOT/LICENSE-APACHE" "$ROOT/assets/fonts/LICENSES.md" \
+    "$APPDIR/usr/share/doc/doknyu/"
 
 # Icons: linuxdeploy copies each --icon-file into usr/share/icons/hicolor/<size>/apps/ (it reads
 # the size from the image) and the SVG into scalable/apps/. The one in the AppDir root is

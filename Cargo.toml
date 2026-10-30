@@ -25,7 +25,7 @@ rust-i18n = "4"
 sys-locale = "0.3"
 open = "5"
 iced_term = "0.8"
-# Decodifica o PNG do ícone da janela (já presente no Cargo.lock via iced/resvg).
+# Decodifica o PNG do ícone da janela (dependência direta; nenhuma outra crate do grafo a usa).
 png = "0.18"
 
 [dev-dependencies]
@@ -66,6 +66,8 @@ assets = [
     ["assets/icons/hicolor/512x512/apps/io.github.rafaelprofmgz.Doknyu.png", "usr/share/icons/hicolor/512x512/apps/", "644"],
     ["LICENSE-MIT", "usr/share/doc/doknyu/", "644"],
     ["LICENSE-APACHE", "usr/share/doc/doknyu/", "644"],
+    # A OFL (IBM Plex) e a ISC (Lucide) exigem que o texto da licença acompanhe a distribuição.
+    ["assets/fonts/LICENSES.md", "usr/share/doc/doknyu/", "644"],
 ]
 
 # Dependências otimizadas também no build de desenvolvimento: sem isso, a formatação de

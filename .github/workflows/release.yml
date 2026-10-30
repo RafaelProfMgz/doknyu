@@ -9,7 +9,7 @@ on:
   # empacotamento em PRs e manualmente; o job `release` só roda em tags.
   workflow_dispatch:
   pull_request:
-    paths: ["packaging/**", ".github/workflows/release.yml", "Cargo.toml"]
+    paths: ["packaging/**", ".github/workflows/release.yml", "Cargo.toml", "assets/**", "src/main.rs"]
 
 env:
   CARGO_TERM_COLOR: always
@@ -29,8 +29,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
-        with:
-          toolchain: 1.95.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Tag e versão do Cargo.toml batem
@@ -64,7 +62,10 @@ jobs:
           cargo install cargo-deb --locked --version "${CARGO_DEB_VERSION}"
           cargo deb --no-build
           dpkg-deb --info target/debian/*.deb
-          dpkg-deb --contents target/debian/*.deb
+          dpkg-deb --contents target/debian/*.deb | tee deb-contents.txt
+          for f in LICENSE-MIT LICENSE-APACHE LICENSES.md; do
+            grep -q "usr/share/doc/doknyu/$f$" deb-contents.txt || { echo "::error::falta a licença $f no .deb"; exit 1; }
+          done
 
       - name: AppImage
         run: packaging/appimage/build-appimage.sh
@@ -80,8 +81,11 @@ jobs:
           for f in AppRun "${id}.desktop" usr/bin/doknyu usr/share/metainfo/${id}.metainfo.xml; do
             test -e "squashfs-root/$f" || { echo "::error::falta $f no AppImage"; exit 1; }
           done
-          ls squashfs-root/${id}.svg squashfs-root/${id}.png > /dev/null 2>&1 \
+          [ -e "squashfs-root/${id}.svg" ] || [ -e "squashfs-root/${id}.png" ] \
             || { echo "::error::falta o ícone na raiz do AppImage"; exit 1; }
+          for f in LICENSE-MIT LICENSE-APACHE LICENSES.md; do
+            test -e "squashfs-root/usr/share/doc/doknyu/$f" || { echo "::error::falta a licença $f no AppImage"; exit 1; }
+          done
           missing="$(ldd squashfs-root/usr/bin/doknyu | grep "not found" || true)"
           if [ -n "$missing" ]; then
             echo "::error::bibliotecas faltando:"
