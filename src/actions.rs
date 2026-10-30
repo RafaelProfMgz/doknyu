@@ -20,6 +20,8 @@ pub enum ActionId {
     DockLogs,
     /// Shows the stats of the selected container in the dock.
     DockStats,
+    /// Shows the shell of the selected container in the dock.
+    DockTerminal,
     ToggleTimestamps,
     CopyLogs,
     /// Opens a shell in the dock's (or selected) running container in the system terminal.
@@ -82,7 +84,7 @@ const fn def_of(
 }
 
 /// Every action, in the order the palette lists them when nothing else ranks them.
-static ALL: [ActionDef; 25] = [
+static ALL: [ActionDef; 26] = [
     def_of(
         ActionId::GoContainers,
         "actions.go_containers",
@@ -128,6 +130,16 @@ static ALL: [ActionDef; 25] = [
             ctrl: true,
             shift: true,
             key: "S",
+        }),
+        true,
+    ),
+    def_of(
+        ActionId::DockTerminal,
+        "actions.dock_terminal",
+        Some(Shortcut {
+            ctrl: true,
+            shift: true,
+            key: "T",
         }),
         true,
     ),
@@ -251,7 +263,7 @@ pub fn available(app: &App, id: ActionId) -> bool {
         | ThemeDark | ThemeLight | Escape => true,
         ToggleDock | PruneVolumes => connected,
         // Works from the maximized dock too: it does not need the list, only the selection.
-        DockLogs | DockStats => {
+        DockLogs | DockStats | DockTerminal => {
             connected && app.containers.confirm_remove.is_none() && has_selection()
         }
         ToggleTimestamps | FocusLogSearch => logs_open,
@@ -323,6 +335,15 @@ mod tests {
     fn dock_stats_is_in_the_palette_with_its_shortcut() {
         assert!(def(ActionId::DockStats).in_palette);
         assert_eq!(tip(ActionId::DockStats, "Stats"), "Stats (Ctrl ⇧ S)");
+    }
+
+    #[test]
+    fn dock_terminal_is_in_the_palette_with_its_shortcut() {
+        assert!(def(ActionId::DockTerminal).in_palette);
+        assert_eq!(
+            tip(ActionId::DockTerminal, "Terminal"),
+            "Terminal (Ctrl ⇧ T)"
+        );
     }
 
     #[test]

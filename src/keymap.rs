@@ -23,6 +23,20 @@ pub fn resolve(key: &Key, mods: Modifiers, captured: bool) -> Option<ActionId> {
     plain(key, mods)
 }
 
+/// Whether a key press still belongs to the app while a terminal has the focus. The shell gets
+/// everything else (Esc, the arrows, plain letters and Ctrl+C, Ctrl+D and the other Ctrl+letter
+/// control codes), so only Ctrl+Shift shortcuts (the palette, the dock tabs) and Ctrl+J, which
+/// closes the dock, get through.
+pub fn for_app_with_terminal(key: &Key, mods: Modifiers) -> bool {
+    if !mods.control() || mods.alt() || mods.logo() {
+        return false;
+    }
+    match key {
+        Key::Character(c) => mods.shift() || c.eq_ignore_ascii_case("j"),
+        _ => false,
+    }
+}
+
 /// Ctrl+key. Alt and the logo key are not part of any shortcut, so they cancel the match.
 fn with_ctrl(key: &Key, mods: Modifiers) -> Option<ActionId> {
     if mods.alt() || mods.logo() {
@@ -35,6 +49,7 @@ fn with_ctrl(key: &Key, mods: Modifiers) -> Option<ActionId> {
         ("p", true) => Some(ActionId::OpenPalette),
         ("l", true) => Some(ActionId::DockLogs),
         ("s", true) => Some(ActionId::DockStats),
+        ("t", true) => Some(ActionId::DockTerminal),
         ("1", false) => Some(ActionId::GoContainers),
         ("2", false) => Some(ActionId::GoVolumes),
         ("3", false) => Some(ActionId::GoNetworks),
@@ -106,6 +121,9 @@ mod tests {
             (ch("s"), ctrl_shift, Some(ActionId::DockStats)),
             (ch("S"), ctrl_shift, Some(ActionId::DockStats)),
             (ch("s"), ctrl, None),
+            (ch("t"), ctrl_shift, Some(ActionId::DockTerminal)),
+            (ch("T"), ctrl_shift, Some(ActionId::DockTerminal)),
+            (ch("t"), ctrl, None),
             (ch("/"), none, Some(ActionId::FocusSearch)),
             (ch("j"), none, Some(ActionId::SelectNext)),
             (ch("k"), none, Some(ActionId::SelectPrev)),
@@ -152,5 +170,41 @@ mod tests {
             resolve(&named(Named::Escape), none, true),
             Some(ActionId::Escape)
         );
+    }
+
+    #[test]
+    fn a_focused_terminal_keeps_every_key_but_ctrl_shift_and_ctrl_j() {
+        let ctrl = Modifiers::CTRL;
+        let ctrl_shift = Modifiers::CTRL | Modifiers::SHIFT;
+        let none = Modifiers::empty();
+        let to_app = [
+            (ch("P"), ctrl_shift),
+            (ch("t"), ctrl_shift),
+            (ch("L"), ctrl_shift),
+            (ch("j"), ctrl),
+        ];
+        for (key, mods) in to_app {
+            assert!(for_app_with_terminal(&key, mods), "{key:?} {mods:?}");
+        }
+        // Ctrl+C and Ctrl+D (and the rest of Ctrl+letter) are the shell's, as are Esc, the
+        // arrows, plain letters and Enter.
+        let to_shell = [
+            (ch("c"), ctrl),
+            (ch("d"), ctrl),
+            (ch("b"), ctrl),
+            (ch("f"), ctrl),
+            (ch("1"), ctrl),
+            (ch("j"), none),
+            (ch("s"), none),
+            (ch("/"), none),
+            (named(Named::Escape), none),
+            (named(Named::ArrowDown), none),
+            (named(Named::Enter), none),
+            (named(Named::Delete), none),
+            (ch("j"), Modifiers::CTRL | Modifiers::ALT),
+        ];
+        for (key, mods) in to_shell {
+            assert!(!for_app_with_terminal(&key, mods), "{key:?} {mods:?}");
+        }
     }
 }

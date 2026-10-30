@@ -110,3 +110,10 @@ pub const ALPHA_SCRIM: f32 = 0.5;
 pub const SHADOW_ALPHA: f32 = 0.3;
 pub const SHADOW_BLUR: f32 = 12.0;
 pub const SHADOW_OFFSET_Y: f32 = 4.0;
+
+/// Terminal tab: line height as a multiple of the font size (the emulator's cell height).
+pub const TERM_LINE_SCALE: f32 = 1.3;
+/// How far the "bright" ANSI colors move toward the text color, and the "dim" ones toward the
+/// background.
+pub const TERM_BRIGHT_MIX: f32 = 0.25;
+pub const TERM_DIM_MIX: f32 = 0.4;

@@ -1,5 +1,5 @@
 //! The bottom dock: header with the container name, tabs and window buttons, and the tab body.
-//! The Logs and Stats tabs are here; Terminal is filled in by phase 5.
+//! The tab bodies are in `views::detail`.
 
 use iced::widget::{column, container, row, text};
 use iced::{Alignment, Element, Length};
@@ -13,6 +13,7 @@ use crate::ui::fonts::SANS_MEDIUM;
 use crate::ui::icons::Icon;
 use crate::ui::style;
 use crate::ui::tokens::{SPACE_2, SPACE_4, TEXT};
+use crate::views::detail::terminal::{self, TerminalState};
 use crate::views::detail::{DetailState, logs, stats};
 
 const TABS: [DockTab; 3] = [DockTab::Logs, DockTab::Stats, DockTab::Terminal];
@@ -26,12 +27,15 @@ fn tab_label(tab: DockTab) -> String {
     .into_owned()
 }
 
-/// The dock for `dock`; `info` is the container, if it is still in the list, and `detail`
-/// what the tabs keep for it.
+/// The dock for `dock`; `info` is the container, if it is still in the list, `detail` what the
+/// tabs keep for it, `term` the shell session and `docker_cli` whether the `docker` command
+/// exists (the session needs it).
 pub fn view<'a>(
     dock: &'a Dock,
     info: Option<&'a ContainerInfo>,
     detail: Option<&'a DetailState>,
+    term: &'a TerminalState,
+    docker_cli: bool,
 ) -> Element<'a, Message> {
     let mut title = row![
         text(info.map_or(dock.container_id.as_str(), |c| c.name.as_str()))
@@ -80,6 +84,7 @@ pub fn view<'a>(
             .height(Length::Fill)
             .style(style::container::bg)
             .into(),
+        (DockTab::Terminal, _) => terminal::view(term, running, docker_cli),
         _ => container(text(t!("dock.empty_tab").into_owned()).style(style::text::muted))
             .center(Length::Fill)
             .padding(SPACE_4)
@@ -96,26 +101,30 @@ mod tests {
 
     #[test]
     fn view_builds_for_every_tab_and_size() {
-        for tab in TABS {
-            for maximized in [false, true] {
-                let dock = Dock {
-                    container_id: "web-id".into(),
-                    tab,
-                    maximized,
-                };
-                let detail = DetailState::new("web-id".into());
-                for state in [ContainerState::Running, ContainerState::Exited { code: 0 }] {
-                    let info = ContainerInfo {
-                        id: "web-id".into(),
-                        name: "web".into(),
-                        image: "nginx".into(),
-                        state,
-                        status_text: String::new(),
-                        ports: vec![],
+        let term = TerminalState::default();
+        for docker_cli in [true, false] {
+            for tab in TABS {
+                for maximized in [false, true] {
+                    let dock = Dock {
+                        container_id: "web-id".into(),
+                        tab,
+                        maximized,
                     };
-                    let _: Element<'_, Message> = view(&dock, Some(&info), Some(&detail));
+                    let detail = DetailState::new("web-id".into());
+                    for state in [ContainerState::Running, ContainerState::Exited { code: 0 }] {
+                        let info = ContainerInfo {
+                            id: "web-id".into(),
+                            name: "web".into(),
+                            image: "nginx".into(),
+                            state,
+                            status_text: String::new(),
+                            ports: vec![],
+                        };
+                        let _: Element<'_, Message> =
+                            view(&dock, Some(&info), Some(&detail), &term, docker_cli);
+                    }
+                    let _: Element<'_, Message> = view(&dock, None, None, &term, docker_cli);
                 }
-                let _: Element<'_, Message> = view(&dock, None, None);
             }
         }
     }
