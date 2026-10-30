@@ -134,3 +134,43 @@
 - [ ] **Passo 5:** Manual: `docker run -d --name burn alpine sh -c 'while :; do :; done'` → CPU ~100%;
   `docker rm -f burn` com o detalhe aberto → volta para a lista com aviso.
 - [ ] **Passo 6:** Commit `feat(ui): stats tab with sparklines and gone-container handling`.
+
+### Tarefa 3.4: Seleção e cópia de texto nos logs (como num terminal)
+
+**Implementa:** `ui-implementer`. Pedido do humano depois da Tarefa 3.2.
+
+**Arquivos:**
+- Modificar: `src/views/detail/logs.rs`, `src/views/detail/mod.rs`, `src/app.rs`
+- Criar: `src/views/detail/log_highlight.rs` (highlighter das cores)
+
+**Comportamento:**
+- O corpo da aba Logs passa a ser um `text_editor` **somente leitura** com as linhas visíveis (a
+  mesma janela virtualizada de hoje, com overscan). Arrastar seleciona de qualquer caractere a
+  qualquer outro; duplo clique seleciona a palavra; triplo clique a linha; Ctrl+A seleciona o
+  visível; Ctrl+C copia a seleção (cópia do próprio widget).
+- **Sem edição:** o `on_action` aplica só ações que não são de edição (`!action.is_edit()`);
+  digitar, colar, apagar e Enter não mudam nada.
+- Ao começar uma seleção (`Click`/`Drag`/`Select*`), `follow` vira `false` e a janela visível
+  congela: lotes novos entram no `LogBuffer` mas o conteúdo do editor só é reconstruído quando a
+  janela muda (rolagem, "Ir para o fim", troca de busca). Isso mantém a seleção estável.
+- `Esc` com seleção ativa limpa a seleção antes das outras camadas (`close_top_layer`: palette >
+  modal > **seleção nos logs** > busca de logs > dock > busca da lista).
+- Cores mantidas por um `Highlighter` próprio: linhas `Stderr` em `warning`, ocorrências da busca
+  em `accent` (fundo da linha atual da busca continua `selected`), timestamps em `faint`.
+- Teclas de atalho de uma letra (`j`, `s`, `/`…) não disparam com o editor focado (o evento chega
+  como capturado); Ctrl+C dentro do editor não é interceptado pelo app.
+- Limitação aceita: a seleção cobre só a área visível (não rola sozinha ao arrastar além da borda).
+
+- [ ] **Passo 1: Testes que falham:**
+  - `log_editor_ignores_edits` — aplicar `Action::Edit(Insert('x'))` não muda o texto.
+  - `log_selection_pauses_follow` — `Action::Drag` com follow ativo → `follow == false`.
+  - `selection_survives_new_batches` — com seleção ativa, `LogBatch` não reconstrói o conteúdo
+    (texto do editor igual ao anterior) e o buffer cresce.
+  - `escape_clears_log_selection_first` — seleção ativa + dock aberto: 1º Esc limpa a seleção,
+    dock continua aberto.
+  - `highlight_marks_stderr_and_matches` — o highlighter devolve `warning` para linhas stderr e
+    `accent` para a faixa da busca.
+- [ ] **Passo 2–4:** FAIL → implementar → PASS (testes e clippy com e sem `fake`).
+- [ ] **Passo 5:** Manual: selecionar parte de uma linha e várias linhas, Ctrl+C e colar num editor;
+  digitar não altera nada; com logs chegando, a seleção não some.
+- [ ] **Passo 6:** Commit `feat(ui): select and copy log text like a terminal`.
