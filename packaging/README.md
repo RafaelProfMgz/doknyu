@@ -138,7 +138,7 @@ gerado, não editar à mão):
 
 | Pacote | Fonte | Notas |
 |---|---|---|
-| `doknyu` | tarball da tag `v$pkgver` do GitHub | Compila (`cargo build --frozen --release`, `prepare` com `cargo fetch --locked`), roda `cargo test` no `check()`. |
+| `doknyu` | tarball da tag `v$pkgver` do GitHub | Compila (`cargo build --frozen --release`, `prepare` com `cargo fetch --locked`), roda `cargo test --release` no `check()` (reaproveita o build). |
 | `doknyu-bin` | o `.deb` da release (`doknyu_$pkgver-1_amd64.deb`) | Não compila; o `prepare()` abre o `data.tar.*` do `.deb`. `provides=(doknyu)`, `conflicts=(doknyu doknyu-git)`. |
 | `doknyu-git` | `main` | `pkgver()` de `git describe` (`0.1.0.r<N>.g<hash>`); sem tag ainda, cai em `r<contagem>.g<hash>`. Funciona já. |
 

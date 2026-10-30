@@ -26,6 +26,8 @@ for pkg in doknyu doknyu-bin doknyu-git; do
     [ -f "$DIR/$pkg/PKGBUILD" ] && touch "$DIR/$pkg/.SRCINFO"
 done
 
+# Ctrl+C no host não chega ao bash (PID 1) do container: remova-o na saída.
+trap 'docker rm -f "doknyu-aur-pin-$$" >/dev/null 2>&1 || true' EXIT
 docker run --rm --name "doknyu-aur-pin-$$" -e "VER=$VER" -v "$DIR:/aur" archlinux:latest bash -euo pipefail -c '
     pacman -Syu --noconfirm --needed base-devel pacman-contrib >/dev/null
     useradd -m builder

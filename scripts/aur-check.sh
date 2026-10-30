@@ -28,7 +28,7 @@ PKGS=("$@")
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
 
 STAGE="$(mktemp -d)"
-trap 'rm -rf "$STAGE"' EXIT
+trap 'rm -rf "$STAGE"; docker rm -f "doknyu-spike-aur-check-$$" >/dev/null 2>&1 || true' EXIT
 
 # Clone local + árvore de trabalho (inclusive o que ainda não foi commitado) num commit descartável.
 git clone -q --no-hardlinks "$ROOT" "$STAGE/src"
