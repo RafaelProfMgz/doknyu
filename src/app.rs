@@ -1069,8 +1069,10 @@ impl App {
     }
 
     /// The stats stream wanted right now: like the logs, but only while the container runs
-    /// (a stopped one has no consumption), whichever tab is on screen. When the container
-    /// runs again the list says so and the generation is new, which starts a new stream.
+    /// (a stopped one has no consumption). It runs whichever tab is on screen on purpose: the
+    /// history keeps filling, so the user finds the last 60 s already there when opening
+    /// Stats. When the container runs again the list says so and the generation is new,
+    /// which starts a new stream.
     fn stats_source(&self) -> Option<detail::stats::StatsSource> {
         let detail = self.detail.as_ref()?;
         let running = self

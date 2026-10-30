@@ -68,6 +68,33 @@ impl StatsHistory {
     pub fn mem_series(&self) -> Vec<f64> {
         self.samples.iter().map(|s| s.mem_used as f64).collect()
     }
+
+    /// Bytes per second of a cumulative counter: the difference of consecutive samples (they
+    /// are one second apart). A counter that went backwards (the container restarted) counts
+    /// as 0 for that step. One value fewer than there are samples.
+    fn rate_series(&self, counter: impl Fn(&StatsSample) -> u64) -> Vec<f64> {
+        self.samples
+            .iter()
+            .zip(self.samples.iter().skip(1))
+            .map(|(a, b)| counter(b).saturating_sub(counter(a)) as f64)
+            .collect()
+    }
+
+    pub fn net_rx_rate_series(&self) -> Vec<f64> {
+        self.rate_series(|s| s.net_rx)
+    }
+
+    pub fn net_tx_rate_series(&self) -> Vec<f64> {
+        self.rate_series(|s| s.net_tx)
+    }
+
+    pub fn blk_read_rate_series(&self) -> Vec<f64> {
+        self.rate_series(|s| s.blk_read)
+    }
+
+    pub fn blk_write_rate_series(&self) -> Vec<f64> {
+        self.rate_series(|s| s.blk_write)
+    }
 }
 
 #[cfg(test)]
@@ -179,5 +206,43 @@ mod tests {
         assert_eq!(cpu[0], 1.0);
         assert_eq!(h.latest().unwrap().cpu_percent, 60.0);
         assert_eq!(h.mem_series()[0], 1.0);
+    }
+
+    fn counters(net_rx: u64, blk_write: u64) -> StatsSample {
+        StatsSample {
+            net_rx,
+            blk_write,
+            ..sample(0.0)
+        }
+    }
+
+    #[test]
+    fn rate_series_are_empty_until_there_are_two_samples() {
+        let mut h = StatsHistory::new();
+        assert!(h.net_rx_rate_series().is_empty());
+        h.push(counters(500, 0));
+        assert!(h.net_rx_rate_series().is_empty());
+        assert!(h.blk_write_rate_series().is_empty());
+    }
+
+    #[test]
+    fn rate_series_are_bytes_per_second_between_samples() {
+        let mut h = StatsHistory::new();
+        for (rx, w) in [(100, 0), (150, 4096), (150, 8192), (400, 8192)] {
+            h.push(counters(rx, w));
+        }
+        assert_eq!(h.net_rx_rate_series(), [50.0, 0.0, 250.0]);
+        assert_eq!(h.blk_write_rate_series(), [4096.0, 4096.0, 0.0]);
+        assert_eq!(h.net_tx_rate_series(), [0.0; 3]);
+        assert_eq!(h.blk_read_rate_series(), [0.0; 3]);
+    }
+
+    #[test]
+    fn a_counter_that_restarts_gives_zero_not_a_huge_rate() {
+        let mut h = StatsHistory::new();
+        for rx in [1_000_000, 10, 60] {
+            h.push(counters(rx, 0));
+        }
+        assert_eq!(h.net_rx_rate_series(), [0.0, 50.0]);
     }
 }

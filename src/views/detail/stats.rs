@@ -65,12 +65,11 @@ pub fn subscription(source: StatsSource) -> Subscription<Message> {
     })
 }
 
-/// A titled card: the main number and, if there is one, a chart below it.
-fn card<'a>(
-    title: String,
-    lines: Vec<(Option<String>, String)>,
-    chart: Option<Element<'a, Message>>,
-) -> Element<'a, Message> {
+/// One line of a card: an optional label, the value and, if there is one, its chart.
+type Line<'a> = (Option<String>, String, Option<Element<'a, Message>>);
+
+/// A titled card of lines, each with its main number and chart.
+fn card<'a>(title: String, lines: Vec<Line<'a>>) -> Element<'a, Message> {
     let mut body: Column<'a, Message> = column![
         text(title)
             .size(TEXT_SM)
@@ -78,7 +77,7 @@ fn card<'a>(
             .style(style::text::muted)
     ]
     .spacing(SPACE_1);
-    for (label, value) in lines {
+    for (label, value, chart) in lines {
         let value = text(value).size(TEXT_LG).font(MONO);
         body = body.push(match label {
             Some(label) => row![
@@ -92,9 +91,9 @@ fn card<'a>(
             .into(),
             None => Element::from(value),
         });
-    }
-    if let Some(chart) = chart {
-        body = body.push(chart);
+        if let Some(chart) = chart {
+            body = body.push(chart);
+        }
     }
     container(body)
         .padding(SPACE_3)
@@ -103,14 +102,28 @@ fn card<'a>(
         .into()
 }
 
+/// "total · rate/s" for a cumulative counter and its rate series; the rate is that of the
+/// latest second (0 until there are two samples).
+fn counter_line<'a>(label: String, total: u64, rates: &[f64]) -> Line<'a> {
+    let rate = rates.last().copied().unwrap_or(0.0) as u64;
+    (
+        Some(label),
+        format!("{} · {}/s", human_bytes(total), human_bytes(rate)),
+        Some(sparkline(rates, None)),
+    )
+}
+
 fn cards<'a>(d: &'a DetailState, last: &StatsSample) -> Element<'a, Message> {
     let cpu = card(
         t!("stats.cpu").into_owned(),
-        vec![(None, format!("{:.1}%", last.cpu_percent))],
-        Some(sparkline(
-            &d.stats.cpu_series(),
-            Some(100.0 * f64::from(d.cpus)),
-        )),
+        vec![(
+            None,
+            format!("{:.1}%", last.cpu_percent),
+            Some(sparkline(
+                &d.stats.cpu_series(),
+                Some(100.0 * f64::from(d.cpus)),
+            )),
+        )],
     );
     let memory = card(
         t!("stats.memory").into_owned(),
@@ -126,33 +139,41 @@ fn cards<'a>(d: &'a DetailState, last: &StatsSample) -> Element<'a, Message> {
             } else {
                 human_bytes(last.mem_used)
             },
+            Some(sparkline(
+                &d.stats.mem_series(),
+                (last.mem_limit > 0).then_some(last.mem_limit as f64),
+            )),
         )],
-        Some(sparkline(
-            &d.stats.mem_series(),
-            (last.mem_limit > 0).then_some(last.mem_limit as f64),
-        )),
     );
     let network = card(
         t!("stats.network").into_owned(),
         vec![
-            (Some(t!("stats.rx").into_owned()), human_bytes(last.net_rx)),
-            (Some(t!("stats.tx").into_owned()), human_bytes(last.net_tx)),
+            counter_line(
+                t!("stats.rx").into_owned(),
+                last.net_rx,
+                &d.stats.net_rx_rate_series(),
+            ),
+            counter_line(
+                t!("stats.tx").into_owned(),
+                last.net_tx,
+                &d.stats.net_tx_rate_series(),
+            ),
         ],
-        None,
     );
     let disk = card(
         t!("stats.disk").into_owned(),
         vec![
-            (
-                Some(t!("stats.read").into_owned()),
-                human_bytes(last.blk_read),
+            counter_line(
+                t!("stats.read").into_owned(),
+                last.blk_read,
+                &d.stats.blk_read_rate_series(),
             ),
-            (
-                Some(t!("stats.write").into_owned()),
-                human_bytes(last.blk_write),
+            counter_line(
+                t!("stats.write").into_owned(),
+                last.blk_write,
+                &d.stats.blk_write_rate_series(),
             ),
         ],
-        None,
     );
     // A short dock scrolls instead of cutting the cards.
     scrollable(
