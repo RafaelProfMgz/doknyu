@@ -1,0 +1,35 @@
+name: Flatpak
+
+# Em PR e em tag: confere o cargo-sources.json e constrói o Flatpak a partir do código do
+# próprio checkout (manifesto `.local.yml`, gerado do manifesto do Flathub com `type: dir`).
+# Nada é publicado: o PR no flathub/flathub é um passo do humano (packaging/README.md).
+on:
+  pull_request:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-sources:
+    name: cargo-sources.json em dia com o Cargo.lock
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: scripts/update-cargo-sources.sh --check
+
+  build:
+    name: Build do Flatpak
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-26.08
+      options: --privileged
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Manifesto com a fonte local
+        run: packaging/flatpak/make-local-manifest.sh
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@79327416609af08178ad73b352877e51450790b3 # v6.8
+        with:
+          bundle: doknyu.flatpak
+          manifest-path: packaging/flatpak/io.github.rafaelprofmgz.Doknyu.local.yml

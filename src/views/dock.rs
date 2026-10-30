@@ -53,7 +53,7 @@ pub fn view<'a>(
     };
     let running = info.is_some_and(|c| c.state.is_running());
     let mut actions = row![];
-    if running {
+    if running && !crate::sandbox::in_flatpak() {
         actions = actions.push(icon_button(
             Icon::SquareTerminal,
             Some(Message::Action(ActionId::OpenExternalTerminal)),

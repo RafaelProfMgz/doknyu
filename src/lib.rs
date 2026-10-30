@@ -7,6 +7,7 @@ pub mod fuzzy;
 pub mod keymap;
 pub mod logbuf;
 pub mod model;
+pub mod sandbox;
 pub mod stats;
 pub mod terminal_launcher;
 pub mod ui;

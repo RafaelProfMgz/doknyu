@@ -213,6 +213,12 @@ pub fn def(id: ActionId) -> &'static ActionDef {
 /// Whether the action makes sense right now. `App::run_action` does nothing for an action that
 /// is not available, and the palette hides it.
 pub fn available(app: &App, id: ActionId) -> bool {
+    available_in(app, id, crate::sandbox::in_flatpak())
+}
+
+/// `available` with the sandbox given (testable). In Flatpak there is no terminal emulator of
+/// the host to open, so the external terminal is never offered.
+pub fn available_in(app: &App, id: ActionId, flatpak: bool) -> bool {
     use ActionId::*;
     let connected = app.conn == Connection::Ok;
     // A list can be used: Docker answers, it is on screen (not hidden by the maximized dock)
@@ -269,7 +275,7 @@ pub fn available(app: &App, id: ActionId) -> bool {
         ToggleTimestamps | FocusLogSearch => logs_open,
         CopyLogs => logs_open && app.detail.as_ref().is_some_and(|d| !d.logs.is_empty()),
         OpenExternalTerminal => {
-            connected && app.terminal_target().is_some_and(|c| c.state.is_running())
+            !flatpak && connected && app.terminal_target().is_some_and(|c| c.state.is_running())
         }
         Retry => matches!(app.conn, Connection::Failed(_)),
         FocusSearch | SelectNext | SelectPrev => list_usable,

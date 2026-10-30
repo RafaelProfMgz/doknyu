@@ -4497,6 +4497,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn external_terminal_hidden_in_flatpak() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let running = app
+            .containers
+            .items
+            .iter()
+            .find(|c| c.state.is_running())
+            .unwrap()
+            .id
+            .clone();
+        app.containers.selected = Some(running);
+        assert!(actions::available_in(
+            &app,
+            ActionId::OpenExternalTerminal,
+            false
+        ));
+        assert!(!actions::available_in(
+            &app,
+            ActionId::OpenExternalTerminal,
+            true
+        ));
+        // The embedded Terminal tab keeps working (it runs the built-in bridge).
+        assert!(actions::available_in(&app, ActionId::DockTerminal, true));
+    }
+
+    #[tokio::test]
     async fn failed_terminal_launch_becomes_a_toast_with_details() {
         let fake = Arc::new(FakeClient::with_sample_data());
         let mut app = loaded_app(&fake).await;

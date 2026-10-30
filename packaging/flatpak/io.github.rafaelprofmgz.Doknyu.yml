@@ -1,19 +1,22 @@
-# Rascunho do spike 7.1 (ver docs/decisions/0002-flatpak.md). Será reescrito na Tarefa 7.2
-# (fonte `type: archive` da tag, sem `type: dir`, sem o binário de sondagem).
+# Manifesto do Flathub (ver packaging/README.md, seção Flathub).
+# Build offline: as crates vêm de cargo-sources.json (scripts/update-cargo-sources.sh).
+# Para testar o código da branch local, gere o manifesto `.local.yml` com
+# packaging/flatpak/make-local-manifest.sh (troca só o bloco de fonte abaixo por `type: dir`).
 app-id: io.github.rafaelprofmgz.Doknyu
 runtime: org.freedesktop.Platform
-runtime-version: '25.08'
+runtime-version: '26.08'
 sdk: org.freedesktop.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
 command: doknyu
 
+# Permissões mínimas (justificativa em packaging/README.md e no PR do Flathub).
 finish-args:
   - --socket=wayland
   - --socket=fallback-x11
   - --device=dri
   - --share=ipc
-  # Docker rootful: /var/run é symlink para /run, então /run/docker.sock cobre os dois caminhos.
+  # Docker padrão: /var/run é symlink para /run, então /run/docker.sock cobre os dois caminhos.
   - --filesystem=/run/docker.sock
   # Docker rootless: $XDG_RUNTIME_DIR/docker.sock (o Flatpak só aceita a forma xdg-run/).
   - --filesystem=xdg-run/docker.sock
@@ -40,11 +43,13 @@ modules:
         done
       - install -Dm644 LICENSE-MIT LICENSE-APACHE assets/fonts/LICENSES.md -t /app/share/licenses/io.github.rafaelprofmgz.Doknyu
     sources:
-      # SPIKE: diretório local. Na 7.2 vira `type: archive` com url e sha256 da tag.
-      - type: dir
-        path: ../..
-        skip:
-          - target
-          - .git
-          - docs
+      # BEGIN-SOURCE
+      # TODO(release): trocar por `tag: v0.1.0` + `commit: <hash da tag>` quando a tag existir.
+      # Enquanto isso, `commit` é um HEAD de `main` já publicado (sem `tag`, o Flathub não
+      # acompanha versões). O commit tem de conter o código da Tarefa 7.2 e um Cargo.lock igual
+      # ao que gerou cargo-sources.json (confira com scripts/update-cargo-sources.sh --check).
+      - type: git
+        url: https://github.com/RafaelProfMgz/doknyu.git
+        commit: 59773694aba6370c65f9f84062c9fbb04a508ca5
+      # END-SOURCE
       - cargo-sources.json

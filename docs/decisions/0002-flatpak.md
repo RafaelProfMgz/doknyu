@@ -124,3 +124,15 @@ cabeçalho de multiplexação e pode ser corrompido ou retido. Saída normal de 
 texto ou ESC (0x1b) e não é afetada; `cat` de binário ou `printf '\x01…'` podem ser. Evitar exige
 uma conexão HTTP upgrade própria (o `process_upgraded` do bollard é privado). Se incomodar, abrir
 issue/PR no bollard.
+
+## Adendo: Tarefa 7.2 (implementada)
+
+- Runtime **26.08** (`rust-stable//26.08`, Rust 1.98): é o que o linter recomenda e já está no Flathub.
+- Manifesto do Flathub com fonte `type: git` (`commit` fixo; vira `tag` + `commit` na release) e
+  manifesto local gerado (`make-local-manifest.sh`, `type: dir`) para o build local e o CI do PR.
+- Verificado no sandbox: build offline + `--install`; `flatpak run` com `RUST_LOG=debug` mostra
+  `_ping` e `containers/json` em `/var/run/docker.sock`; `--exec-bridge` abre um shell no container
+  dentro do sandbox (PTY e ponte OK). `flatpak-builder-lint manifest` limpo; `repo` só com os dois
+  erros de screenshots (404 até a tag).
+- App: `sandbox::in_flatpak()`; terminal externo some no Flatpak; socket procurado em
+  `/var/run/docker.sock` e `$XDG_RUNTIME_DIR/docker.sock`; onboarding próprio quando falta o socket.

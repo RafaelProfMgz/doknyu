@@ -51,11 +51,9 @@ impl BollardClient {
     /// socket) appearing after startup is picked up, and a missing socket
     /// surfaces as a `DockerError` from the first operation, not from `connect`.
     fn docker(&self) -> Result<Docker, DockerError> {
-        match &self.socket {
-            Some(p) => Docker::connect_with_unix(p, 120, ::bollard::API_DEFAULT_VERSION),
-            None => Docker::connect_with_unix_defaults(),
-        }
-        .map_err(self.err())
+        // `connect_with_unix_defaults` would not try the rootless socket.
+        Docker::connect_with_unix(&self.socket_path(), 120, ::bollard::API_DEFAULT_VERSION)
+            .map_err(self.err())
     }
 
     /// Wraps a stream builder so a connection failure becomes a one-item error stream.
