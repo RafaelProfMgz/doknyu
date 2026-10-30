@@ -82,6 +82,11 @@ pub fn visible_window(
     first.saturating_sub(overscan)..(last + overscan).min(count)
 }
 
+/// The largest `from_bottom` for `count` lines: the top of the logs.
+pub fn max_from_bottom(count: usize, viewport_h: f32) -> f32 {
+    (count as f32 * LOG_LINE_HEIGHT - effective_height(viewport_h)).max(0.0)
+}
+
 /// The `from_bottom` offset that puts line `line` in the middle of the list (or as close as
 /// the ends allow).
 pub fn offset_for_line(line: usize, count: usize, viewport_h: f32) -> f32 {

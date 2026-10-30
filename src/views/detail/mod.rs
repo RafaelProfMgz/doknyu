@@ -16,6 +16,7 @@ use iced::widget::operation::{AbsoluteOffset, scroll_to};
 use iced::widget::text_editor::{self, Action};
 
 use self::log_highlight::{LineHl, editor_line};
+use crate::ui::tokens::LOG_LINE_HEIGHT;
 
 use crate::app::Message;
 use crate::logbuf::LogBuffer;
@@ -232,9 +233,11 @@ impl DetailState {
     }
 
     /// Puts the list back at its end, as a freshly drawn one is (see `logs::view`).
+    /// Also drops the selection and the freeze that comes with it, as the editor is built again.
     pub fn reset_scroll(&mut self) {
         self.follow = true;
         self.from_bottom = 0.0;
+        self.rebuild_editor();
     }
 
     /// Sets the search text and finds its lines; the cursor goes to the newest one.
@@ -257,10 +260,21 @@ impl DetailState {
                 generation,
                 lines,
             } => {
-                if id == self.id && generation == self.generation {
-                    self.push_lines(lines);
-                    self.sync_editor();
+                if id != self.id || generation != self.generation {
+                    return Task::none();
                 }
+                let added = lines.len();
+                self.push_lines(lines);
+                // The list is anchored to its end: new lines would slide the text up under a
+                // user who scrolled away. Moving the offset by what was added keeps the same
+                // lines on screen (a selection already holds its own layout).
+                if !self.follow && !self.window.frozen && added > 0 {
+                    let max = logs::max_from_bottom(self.logs.len(), self.viewport_h);
+                    self.from_bottom = (self.from_bottom + added as f32 * LOG_LINE_HEIGHT).min(max);
+                    self.sync_editor();
+                    return scroll_list_to(self.from_bottom);
+                }
+                self.sync_editor();
                 Task::none()
             }
             Msg::LogsEnded { id, generation } => {
@@ -293,7 +307,6 @@ impl DetailState {
             }
             Msg::JumpToEnd => {
                 self.reset_scroll();
-                self.rebuild_editor();
                 scroll_list_to(0.0)
             }
             Msg::ToggleTimestamps => {
@@ -432,6 +445,7 @@ pub fn scroll_list_to(from_bottom: f32) -> Task<Message> {
 mod tests {
     use super::*;
     use crate::model::{LogLine, LogStream, RawStats};
+    use crate::ui::tokens::LOG_LINE_HEIGHT;
 
     fn line(text: &str) -> LogLine {
         LogLine {
@@ -706,6 +720,121 @@ mod tests {
         assert_eq!(d.editor_text(), "a");
         d.clear_selection();
         assert!(!d.has_selection());
+        assert_eq!(d.editor_text(), "a\nb");
+    }
+
+    /// The text of the first line of the editor, which says which lines are on screen.
+    fn first_shown(d: &DetailState) -> String {
+        d.editor
+            .line(0)
+            .map(|l| l.text.into_owned())
+            .unwrap_or_default()
+    }
+
+    fn numbered(from: usize, to: usize) -> Vec<LogLine> {
+        (from..to).map(|i| line(&format!("line {i}"))).collect()
+    }
+
+    fn scrolled_up(d: &mut DetailState, lines_up: f32) {
+        let _ = d.update(Msg::Scrolled {
+            from_bottom: lines_up * LOG_LINE_HEIGHT,
+            viewport_h: 10.0 * LOG_LINE_HEIGHT,
+        });
+    }
+
+    #[test]
+    fn a_batch_does_not_move_the_lines_of_a_list_scrolled_up() {
+        let mut d = DetailState::new("web-id".into());
+        let _ = d.update(Msg::Resized(10.0 * LOG_LINE_HEIGHT));
+        let _ = d.update(Msg::LogBatch {
+            id: "web-id".into(),
+            generation: 0,
+            lines: numbered(0, 100),
+        });
+        scrolled_up(&mut d, 30.0);
+        assert!(!d.follow);
+        let (start, shown) = (d.window.range.start, first_shown(&d));
+        let before = d.from_bottom;
+
+        let _ = d.update(Msg::LogBatch {
+            id: "web-id".into(),
+            generation: 0,
+            lines: numbered(100, 105),
+        });
+        assert_eq!(first_shown(&d), shown, "the same lines stay on screen");
+        assert_eq!(
+            d.window.range.start, start,
+            "the window stays on the same lines"
+        );
+        assert_eq!(d.from_bottom, before + 5.0 * LOG_LINE_HEIGHT);
+        assert!(!d.follow);
+    }
+
+    #[test]
+    fn a_batch_does_not_move_the_lines_when_the_buffer_drops_old_ones() {
+        use crate::logbuf::MAX_LINES;
+        let mut d = DetailState::new("web-id".into());
+        let _ = d.update(Msg::Resized(10.0 * LOG_LINE_HEIGHT));
+        let _ = d.update(Msg::LogBatch {
+            id: "web-id".into(),
+            generation: 0,
+            lines: numbered(0, MAX_LINES),
+        });
+        scrolled_up(&mut d, 30.0);
+        let shown = first_shown(&d);
+        let _ = d.update(Msg::LogBatch {
+            id: "web-id".into(),
+            generation: 0,
+            lines: numbered(MAX_LINES, MAX_LINES + 3),
+        });
+        assert_eq!(d.logs.len(), MAX_LINES);
+        assert_eq!(first_shown(&d), shown);
+    }
+
+    #[test]
+    fn a_batch_keeps_the_match_in_view() {
+        let mut d = DetailState::new("web-id".into());
+        let _ = d.update(Msg::Resized(10.0 * LOG_LINE_HEIGHT));
+        let mut lines = numbered(0, 100);
+        lines[40] = line("needle");
+        let _ = d.update(Msg::LogBatch {
+            id: "web-id".into(),
+            generation: 0,
+            lines,
+        });
+        let _ = d.update(Msg::Query("needle".into()));
+        assert!(!d.follow);
+        let at = d.window.current;
+        assert!(at.is_some());
+        let _ = d.update(Msg::LogBatch {
+            id: "web-id".into(),
+            generation: 0,
+            lines: numbered(100, 120),
+        });
+        assert_eq!(d.window.current, at, "the match stays where it was");
+    }
+
+    #[test]
+    fn a_followed_list_is_not_adjusted() {
+        let mut d = DetailState::new("web-id".into());
+        let _ = d.update(Msg::LogBatch {
+            id: "web-id".into(),
+            generation: 0,
+            lines: numbered(0, 50),
+        });
+        assert!(d.follow);
+        assert_eq!(d.from_bottom, 0.0);
+    }
+
+    #[test]
+    fn reset_scroll_drops_the_selection_and_the_freeze() {
+        let mut d = DetailState::new("web-id".into());
+        let _ = d.update(batch("web-id", 0, &["a"]));
+        let _ = d.update(Msg::Editor(Action::SelectAll));
+        assert!(d.window.frozen && !d.follow);
+        d.reset_scroll();
+        assert!(d.follow && !d.window.frozen && !d.has_selection());
+        let _ = d.update(batch("web-id", 0, &["b"]));
         assert_eq!(d.editor_text(), "a\nb");
     }
 

@@ -161,6 +161,9 @@ pub struct App {
     pinging: bool,
     /// Bumped on every successful ping so each (re)connection gets a fresh events subscription.
     events_generation: u64,
+    /// Containers this user asked to remove: when they are gone the dock closes without saying
+    /// so, since it was the user's own doing.
+    removing: std::collections::HashSet<String>,
     /// A reload is waiting for the debounce window to end; further events join it.
     reload_scheduled: bool,
     /// Number of the latest list reload; answers from older ones are discarded.
@@ -264,6 +267,7 @@ impl App {
             panes: initial_panes(),
             pinging: false,
             events_generation: 0,
+            removing: std::collections::HashSet::new(),
             reload_scheduled: false,
             load_seq: 0,
             events_started: None,
@@ -805,7 +809,11 @@ impl App {
                 self.containers.pending.remove(&id);
                 match result {
                     Ok(()) => Task::none(),
-                    Err(e) => self.fail(e),
+                    Err(e) => {
+                        // It is still there, so a later removal from outside is news.
+                        self.removing.remove(&id);
+                        self.fail(e)
+                    }
                 }
             }
             Msg::OpenPort(port) => {
@@ -841,10 +849,14 @@ impl App {
         {
             self.close_gone_dock();
         }
+        if ev.kind == ResourceKind::Container && ev.action == "destroy" {
+            self.removing.remove(&ev.id);
+        }
         // The shown container runs again: its streams ended with the old run, so it gets new
         // ones (a new generation), with the logs starting over.
         if ev.kind == ResourceKind::Container
-            && matches!(ev.action.as_str(), "start" | "restart")
+            // `docker restart` says `restart` and then `start`: one new run, one resubscription.
+            && ev.action == "start"
             && let Some(detail) = &mut self.detail
             && detail.id == ev.id
         {
@@ -886,8 +898,16 @@ impl App {
 
     /// The container in the dock was removed: closes the dock and says so. A stream that ends
     /// is not this (the container may only have stopped); only `destroy` or a `NotFound` is.
+    /// When the user removed it here, there is nothing to say.
     fn close_gone_dock(&mut self) {
+        let by_user = self
+            .dock
+            .as_ref()
+            .is_some_and(|d| self.removing.remove(&d.container_id));
         self.close_dock();
+        if by_user {
+            return;
+        }
         self.push_toast_of(ToastKind::Warning, t!("dock.gone").into_owned(), None);
     }
 
@@ -911,6 +931,9 @@ impl App {
     fn container_action(&mut self, id: String, action: ContainerAction) -> Task<Message> {
         if !self.containers.pending.insert(id.clone()) {
             return Task::none();
+        }
+        if matches!(action, ContainerAction::Remove { .. }) {
+            self.removing.insert(id.clone());
         }
         let client = self.client.clone();
         Task::perform(run_action(client, id.clone(), action), move |r| {
@@ -3507,6 +3530,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restart_events_resubscribe_once() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        // `docker restart` makes the daemon say `restart` and `start`.
+        let _ = app.update(Message::Docker(container_event("restart")));
+        let _ = app.update(Message::Docker(container_event("start")));
+        assert_eq!(app.detail.as_ref().unwrap().generation, 1);
+    }
+
+    #[tokio::test]
+    async fn logs_resume_after_leaving_a_selection_on_another_tab() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        let _ = app.update(batch_msg("web-id", 0, &["a"]));
+        let _ = app.update(Message::Detail(detail::Msg::Editor(
+            iced::widget::text_editor::Action::SelectAll,
+        )));
+        let _ = app.update(Message::DockTab(DockTab::Stats));
+        let _ = app.update(Message::DockTab(DockTab::Logs));
+        let _ = app.update(batch_msg("web-id", 0, &["b"]));
+        let d = app.detail.as_ref().unwrap();
+        assert_eq!(d.editor_text(), "a\nb");
+        assert!(d.follow);
+    }
+
+    #[tokio::test]
     async fn events_of_other_containers_or_kinds_keep_the_logs() {
         let fake = Arc::new(FakeClient::with_sample_data());
         let mut app = loaded_app(&fake).await;
@@ -4023,6 +4074,44 @@ mod tests {
         settle(&mut app, Message::ReloadContainers).await;
         assert_eq!(app.toasts.len(), 1);
         let _ = app.view();
+    }
+
+    #[tokio::test]
+    async fn removing_the_container_here_closes_the_dock_without_the_gone_toast() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        app.containers.confirm_remove = Some("web-id".into());
+        let _ = app.update(Message::Containers(containers::Msg::ConfirmRemove {
+            force: true,
+        }));
+        // The action can finish before the event that says it is gone.
+        let _ = app.update(Message::Containers(containers::Msg::ActionDone(
+            "web-id".into(),
+            Ok(()),
+        )));
+        let _ = app.update(Message::Docker(container_event("destroy")));
+        assert!(app.dock.is_none() && app.detail.is_none());
+        assert!(app.toasts.is_empty(), "the user knows: {:?}", app.toasts);
+    }
+
+    #[tokio::test]
+    async fn a_failed_removal_does_not_hide_a_later_external_one() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        app.containers.confirm_remove = Some("web-id".into());
+        let _ = app.update(Message::Containers(containers::Msg::ConfirmRemove {
+            force: true,
+        }));
+        let _ = app.update(Message::Containers(containers::Msg::ActionDone(
+            "web-id".into(),
+            Err(DockerError::Conflict("busy".into())),
+        )));
+        app.toasts.clear();
+        let _ = app.update(Message::Docker(container_event("destroy")));
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(app.toasts[0].text, t!("dock.gone"));
     }
 
     #[tokio::test]
