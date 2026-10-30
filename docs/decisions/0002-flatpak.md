@@ -111,3 +111,16 @@ o terminal externo. Não desistir do Flathub: há quatro precedentes com o mesmo
 - https://github.com/flatpak/flatpak-builder-tools (`cargo/flatpak-cargo-generator.py`)
 - Código do repositório: `src/docker/convert.rs`, `src/error.rs`, `src/ui/prefs.rs`,
   `src/views/detail/terminal.rs`, `src/terminal_launcher.rs`.
+
+## Adendo: ponte de exec (Tarefa 7.1b)
+
+Decisão do humano após o spike: a aba Terminal e o terminal externo rodam
+`doknyu --exec-bridge <id>`, que abre o exec pela API do Docker (TTY, raw mode, resize por
+SIGWINCH) e dispensa a CLI `docker`, inclusive no Flatpak.
+
+**Limitação conhecida (bollard 0.21.1):** `start_exec` decodifica a saída por heurística
+(`NewlineLogOutputDecoder`): um bloco lido que comece com o byte 0x00, 0x01 ou 0x02 é tratado como
+cabeçalho de multiplexação e pode ser corrompido ou retido. Saída normal de terminal começa com
+texto ou ESC (0x1b) e não é afetada; `cat` de binário ou `printf '\x01…'` podem ser. Evitar exige
+uma conexão HTTP upgrade própria (o `process_upgraded` do bollard é privado). Se incomodar, abrir
+issue/PR no bollard.
