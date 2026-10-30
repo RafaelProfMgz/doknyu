@@ -561,12 +561,21 @@ impl App {
     }
 
     /// Esc closes one layer, the topmost: the command palette, then the removal dialog, then the
-    /// dock (the log search first, if it has text), then the search.
+    /// dock (the selection in the logs first, then the log search, if it has text), then the
+    /// search.
     fn close_top_layer(&mut self) {
         if self.palette.take().is_some() {
             return;
         }
         if self.containers.confirm_remove.take().is_some() {
+            return;
+        }
+        // Selected text in the logs: Esc only deselects it.
+        if let Some(detail) = &mut self.detail
+            && self.dock.as_ref().is_some_and(|d| d.tab == DockTab::Logs)
+            && detail.has_selection()
+        {
+            detail.clear_selection();
             return;
         }
         // Esc in the log search clears it first; the next one closes the dock. The app does not
@@ -3582,6 +3591,37 @@ mod tests {
         assert!(app.dock.is_none(), "the next one closes the dock");
         let _ = app.run_action(ActionId::Escape);
         assert_eq!(app.containers.query, "");
+    }
+
+    #[tokio::test]
+    async fn escape_clears_log_selection_first() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        let _ = app.update(batch_msg("web-id", 0, &["error here", "and there"]));
+        let _ = app.update(Message::Detail(detail::Msg::Query("error".into())));
+        let _ = app.update(Message::Detail(detail::Msg::Editor(
+            iced::widget::text_editor::Action::SelectAll,
+        )));
+        assert!(app.detail.as_ref().unwrap().has_selection());
+
+        let _ = app.run_action(ActionId::Escape);
+        assert!(
+            app.dock.is_some(),
+            "the first Esc only clears the selection"
+        );
+        assert!(!app.detail.as_ref().unwrap().has_selection());
+        assert_eq!(
+            app.detail.as_ref().unwrap().query,
+            "error",
+            "the search text is still there"
+        );
+
+        let _ = app.run_action(ActionId::Escape);
+        assert!(app.detail.as_ref().unwrap().query.is_empty());
+        assert!(app.dock.is_some());
+        let _ = app.run_action(ActionId::Escape);
+        assert!(app.dock.is_none());
     }
 
     #[tokio::test]
