@@ -6,7 +6,6 @@ use std::time::Duration;
 use futures::{Stream, StreamExt};
 use iced::widget::{Id, center, column, container, pane_grid, row, rule, stack, text};
 use iced::{Element, Length, Subscription, Task, Theme};
-use iced_term::Terminal;
 use iced_term::actions::Action as TermAction;
 use rust_i18n::t;
 
@@ -1052,12 +1051,12 @@ impl App {
                 {
                     self.containers.confirm_remove = None;
                 }
-                // The container may have started while the Terminal tab waited for it.
-                if self.try_start_terminal() {
-                    self.focus_terminal()
-                } else {
-                    Task::none()
-                }
+                // The container may have started while the Terminal tab waited for it. The
+                // session starts without the focus: this comes from a reload, and the user may be
+                // typing in the palette or answering a dialog. A click or reopening the tab
+                // focuses it.
+                self.try_start_terminal();
+                Task::none()
             }
             // The container of the dock is gone and the daemon says so.
             Msg::Loaded(_, Err(DockerError::NotFound(_))) if self.dock.is_some() => {
@@ -1499,6 +1498,10 @@ impl App {
     }
 
     /// Drops the terminal session and everything that says it has the focus.
+    ///
+    /// Known and accepted: `iced_term`'s stream panics when its event channel closes outside an
+    /// `Exit`, which can happen when a live session is dropped. The panic is in the subscription
+    /// task only (one line on stderr) and the app goes on.
     fn drop_terminal(&mut self) {
         self.terminal.reset();
         self.terminal_focused = false;
@@ -1517,6 +1520,10 @@ impl App {
             && self.terminal.active_id.is_some()
             && self.terminal_tab_shown()
             && self.palette.is_none()
+            // A dialog is on top too: Esc and Enter are its.
+            && self.containers.confirm_remove.is_none()
+            && self.volumes.confirm.is_none()
+            && self.networks.confirm_remove.is_none()
     }
 
     /// A session is due: the Terminal tab is on screen without one, the container runs and the
@@ -1542,7 +1549,7 @@ impl App {
         let palette = resolve(self.theme_mode, self.system_mode);
         match self
             .terminal
-            .start(|id| Terminal::new(id, terminal::settings(&container, palette)))
+            .start(|id| terminal::new_session(id, &container, palette))
         {
             Ok(()) => true,
             Err(e) => {
@@ -6473,5 +6480,41 @@ mod tests {
         let _ = app.run_action(ActionId::ThemeLight);
         let _ = app.update(Message::SystemTheme(iced::theme::Mode::Dark));
         assert_eq!(app.terminal.active_id, Some(1));
+    }
+
+    #[tokio::test]
+    async fn esc_closes_a_modal_over_a_focused_terminal() {
+        let mut app = terminal_app("web-id").await;
+        app.containers.confirm_remove = Some("web-id".into());
+        app.terminal_focused = true;
+        assert!(!app.terminal_has_keys(), "the dialog is on top");
+        let _ = app.update(key(Named::Escape, false));
+        assert_eq!(app.containers.confirm_remove, None);
+        assert!(app.dock.is_some(), "only the dialog closed");
+
+        let mut app = terminal_app("web-id").await;
+        app.volumes.confirm = Some(volumes::VolumeConfirm::Prune(vec![]));
+        assert!(!app.terminal_has_keys());
+        app.volumes.confirm = None;
+        app.networks.confirm_remove = Some("x".into());
+        assert!(!app.terminal_has_keys());
+        app.networks.confirm_remove = None;
+        assert!(app.terminal_has_keys());
+        app.palette = Some(PaletteState::default());
+        assert!(!app.terminal_has_keys());
+    }
+
+    #[tokio::test]
+    async fn a_list_reload_does_not_take_the_focus_from_the_palette() {
+        let mut app = terminal_app("web-id").await;
+        let _ = app.update(Message::Action(ActionId::OpenPalette));
+        assert!(app.palette.is_some());
+        let items = app.containers.items.clone();
+        let _ = app.update(Message::Containers(containers::Msg::Loaded(
+            app.load_seq,
+            Ok(items),
+        )));
+        assert!(!app.terminal_focused);
+        assert!(app.palette.is_some());
     }
 }

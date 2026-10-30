@@ -23,16 +23,29 @@ pub fn resolve(key: &Key, mods: Modifiers, captured: bool) -> Option<ActionId> {
     plain(key, mods)
 }
 
+/// The shortcuts a focused terminal hands to the app, as (lowercase letter, with Shift): Ctrl+J
+/// closes the dock and Ctrl+Shift+P/L/S/T are the palette and the dock tabs. The terminal
+/// widget writes every key to the PTY before the app sees it, so `views::detail::terminal` binds
+/// these to nothing; this list is the one place both read.
+pub const TERMINAL_RESERVED: [(&str, bool); 5] = [
+    ("j", false),
+    ("p", true),
+    ("l", true),
+    ("s", true),
+    ("t", true),
+];
+
 /// Whether a key press still belongs to the app while a terminal has the focus. The shell gets
-/// everything else (Esc, the arrows, plain letters and Ctrl+C, Ctrl+D and the other Ctrl+letter
-/// control codes), so only Ctrl+Shift shortcuts (the palette, the dock tabs) and Ctrl+J, which
-/// closes the dock, get through.
+/// everything else (Esc, the arrows, plain letters, Ctrl+C, Ctrl+D and the other Ctrl+letter
+/// control codes, Ctrl+Shift+C/V), so only [`TERMINAL_RESERVED`] gets through.
 pub fn for_app_with_terminal(key: &Key, mods: Modifiers) -> bool {
     if !mods.control() || mods.alt() || mods.logo() {
         return false;
     }
     match key {
-        Key::Character(c) => mods.shift() || c.eq_ignore_ascii_case("j"),
+        Key::Character(c) => TERMINAL_RESERVED
+            .iter()
+            .any(|&(letter, shift)| shift == mods.shift() && c.eq_ignore_ascii_case(letter)),
         _ => false,
     }
 }
@@ -181,6 +194,7 @@ mod tests {
             (ch("P"), ctrl_shift),
             (ch("t"), ctrl_shift),
             (ch("L"), ctrl_shift),
+            (ch("S"), ctrl_shift),
             (ch("j"), ctrl),
         ];
         for (key, mods) in to_app {
@@ -202,9 +216,33 @@ mod tests {
             (named(Named::Enter), none),
             (named(Named::Delete), none),
             (ch("j"), Modifiers::CTRL | Modifiers::ALT),
+            // Ctrl+Shift+C and +V are the terminal's copy and paste.
+            (ch("C"), ctrl_shift),
+            (ch("V"), ctrl_shift),
+            (ch("J"), ctrl_shift),
         ];
         for (key, mods) in to_shell {
             assert!(!for_app_with_terminal(&key, mods), "{key:?} {mods:?}");
+        }
+    }
+
+    #[test]
+    fn the_reserved_list_is_what_the_terminal_lets_through() {
+        for (letter, shift) in TERMINAL_RESERVED {
+            let mods = if shift {
+                Modifiers::CTRL | Modifiers::SHIFT
+            } else {
+                Modifiers::CTRL
+            };
+            for key in [ch(letter), ch(&letter.to_uppercase())] {
+                assert!(for_app_with_terminal(&key, mods), "{key:?} {mods:?}");
+                // Each one is a shortcut of the app, or letting it through would do nothing.
+                assert!(resolve(&key, mods, true).is_some(), "{key:?} {mods:?}");
+            }
+        }
+        assert!(TERMINAL_RESERVED.contains(&("j", false)));
+        for letter in ["p", "l", "s", "t"] {
+            assert!(TERMINAL_RESERVED.contains(&(letter, true)), "{letter}");
         }
     }
 }

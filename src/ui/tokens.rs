@@ -117,3 +117,6 @@ pub const TERM_LINE_SCALE: f32 = 1.3;
 /// background.
 pub const TERM_BRIGHT_MIX: f32 = 0.25;
 pub const TERM_DIM_MIX: f32 = 0.4;
+/// The palette has no magenta or cyan: each is this blend of two neighbors (accent with
+/// danger, accent with success).
+pub const ANSI_MIX: f32 = 0.5;

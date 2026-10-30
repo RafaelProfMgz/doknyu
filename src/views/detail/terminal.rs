@@ -14,21 +14,24 @@
 
 use std::io;
 
+use iced::keyboard::Modifiers;
 use iced::widget::{button, column, container, text};
 use iced::{Alignment, Color, Element, Length, Padding, Subscription};
-pub use iced_term::TerminalView;
 use iced_term::actions::Action;
+use iced_term::bindings::{Binding, BindingAction, InputKind};
 use iced_term::settings::{BackendSettings, FontSettings, Settings, ThemeSettings};
-use iced_term::{BackendCommand, ColorPalette, Command, Terminal};
+use iced_term::{BackendCommand, ColorPalette, Command, TermMode, Terminal, TerminalView};
 use rust_i18n::t;
 
 use crate::actions::ActionId;
 use crate::app::Message;
+use crate::keymap::TERMINAL_RESERVED;
 use crate::terminal_launcher::exec_args;
 use crate::ui::fonts::MONO;
 use crate::ui::style;
 use crate::ui::tokens::{
-    Palette, SPACE_2, SPACE_3, SPACE_4, TERM_BRIGHT_MIX, TERM_DIM_MIX, TERM_LINE_SCALE, TEXT,
+    ANSI_MIX, Palette, SPACE_2, SPACE_3, SPACE_4, TERM_BRIGHT_MIX, TERM_DIM_MIX, TERM_LINE_SCALE,
+    TEXT,
 };
 
 /// How `docker exec` starts: the CLI is the program of the PTY, so the terminal inside the
@@ -67,8 +70,8 @@ fn mix(a: Color, b: Color, t: f32) -> Color {
 pub fn color_palette(p: &Palette) -> ColorPalette {
     let bright = |c: Color| hex(mix(c, p.text, TERM_BRIGHT_MIX));
     let dim = |c: Color| hex(mix(c, p.bg, TERM_DIM_MIX));
-    let magenta = mix(p.accent, p.danger, 0.5);
-    let cyan = mix(p.accent, p.success, 0.5);
+    let magenta = mix(p.accent, p.danger, ANSI_MIX);
+    let cyan = mix(p.accent, p.success, ANSI_MIX);
     ColorPalette {
         foreground: hex(p.text),
         background: hex(p.bg),
@@ -112,6 +115,38 @@ pub fn settings(container_id: &str, p: &Palette) -> Settings {
         theme: ThemeSettings::new(Box::new(color_palette(p))),
         backend: backend_settings(container_id),
     }
+}
+
+/// The app's own shortcuts (`keymap::TERMINAL_RESERVED`) bound to an empty escape sequence. The
+/// widget writes a key to the PTY before the app reacts, and its own table would send Ctrl+J as
+/// a newline (running the typed line) and Ctrl+Shift+S as ^S (which freezes the output); a key
+/// with no binding is no better, since the text of the key is written. An empty `Esc` is zero
+/// bytes (`Notifier::notify` returns on empty input) and the event still reaches the app.
+pub fn reserved_bindings() -> Vec<(Binding<InputKind>, BindingAction)> {
+    TERMINAL_RESERVED
+        .iter()
+        .map(|&(letter, shift)| {
+            let modifiers = if shift {
+                Modifiers::CTRL | Modifiers::SHIFT
+            } else {
+                Modifiers::CTRL
+            };
+            let binding = Binding {
+                target: InputKind::Char(letter.to_owned()),
+                modifiers,
+                terminal_mode_include: TermMode::empty(),
+                terminal_mode_exclude: TermMode::empty(),
+            };
+            (binding, BindingAction::Esc(String::new()))
+        })
+        .collect()
+}
+
+/// Opens a session: the PTY running `docker exec`, with the reserved keys left to the app.
+pub fn new_session(id: u64, container_id: &str, p: &Palette) -> io::Result<Terminal> {
+    let mut session = Terminal::new(id, settings(container_id, p))?;
+    let _ = session.handle(Command::AddBindings(reserved_bindings()));
+    Ok(session)
 }
 
 /// The terminal session of the dock. It belongs to the container the dock shows and is dropped
@@ -354,6 +389,57 @@ mod tests {
             color_palette(&DARK).background,
             color_palette(&LIGHT).background
         );
+    }
+
+    #[test]
+    fn reserved_keys_write_nothing_to_the_pty() {
+        use iced::keyboard::Modifiers;
+        use iced_term::bindings::{BindingAction, InputKind};
+
+        let bindings = reserved_bindings();
+        assert_eq!(bindings.len(), crate::keymap::TERMINAL_RESERVED.len());
+        for (letter, shift) in crate::keymap::TERMINAL_RESERVED {
+            let mods = if shift {
+                Modifiers::CTRL | Modifiers::SHIFT
+            } else {
+                Modifiers::CTRL
+            };
+            let (binding, action) = bindings
+                .iter()
+                .find(|(b, _)| {
+                    b.target == InputKind::Char(letter.to_owned()) && b.modifiers == mods
+                })
+                .unwrap_or_else(|| panic!("no binding for {letter} {mods:?}"));
+            // `Ignore` would write the text of the key; an empty escape sequence is zero bytes
+            // (`Notifier::notify` returns on an empty input).
+            assert_eq!(*action, BindingAction::Esc(String::new()));
+            assert!(binding.terminal_mode_include.is_empty());
+            assert!(binding.terminal_mode_exclude.is_empty());
+        }
+        // The ones that matter: Ctrl+J (a newline that would run the line) and the Ctrl+Shift
+        // shortcuts (^S freezes the output).
+        for (letter, shift) in [
+            ("j", false),
+            ("p", true),
+            ("l", true),
+            ("s", true),
+            ("t", true),
+        ] {
+            assert!(
+                bindings
+                    .iter()
+                    .any(|(b, _)| b.target == InputKind::Char(letter.to_owned())
+                        && b.modifiers.shift() == shift
+                        && b.modifiers.control())
+            );
+        }
+    }
+
+    #[test]
+    fn magenta_and_cyan_blend_their_neighbors_by_the_token() {
+        let c = color_palette(&DARK);
+        assert_eq!(c.magenta, hex(mix(DARK.accent, DARK.danger, ANSI_MIX)));
+        assert_eq!(c.cyan, hex(mix(DARK.accent, DARK.success, ANSI_MIX)));
     }
 
     #[test]

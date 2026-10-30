@@ -17,32 +17,42 @@ const CANDIDATES: [&str; 9] = [
 ];
 
 /// The command prefix that makes `bin` run what follows it.
-fn run_prefix(bin: &str) -> Vec<String> {
+fn run_prefix(bin: &str, own_args: &[&str]) -> Vec<String> {
     let base = bin.rsplit('/').next().unwrap_or(bin);
     let flags: &[&str] = match base {
         "gnome-terminal" => &["--"],
         "wezterm" => &["start", "--"],
+        // `-e` takes a single string there; `-x` takes the rest of the arguments.
+        "xfce4-terminal" => &["-x"],
         _ => &["-e"],
     };
     std::iter::once(bin)
+        .chain(own_args.iter().copied())
         .chain(flags.iter().copied())
         .map(str::to_owned)
         .collect()
 }
 
 /// The terminal to use and the arguments that precede the command to run in it. `available`
-/// says whether a binary can be run (found on `PATH`).
+/// says whether a binary can be run (found on `PATH`). `$TERMINAL` may carry arguments
+/// (`kitty --single-instance`): its first word is the program and the rest go before the flag
+/// that runs a command.
 pub fn detect_terminal(
     env_terminal: Option<&str>,
     available: &dyn Fn(&str) -> bool,
 ) -> Option<Vec<String>> {
-    env_terminal
-        .map(str::trim)
-        .filter(|bin| !bin.is_empty())
+    let env_words: Vec<&str> = env_terminal
+        .map(|value| value.split_whitespace().collect())
+        .unwrap_or_default();
+    if let Some((bin, args)) = env_words.split_first()
+        && available(bin)
+    {
+        return Some(run_prefix(bin, args));
+    }
+    CANDIDATES
         .into_iter()
-        .chain(CANDIDATES)
         .find(|bin| available(bin))
-        .map(run_prefix)
+        .map(|bin| run_prefix(bin, &[]))
 }
 
 /// The arguments after `docker` that open a shell in the container.
@@ -139,6 +149,52 @@ mod tests {
         assert_eq!(
             found,
             Some(vec!["gnome-terminal".to_string(), "--".to_string()])
+        );
+    }
+
+    #[test]
+    fn xfce4_terminal_takes_an_argv_with_x() {
+        // `-e` takes one string for xfce4-terminal; `-x` takes the rest of the arguments.
+        let found = detect_terminal(None, &only(&["xfce4-terminal"]));
+        assert_eq!(
+            found,
+            Some(vec!["xfce4-terminal".to_string(), "-x".to_string()])
+        );
+    }
+
+    #[test]
+    fn env_terminal_keeps_its_arguments_before_the_run_flag() {
+        let found = detect_terminal(Some("kitty --single-instance"), &only(&["kitty", "xterm"]));
+        assert_eq!(
+            found,
+            Some(vec![
+                "kitty".to_string(),
+                "--single-instance".to_string(),
+                "-e".to_string()
+            ])
+        );
+        // The run flag is the one of the program, not of its arguments.
+        let found = detect_terminal(
+            Some("/usr/bin/gnome-terminal --window --maximize"),
+            &only(&["/usr/bin/gnome-terminal"]),
+        );
+        assert_eq!(
+            found,
+            Some(vec![
+                "/usr/bin/gnome-terminal".to_string(),
+                "--window".to_string(),
+                "--maximize".to_string(),
+                "--".to_string()
+            ])
+        );
+        // Only the program is looked up in PATH, and a blank value is no terminal.
+        assert_eq!(
+            detect_terminal(Some("nope --x"), &only(&["xterm"])),
+            Some(vec!["xterm".to_string(), "-e".to_string()])
+        );
+        assert_eq!(
+            detect_terminal(Some("   "), &only(&["xterm"])),
+            Some(vec!["xterm".to_string(), "-e".to_string()])
         );
     }
 
