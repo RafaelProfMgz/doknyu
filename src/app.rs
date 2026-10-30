@@ -17,7 +17,7 @@ use crate::ui::components::{ToastKind, modal};
 use crate::ui::fonts::SANS_SEMIBOLD;
 use crate::ui::prefs;
 use crate::ui::style;
-use crate::ui::theme::{ThemeMode, palette, resolve};
+use crate::ui::theme::{ThemeMode, resolve};
 use crate::ui::tokens::{BORDER_WIDTH, ROW_HEIGHT, SPACE_1, SPACE_2, SPACE_6, TEXT_LG};
 use crate::views::containers::{self, ContainersState};
 use crate::views::detail::{self, DetailState};
@@ -994,13 +994,11 @@ impl App {
         let Some(open) = &self.dock else {
             return self.screen_content();
         };
-        let colors = palette(&self.theme());
         let dock_view = || {
             dock::view(
                 open,
                 self.container_info(&open.container_id),
                 self.detail.as_ref(),
-                colors,
             )
         };
         if open.maximized {

@@ -12,7 +12,7 @@ use crate::ui::components::{chip, icon_button, panel_header};
 use crate::ui::fonts::SANS_MEDIUM;
 use crate::ui::icons::Icon;
 use crate::ui::style;
-use crate::ui::tokens::{Palette, SPACE_2, SPACE_4, TEXT};
+use crate::ui::tokens::{SPACE_2, SPACE_4, TEXT};
 use crate::views::detail::{DetailState, logs, stats};
 
 const TABS: [DockTab; 3] = [DockTab::Logs, DockTab::Stats, DockTab::Terminal];
@@ -32,7 +32,6 @@ pub fn view<'a>(
     dock: &'a Dock,
     info: Option<&'a ContainerInfo>,
     detail: Option<&'a DetailState>,
-    palette: &Palette,
 ) -> Element<'a, Message> {
     let mut title = row![
         text(info.map_or(dock.container_id.as_str(), |c| c.name.as_str()))
@@ -65,7 +64,7 @@ pub fn view<'a>(
     ];
 
     let body: Element<'a, Message> = match (dock.tab, detail) {
-        (DockTab::Logs, Some(detail)) => container(logs::view(detail, palette))
+        (DockTab::Logs, Some(detail)) => container(logs::view(detail))
             .style(style::container::bg)
             .into(),
         (DockTab::Stats, Some(detail)) => {
@@ -89,7 +88,6 @@ pub fn view<'a>(
 mod tests {
     use super::*;
     use crate::model::ContainerState;
-    use crate::ui::tokens::{DARK, LIGHT};
 
     #[test]
     fn view_builds_for_every_tab_and_size() {
@@ -110,9 +108,9 @@ mod tests {
                         status_text: String::new(),
                         ports: vec![],
                     };
-                    let _: Element<'_, Message> = view(&dock, Some(&info), Some(&detail), &DARK);
+                    let _: Element<'_, Message> = view(&dock, Some(&info), Some(&detail));
                 }
-                let _: Element<'_, Message> = view(&dock, None, None, &LIGHT);
+                let _: Element<'_, Message> = view(&dock, None, None);
             }
         }
     }

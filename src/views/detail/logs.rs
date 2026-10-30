@@ -28,9 +28,7 @@ use crate::ui::components::{chip, icon_button, search_field};
 use crate::ui::fonts::MONO;
 use crate::ui::icons::Icon;
 use crate::ui::style;
-use crate::ui::tokens::{
-    BORDER_WIDTH, LOG_LINE_HEIGHT, Palette, SPACE_2, SPACE_3, SPACE_4, TEXT_SM,
-};
+use crate::ui::tokens::{BORDER_WIDTH, LOG_LINE_HEIGHT, SPACE_2, SPACE_3, SPACE_4, TEXT_SM};
 
 /// Widget id of the search field of the logs, so `FocusLogSearch` can focus it.
 pub const SEARCH_ID: &str = "logs-search";
@@ -303,9 +301,7 @@ fn lines<'a>(d: &'a DetailState) -> Element<'a, Message> {
 }
 
 /// The Logs tab of the dock.
-/// The palette is no longer needed here (the colors come from the theme); the parameter stays
-/// so the dock does not change.
-pub fn view<'a>(d: &'a DetailState, _p: &Palette) -> Element<'a, Message> {
+pub fn view<'a>(d: &'a DetailState) -> Element<'a, Message> {
     let body: Element<'a, Message> = if d.logs.is_empty() {
         center(text(t!("logs.empty").into_owned()).style(style::text::muted))
             .padding(SPACE_4)
@@ -330,7 +326,7 @@ mod tests {
     use crate::app::Message;
     use crate::docker::{DockerClient, FakeClient};
     use crate::model::{LogLine, LogStream};
-    use crate::ui::tokens::{DARK, LOG_LINE_HEIGHT};
+    use crate::ui::tokens::LOG_LINE_HEIGHT;
 
     fn line(text: &str) -> LogLine {
         LogLine {
@@ -493,7 +489,7 @@ mod tests {
     fn view_builds_for_every_state() {
         use crate::views::detail::DetailState;
         let mut d = DetailState::new("web-id".into());
-        let _: iced::Element<'_, Message> = view(&d, &DARK);
+        let _: iced::Element<'_, Message> = view(&d);
         for i in 0..50 {
             d.logs.push(LogLine {
                 stream: if i % 3 == 0 {
@@ -506,21 +502,21 @@ mod tests {
             });
         }
         d.rebuild_editor();
-        let _: iced::Element<'_, Message> = view(&d, &DARK);
+        let _: iced::Element<'_, Message> = view(&d);
         d.timestamps = true;
         d.set_query("error".into());
         assert!(d.window.current.is_some(), "the band behind the match");
-        let _: iced::Element<'_, Message> = view(&d, &DARK);
+        let _: iced::Element<'_, Message> = view(&d);
         d.follow = false;
         d.from_bottom = 100.0;
         d.viewport_h = 200.0;
         d.set_query("nothing".into());
         assert!(d.window.current.is_none());
-        let _: iced::Element<'_, Message> = view(&d, &DARK);
+        let _: iced::Element<'_, Message> = view(&d);
         // A selection holds the window while the buffer grows past it.
         d.window.frozen = true;
         d.logs.push(line("one more"));
-        let _: iced::Element<'_, Message> = view(&d, &DARK);
+        let _: iced::Element<'_, Message> = view(&d);
     }
 
     #[test]
