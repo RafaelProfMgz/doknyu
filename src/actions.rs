@@ -20,8 +20,12 @@ pub enum ActionId {
     DockLogs,
     /// Shows the stats of the selected container in the dock.
     DockStats,
+    /// Shows the shell of the selected container in the dock.
+    DockTerminal,
     ToggleTimestamps,
     CopyLogs,
+    /// Opens a shell in the dock's (or selected) running container in the system terminal.
+    OpenExternalTerminal,
     OpenPalette,
     SelectNext,
     SelectPrev,
@@ -80,7 +84,7 @@ const fn def_of(
 }
 
 /// Every action, in the order the palette lists them when nothing else ranks them.
-static ALL: [ActionDef; 24] = [
+static ALL: [ActionDef; 26] = [
     def_of(
         ActionId::GoContainers,
         "actions.go_containers",
@@ -130,12 +134,28 @@ static ALL: [ActionDef; 24] = [
         true,
     ),
     def_of(
+        ActionId::DockTerminal,
+        "actions.dock_terminal",
+        Some(Shortcut {
+            ctrl: true,
+            shift: true,
+            key: "T",
+        }),
+        true,
+    ),
+    def_of(
         ActionId::ToggleTimestamps,
         "actions.toggle_timestamps",
         None,
         true,
     ),
     def_of(ActionId::CopyLogs, "actions.copy_logs", None, true),
+    def_of(
+        ActionId::OpenExternalTerminal,
+        "actions.open_external_terminal",
+        None,
+        true,
+    ),
     def_of(
         ActionId::OpenPalette,
         "actions.open_palette",
@@ -243,11 +263,14 @@ pub fn available(app: &App, id: ActionId) -> bool {
         | ThemeDark | ThemeLight | Escape => true,
         ToggleDock | PruneVolumes => connected,
         // Works from the maximized dock too: it does not need the list, only the selection.
-        DockLogs | DockStats => {
+        DockLogs | DockStats | DockTerminal => {
             connected && app.containers.confirm_remove.is_none() && has_selection()
         }
         ToggleTimestamps | FocusLogSearch => logs_open,
         CopyLogs => logs_open && app.detail.as_ref().is_some_and(|d| !d.logs.is_empty()),
+        OpenExternalTerminal => {
+            connected && app.terminal_target().is_some_and(|c| c.state.is_running())
+        }
         Retry => matches!(app.conn, Connection::Failed(_)),
         FocusSearch | SelectNext | SelectPrev => list_usable,
         // Volumes and networks have nothing to open, start or restart.
@@ -312,6 +335,15 @@ mod tests {
     fn dock_stats_is_in_the_palette_with_its_shortcut() {
         assert!(def(ActionId::DockStats).in_palette);
         assert_eq!(tip(ActionId::DockStats, "Stats"), "Stats (Ctrl ⇧ S)");
+    }
+
+    #[test]
+    fn dock_terminal_is_in_the_palette_with_its_shortcut() {
+        assert!(def(ActionId::DockTerminal).in_palette);
+        assert_eq!(
+            tip(ActionId::DockTerminal, "Terminal"),
+            "Terminal (Ctrl ⇧ T)"
+        );
     }
 
     #[test]

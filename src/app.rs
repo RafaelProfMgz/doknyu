@@ -6,6 +6,7 @@ use std::time::Duration;
 use futures::{Stream, StreamExt};
 use iced::widget::{Id, center, column, container, pane_grid, row, rule, stack, text};
 use iced::{Element, Length, Subscription, Task, Theme};
+use iced_term::actions::Action as TermAction;
 use rust_i18n::t;
 
 use crate::actions::{self, ActionId};
@@ -13,12 +14,14 @@ use crate::docker::DockerClient;
 use crate::error::DockerError;
 use crate::keymap;
 use crate::model::{ContainerInfo, DockerEvent, ResourceKind};
+use crate::terminal_launcher;
 use crate::ui::components::{ToastKind, modal};
 use crate::ui::prefs;
 use crate::ui::style;
 use crate::ui::theme::{ThemeMode, resolve};
 use crate::ui::tokens::{BORDER_WIDTH, ROW_HEIGHT, SPACE_1};
 use crate::views::containers::{self, ContainersState};
+use crate::views::detail::terminal::{self, TerminalState};
 use crate::views::detail::{self, DetailState};
 use crate::views::networks::{self, NetworksState};
 use crate::views::palette::{self, PaletteState};
@@ -103,6 +106,15 @@ pub enum Message {
     Networks(networks::Msg),
     /// Something in the container shown in the dock (logs today).
     Detail(detail::Msg),
+    /// An event of the embedded terminal session (output, the shell exiting, a resize).
+    Terminal(iced_term::Event),
+    /// "New session" on the Terminal tab after the last one ended.
+    TerminalNewSession,
+    /// The left mouse button went down anywhere. The terminal unfocuses itself on a click
+    /// outside it, but the app is not told, so it asks (see `App::terminal_focused`).
+    MousePressed,
+    /// Answer to that question: whether the terminal widget has the focus.
+    TerminalFocus(bool),
     Docker(DockerEvent),
     EventsEnded,
     /// The wait after the events stream ended is over: check the daemon again.
@@ -127,6 +139,8 @@ pub enum Message {
     PaneResized(pane_grid::ResizeEvent),
     /// A button, shortcut or the palette asked for an action; the only way to run one.
     Action(ActionId),
+    /// The system terminal was asked to open (or failed to).
+    TerminalLaunched(Result<(), DockerError>),
     /// A key was pressed. `captured` is true when a widget (a text input) already used it.
     Key {
         key: iced::keyboard::Key,
@@ -158,6 +172,17 @@ pub struct App {
     pub dock: Option<Dock>,
     /// What the dock tabs keep for the container it shows; exists exactly while `dock` does.
     pub detail: Option<DetailState>,
+    /// The shell session of the Terminal tab. It is not in `detail` (a session cannot be
+    /// cloned) but has the same life: `close_dock` and showing another container drop it,
+    /// together with the subscription that feeds it (see `views::detail::terminal`).
+    pub terminal: TerminalState,
+    /// The terminal widget has the keyboard focus: Esc and the keys without Ctrl, which the
+    /// keymap would take, belong to the shell (see `App::on_key`). Set when the tab opens and
+    /// by `MousePressed` asking the widget after each click, so a click outside clears it; false
+    /// whenever the tab is not on screen or the palette is.
+    pub terminal_focused: bool,
+    /// The `docker` CLI is on `PATH` (the embedded terminal runs it); read once at start.
+    pub docker_cli: bool,
     /// The command palette, while it is open.
     pub palette: Option<PaletteState>,
     /// Scroll offset of the palette results, to keep the cursor in view.
@@ -313,6 +338,9 @@ impl App {
             sidebar_collapsed: false,
             dock: None,
             detail: None,
+            terminal: TerminalState::default(),
+            terminal_focused: false,
+            docker_cli: terminal_launcher::docker_cli_available(),
             palette: None,
             palette_scroll_y: 0.0,
             config_dir,
@@ -350,7 +378,33 @@ impl App {
         Task::perform(ping(self.client.clone()), Message::Pinged)
     }
 
+    /// Handles a message. A change that makes iced build the widget tree again from scratch (a
+    /// toast, the maximized dock) drops the state of the terminal widget, its focus included, so
+    /// the focus is asked for again when the app thinks the terminal has it.
     pub fn update(&mut self, m: Message) -> Task<Message> {
+        let shape = self.view_shape();
+        let task = self.dispatch(m);
+        if self.terminal_focused && self.view_shape() != shape {
+            Task::batch([task, self.focus_terminal()])
+        } else {
+            task
+        }
+    }
+
+    /// What decides the root of the widget tree: a different one is a different tree, and the
+    /// state of every widget (a terminal's focus) is lost.
+    fn view_shape(&self) -> [bool; 6] {
+        [
+            !self.toasts.is_empty(),
+            self.palette.is_some(),
+            self.containers.confirm_remove.is_some(),
+            self.volumes.confirm.is_some(),
+            self.networks.confirm_remove.is_some(),
+            self.dock.as_ref().is_some_and(|d| d.maximized),
+        ]
+    }
+
+    fn dispatch(&mut self, m: Message) -> Task<Message> {
         if matches!(m, Message::Pinged(_)) {
             self.pinging = false;
         }
@@ -439,6 +493,7 @@ impl App {
             Message::EventsRetry => self.start_ping(),
             Message::SystemTheme(mode) => {
                 self.system_mode = mode;
+                self.sync_terminal_theme();
                 Task::none()
             }
             Message::ToggleSidebar => {
@@ -452,6 +507,7 @@ impl App {
                 }
                 // Opening what is already shown keeps its tab, size and logs.
                 if self.dock.as_ref().is_none_or(|d| d.container_id != id) {
+                    self.drop_terminal();
                     self.detail = Some(DetailState::new(id.clone()));
                     self.dock = Some(Dock {
                         container_id: id,
@@ -488,8 +544,45 @@ impl App {
                         detail.reset_scroll();
                         task = detail::scroll_list_to(0.0);
                     }
+                    // A session goes on behind another tab (its subscription must), but the
+                    // keyboard is the app's again.
+                    self.terminal_focused = false;
+                    if tab == DockTab::Terminal {
+                        self.try_start_terminal();
+                        task = Task::batch([task, self.focus_terminal()]);
+                    }
                 }
                 task
+            }
+            Message::Terminal(iced_term::Event::BackendCall(id, cmd)) => {
+                let action = self.terminal.handle(id, cmd);
+                self.on_terminal_action(action)
+            }
+            Message::TerminalNewSession => {
+                if self.terminal.active_id.is_some() {
+                    return Task::none();
+                }
+                self.terminal.ended = false;
+                if self.try_start_terminal() {
+                    self.focus_terminal()
+                } else {
+                    Task::none()
+                }
+            }
+            Message::MousePressed => match (&self.terminal.session, self.terminal_tab_shown()) {
+                (Some(session), true) => {
+                    iced::widget::operation::is_focused(session.widget_id().clone())
+                        .map(Message::TerminalFocus)
+                }
+                _ => {
+                    self.terminal_focused = false;
+                    Task::none()
+                }
+            },
+            Message::TerminalFocus(focused) => {
+                self.terminal_focused =
+                    focused && self.terminal.active_id.is_some() && self.terminal_tab_shown();
+                Task::none()
             }
             Message::ToggleMaximize => {
                 let mut task = Task::none();
@@ -512,6 +605,12 @@ impl App {
                 Task::none()
             }
             Message::Action(id) => self.run_action(id),
+            Message::TerminalLaunched(result) => {
+                if let Err(e) = result {
+                    self.push_toast(friendly_error(&e), Some(format!("{e:?}")));
+                }
+                Task::none()
+            }
             Message::Key {
                 key,
                 mods,
@@ -572,9 +671,20 @@ impl App {
                 }
                 None => Task::none(),
             },
+            DockTerminal => match self.containers.selected.clone() {
+                Some(id) => {
+                    let open = self.update(Message::OpenDock(id));
+                    let tab = self.update(Message::DockTab(DockTab::Terminal));
+                    // Already on the tab: the shell gets the keyboard back.
+                    Task::batch([open, tab, self.focus_terminal()])
+                }
+                None => Task::none(),
+            },
             ToggleTimestamps => self.update(Message::Detail(detail::Msg::ToggleTimestamps)),
             CopyLogs => self.update(Message::Detail(detail::Msg::Copy)),
             OpenPalette => {
+                // Focusing its input takes the focus from the terminal widget too.
+                self.terminal_focused = false;
                 self.palette = Some(PaletteState::default());
                 self.palette_scroll_y = 0.0;
                 iced::widget::operation::focus(Id::new(palette::PALETTE_INPUT_ID))
@@ -611,6 +721,17 @@ impl App {
                 let go = self.update(Message::Navigate(Screen::Volumes));
                 Task::batch([go, self.update_volumes(volumes::Msg::AskPrune)])
             }
+            OpenExternalTerminal => match self.terminal_target().map(|c| c.id.clone()) {
+                Some(id) => Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || terminal_launcher::launch(&id))
+                            .await
+                            .unwrap_or_else(|e| Err(DockerError::Other(e.to_string())))
+                    },
+                    Message::TerminalLaunched,
+                ),
+                None => Task::none(),
+            },
             ThemeSystem => self.set_theme_mode(ThemeMode::System),
             ThemeDark => self.set_theme_mode(ThemeMode::Dark),
             ThemeLight => self.set_theme_mode(ThemeMode::Light),
@@ -630,6 +751,14 @@ impl App {
     /// The number the sidebar shows beside Networks; none unless connected.
     fn network_count(&self) -> Option<usize> {
         (self.conn == Connection::Ok).then_some(self.networks.items.len())
+    }
+
+    /// The container a terminal would open in: the dock's, else the selected one.
+    pub fn terminal_target(&self) -> Option<&ContainerInfo> {
+        match &self.dock {
+            Some(dock) => self.container_info(&dock.container_id),
+            None => self.selected_container(),
+        }
     }
 
     /// The selected container, if it is in the list.
@@ -758,6 +887,7 @@ impl App {
     /// two quick changes cannot race and the last one wins. A failure is only logged.
     fn set_theme_mode(&mut self, mode: ThemeMode) -> Task<Message> {
         self.theme_mode = mode;
+        self.sync_terminal_theme();
         if let Some(dir) = &self.config_dir
             && let Err(e) = prefs::save_theme_mode(dir, mode)
         {
@@ -821,6 +951,12 @@ impl App {
         mods: iced::keyboard::Modifiers,
         captured: bool,
     ) -> Task<Message> {
+        // The terminal gets the keyboard before the keymap: the keymap turns Esc into `Escape`
+        // even when a widget used the key (`captured`), and the plain letters would move the
+        // list under the shell. Only Ctrl+Shift shortcuts and Ctrl+J get through.
+        if self.terminal_has_keys() && !keymap::for_app_with_terminal(key, mods) {
+            return Task::none();
+        }
         // The palette sits above everything: it takes the arrows and Enter, even when its text
         // input already used them, and leaves only Esc and Ctrl shortcuts to the keymap.
         if let Some(state) = &self.palette {
@@ -915,6 +1051,11 @@ impl App {
                 {
                     self.containers.confirm_remove = None;
                 }
+                // The container may have started while the Terminal tab waited for it. The
+                // session starts without the focus: this comes from a reload, and the user may be
+                // typing in the palette or answering a dialog. A click or reopening the tab
+                // focuses it.
+                self.try_start_terminal();
                 Task::none()
             }
             // The container of the dock is gone and the daemon says so.
@@ -1348,10 +1489,108 @@ impl App {
         self.push_toast_of(ToastKind::Warning, t!("dock.gone").into_owned(), None);
     }
 
-    /// Closes the dock and forgets what its tabs kept.
+    /// Closes the dock and forgets what its tabs kept, the shell session included: with it goes
+    /// the `docker exec` of the PTY and the subscription (they must end in the same update).
     fn close_dock(&mut self) {
         self.dock = None;
         self.detail = None;
+        self.drop_terminal();
+    }
+
+    /// Drops the terminal session and everything that says it has the focus.
+    ///
+    /// Known and accepted: `iced_term`'s stream panics when its event channel closes outside an
+    /// `Exit`, which can happen when a live session is dropped. The panic is in the subscription
+    /// task only (one line on stderr) and the app goes on.
+    fn drop_terminal(&mut self) {
+        self.terminal.reset();
+        self.terminal_focused = false;
+    }
+
+    /// The Terminal tab is the one on screen.
+    fn terminal_tab_shown(&self) -> bool {
+        self.dock
+            .as_ref()
+            .is_some_and(|d| d.tab == DockTab::Terminal)
+    }
+
+    /// The shell has the keyboard: its widget has the focus and nothing is on top of it.
+    fn terminal_has_keys(&self) -> bool {
+        self.terminal_focused
+            && self.terminal.active_id.is_some()
+            && self.terminal_tab_shown()
+            && self.palette.is_none()
+            // A dialog is on top too: Esc and Enter are its.
+            && self.containers.confirm_remove.is_none()
+            && self.volumes.confirm.is_none()
+            && self.networks.confirm_remove.is_none()
+    }
+
+    /// A session is due: the Terminal tab is on screen without one, the container runs and the
+    /// `docker` CLI exists. Not after one ended, until the user asks for another.
+    pub fn wants_terminal_session(&self) -> bool {
+        self.conn == Connection::Ok
+            && self.docker_cli
+            && !self.terminal.ended
+            && self.terminal.active_id.is_none()
+            && self.terminal_tab_shown()
+            && self.terminal_target().is_some_and(|c| c.state.is_running())
+    }
+
+    /// Starts the session if one is due. A PTY that does not open ends it right there (with a
+    /// toast), so the tab does not retry on every list reload.
+    fn try_start_terminal(&mut self) -> bool {
+        if !self.wants_terminal_session() {
+            return false;
+        }
+        let Some(container) = self.dock.as_ref().map(|d| d.container_id.clone()) else {
+            return false;
+        };
+        let palette = resolve(self.theme_mode, self.system_mode);
+        match self
+            .terminal
+            .start(|id| terminal::new_session(id, &container, palette))
+        {
+            Ok(()) => true,
+            Err(e) => {
+                self.terminal.ended = true;
+                self.push_toast(
+                    t!("terminal.start_failed").into_owned(),
+                    Some(e.to_string()),
+                );
+                false
+            }
+        }
+    }
+
+    /// Gives the keyboard to the terminal widget, if its session is on screen.
+    fn focus_terminal(&mut self) -> Task<Message> {
+        match (&self.terminal.session, self.terminal_tab_shown()) {
+            (Some(session), true) => {
+                self.terminal_focused = true;
+                iced_term::TerminalView::focus(session.widget_id().clone())
+            }
+            _ => {
+                self.terminal_focused = false;
+                Task::none()
+            }
+        }
+    }
+
+    /// What the emulator asked of the app. `Shutdown` is the shell ending (`exit`, or the
+    /// container stopping, which ends the CLI): the session goes, the tab says so.
+    fn on_terminal_action(&mut self, action: TermAction) -> Task<Message> {
+        if action == TermAction::Shutdown {
+            self.terminal.shutdown();
+            self.terminal_focused = false;
+        }
+        Task::none()
+    }
+
+    /// Paints the session in the colors of the active theme.
+    fn sync_terminal_theme(&mut self) {
+        self.terminal
+            .set_palette(resolve(self.theme_mode, self.system_mode));
     }
 
     /// Connection problems send the user to the onboarding; anything else becomes a toast.
@@ -1475,6 +1714,8 @@ impl App {
                 open,
                 self.container_info(&open.container_id),
                 self.detail.as_ref(),
+                &self.terminal,
+                self.docker_cli,
             )
         };
         if open.maximized {
@@ -1524,7 +1765,9 @@ impl App {
         let stats = self
             .stats_source()
             .map_or_else(Subscription::none, detail::stats::subscription);
-        Subscription::batch([system_theme, conn, keys, logs, stats])
+        // Alive as long as the session is, whichever tab is shown (see `views::detail::terminal`).
+        let shell = terminal::subscription(&self.terminal);
+        Subscription::batch([system_theme, conn, keys, logs, stats, shell])
     }
 
     /// The log stream wanted right now: only with Docker reachable, the dock open and its
@@ -1558,13 +1801,16 @@ impl App {
     }
 }
 
-/// A key press as a message; any other event is dropped.
+/// A key press, or the left mouse button going down, as a message; any other event is dropped.
 fn key_event(
     event: iced::event::Event,
     status: iced::event::Status,
     _window: iced::window::Id,
 ) -> Option<Message> {
     match event {
+        iced::event::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) => {
+            Some(Message::MousePressed)
+        }
         iced::event::Event::Keyboard(iced::keyboard::Event::KeyPressed {
             key, modifiers, ..
         }) => Some(Message::Key {
@@ -1670,6 +1916,9 @@ mod tests {
     fn app_with(fake: &Arc<FakeClient>) -> App {
         let mut app = App::new(fake.clone()).0;
         app.pinging = false;
+        // The Terminal tab would open a PTY and run `docker`: tests that want the session to be
+        // started (none does) have to ask for it.
+        app.docker_cli = false;
         app
     }
 
@@ -4200,6 +4449,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn open_external_terminal_needs_a_running_container() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        assert!(actions::def(ActionId::OpenExternalTerminal).in_palette);
+        assert!(
+            actions::def(ActionId::OpenExternalTerminal)
+                .shortcut
+                .is_none()
+        );
+        let running = app
+            .containers
+            .items
+            .iter()
+            .find(|c| c.state.is_running())
+            .unwrap()
+            .id
+            .clone();
+        let stopped = app
+            .containers
+            .items
+            .iter()
+            .find(|c| !c.state.is_running())
+            .unwrap()
+            .id
+            .clone();
+
+        app.containers.selected = None;
+        assert!(!actions::available(&app, ActionId::OpenExternalTerminal));
+        app.containers.selected = Some(stopped.clone());
+        assert!(!actions::available(&app, ActionId::OpenExternalTerminal));
+        app.containers.selected = Some(running.clone());
+        assert!(actions::available(&app, ActionId::OpenExternalTerminal));
+
+        // The dock's container wins over the selection.
+        app.dock = Some(Dock {
+            container_id: stopped,
+            tab: DockTab::Logs,
+            maximized: false,
+        });
+        assert!(!actions::available(&app, ActionId::OpenExternalTerminal));
+        app.dock.as_mut().unwrap().container_id = running;
+        assert!(actions::available(&app, ActionId::OpenExternalTerminal));
+
+        app.set_failed(DockerError::NotRunning);
+        assert!(!actions::available(&app, ActionId::OpenExternalTerminal));
+    }
+
+    #[tokio::test]
+    async fn failed_terminal_launch_becomes_a_toast_with_details() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::TerminalLaunched(Ok(())));
+        assert!(app.toasts.is_empty());
+        let _ = app.update(Message::TerminalLaunched(Err(DockerError::Other(
+            "no terminal emulator found".into(),
+        ))));
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(app.toasts[0].kind, ToastKind::Error);
+        assert!(
+            app.toasts[0]
+                .details
+                .as_deref()
+                .is_some_and(|d| d.contains("no terminal emulator found"))
+        );
+    }
+
+    #[tokio::test]
     async fn dock_logs_needs_docker() {
         let fake = Arc::new(FakeClient::with_sample_data());
         let mut app = loaded_app(&fake).await;
@@ -5836,5 +6152,369 @@ mod tests {
         );
         let _ = app.update(Message::Navigate(Screen::Containers));
         assert_eq!(app.networks.hovered, None);
+    }
+
+    // ---- Terminal tab (task 5.2) ----
+    //
+    // These never build a real `Terminal` (that opens a PTY and runs `docker`): they stand in for
+    // a live session with `active_id`, and keep `docker_cli` false or the container stopped
+    // wherever a session would otherwise start.
+
+    use iced::keyboard::Modifiers;
+    use iced::keyboard::key::Named;
+    use iced_term::actions::Action as TermAction;
+
+    /// A loaded app with the dock of `id` open on the Terminal tab and a pretend live session.
+    async fn terminal_app(id: &str) -> App {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        app.containers.selected = Some(id.into());
+        let _ = app.update(Message::OpenDock(id.into()));
+        let _ = app.update(Message::DockTab(DockTab::Terminal));
+        app.terminal.active_id = Some(1);
+        app.terminal_focused = true;
+        app
+    }
+
+    #[tokio::test]
+    async fn a_session_is_wanted_only_for_a_running_container_with_the_cli_on_its_tab() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        assert!(!app.wants_terminal_session(), "the Logs tab is on screen");
+        app.dock.as_mut().unwrap().tab = DockTab::Terminal;
+        app.docker_cli = true;
+        assert!(app.wants_terminal_session());
+
+        app.docker_cli = false;
+        assert!(!app.wants_terminal_session(), "no docker command");
+        app.docker_cli = true;
+        app.terminal.ended = true;
+        assert!(
+            !app.wants_terminal_session(),
+            "the last one ended: the user decides"
+        );
+        app.terminal.ended = false;
+        app.terminal.active_id = Some(0);
+        assert!(!app.wants_terminal_session(), "one is already running");
+        app.terminal.active_id = None;
+
+        let _ = app.update(Message::OpenDock("worker-id".into()));
+        app.dock.as_mut().unwrap().tab = DockTab::Terminal;
+        assert!(!app.wants_terminal_session(), "the container is stopped");
+        app.dock.as_mut().unwrap().container_id = "web-id".into();
+        app.conn = Connection::Checking;
+        assert!(!app.wants_terminal_session(), "Docker is not reachable");
+    }
+
+    #[tokio::test]
+    async fn stopped_container_tab_starts_nothing_and_says_so() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        app.docker_cli = true;
+        let _ = app.update(Message::OpenDock("worker-id".into()));
+        let _ = app.update(Message::DockTab(DockTab::Terminal));
+        assert_eq!(app.terminal.active_id, None);
+        assert!(!app.terminal.ended);
+        assert!(!app.terminal_focused);
+        let _ = app.view();
+    }
+
+    #[tokio::test]
+    async fn tab_without_the_docker_cli_starts_nothing() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        let _ = app.update(Message::DockTab(DockTab::Terminal));
+        assert_eq!(app.terminal.active_id, None);
+        assert!(!app.terminal_focused);
+        let _ = app.view();
+    }
+
+    #[tokio::test]
+    async fn exec_closed_on_leave_detail() {
+        // Closing the dock.
+        let mut app = terminal_app("web-id").await;
+        app.terminal.ended = true;
+        let _ = app.update(Message::CloseDock);
+        assert_eq!(app.terminal.active_id, None);
+        assert!(app.terminal.session.is_none());
+        assert!(!app.terminal_focused);
+        assert!(!app.terminal.ended, "the next container starts fresh");
+
+        // Showing another container.
+        let mut app = terminal_app("web-id").await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        assert_eq!(
+            app.terminal.active_id,
+            Some(1),
+            "the same container keeps it"
+        );
+        let _ = app.update(Message::OpenDock("db-id".into()));
+        assert_eq!(app.terminal.active_id, None);
+        assert!(!app.terminal_focused);
+
+        // The container disappearing from the list.
+        let mut app = terminal_app("web-id").await;
+        app.containers.set_items(vec![]);
+        let _ = app.update(Message::Containers(containers::Msg::Loaded(
+            app.load_seq,
+            Ok(vec![]),
+        )));
+        assert_eq!(app.terminal.active_id, None);
+
+        // Docker becoming unreachable, and the toggle that closes the dock.
+        let mut app = terminal_app("web-id").await;
+        app.set_failed(DockerError::NotRunning);
+        assert_eq!(app.terminal.active_id, None);
+        let mut app = terminal_app("web-id").await;
+        let _ = app.update(Message::ToggleDock);
+        assert_eq!(app.terminal.active_id, None);
+    }
+
+    #[tokio::test]
+    async fn navigating_screens_keeps_the_session_with_the_dock() {
+        let mut app = terminal_app("web-id").await;
+        let _ = app.update(Message::Navigate(Screen::Volumes));
+        assert!(app.dock.is_some());
+        assert_eq!(app.terminal.active_id, Some(1));
+    }
+
+    #[tokio::test]
+    async fn the_session_outlives_its_tab() {
+        let mut app = terminal_app("web-id").await;
+        let _ = app.update(Message::DockTab(DockTab::Logs));
+        // The subscription must go on with another tab on screen: pausing it with the shell
+        // writing hangs the app. Only the focus goes.
+        assert_eq!(app.terminal.active_id, Some(1));
+        assert!(!app.terminal_focused);
+        let _ = app.update(Message::DockTab(DockTab::Stats));
+        assert_eq!(app.terminal.active_id, Some(1));
+    }
+
+    #[tokio::test]
+    async fn shutdown_marks_ended() {
+        let mut app = terminal_app("web-id").await;
+        let _ = app.on_terminal_action(TermAction::Shutdown);
+        assert_eq!(app.terminal.active_id, None);
+        assert!(app.terminal.session.is_none());
+        assert!(app.terminal.ended);
+        assert!(!app.terminal_focused);
+        // And it stays that way: a reload of the list does not start another one.
+        app.docker_cli = true;
+        assert!(!app.wants_terminal_session());
+        let _ = app.view();
+    }
+
+    #[tokio::test]
+    async fn other_actions_of_the_terminal_change_nothing() {
+        let mut app = terminal_app("web-id").await;
+        let _ = app.on_terminal_action(TermAction::ChangeTitle("x".into()));
+        let _ = app.on_terminal_action(TermAction::Ignore);
+        assert_eq!(app.terminal.active_id, Some(1));
+        assert!(!app.terminal.ended);
+    }
+
+    #[tokio::test]
+    async fn events_of_a_dropped_session_are_ignored() {
+        let mut app = terminal_app("web-id").await;
+        app.terminal.active_id = Some(8);
+        let exit =
+            iced_term::BackendCommand::ProcessAlacrittyEvent(iced_term::AlacrittyEvent::Exit);
+        let _ = app.update(Message::Terminal(iced_term::Event::BackendCall(7, exit)));
+        assert_eq!(app.terminal.active_id, Some(8));
+        assert!(!app.terminal.ended);
+    }
+
+    #[tokio::test]
+    async fn new_session_forgets_the_end() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        app.docker_cli = true;
+        // Stopped, so nothing starts for real.
+        let _ = app.update(Message::OpenDock("worker-id".into()));
+        let _ = app.update(Message::DockTab(DockTab::Terminal));
+        app.terminal.ended = true;
+        let _ = app.update(Message::TerminalNewSession);
+        assert!(!app.terminal.ended);
+        assert_eq!(app.terminal.active_id, None);
+    }
+
+    #[tokio::test]
+    async fn dock_terminal_opens_the_selected_container_on_the_terminal_tab() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        app.containers.selected = None;
+        assert!(!actions::available(&app, ActionId::DockTerminal));
+
+        // Stopped: the tab only has the hint, so no session is started.
+        app.containers.selected = Some("worker-id".into());
+        assert!(actions::available(&app, ActionId::DockTerminal));
+        let _ = app.run_action(ActionId::DockTerminal);
+        assert_eq!(app.dock.as_ref().map(|d| d.tab), Some(DockTab::Terminal));
+        assert_eq!(
+            app.detail.as_ref().map(|d| d.id.as_str()),
+            Some("worker-id")
+        );
+
+        let _ = app.update(Message::CloseDock);
+        let _ = app.update(char_key("T", Modifiers::CTRL | Modifiers::SHIFT, false));
+        assert_eq!(app.dock.as_ref().map(|d| d.tab), Some(DockTab::Terminal));
+
+        app.set_failed(DockerError::NotRunning);
+        assert!(!actions::available(&app, ActionId::DockTerminal));
+    }
+
+    #[tokio::test]
+    async fn terminal_focus_message_counts_only_with_a_session_on_its_tab() {
+        let mut app = terminal_app("web-id").await;
+        app.terminal_focused = false;
+        let _ = app.update(Message::TerminalFocus(true));
+        assert!(app.terminal_focused);
+        let _ = app.update(Message::TerminalFocus(false));
+        assert!(!app.terminal_focused);
+
+        let _ = app.update(Message::DockTab(DockTab::Logs));
+        let _ = app.update(Message::TerminalFocus(true));
+        assert!(!app.terminal_focused, "another tab is on screen");
+        let _ = app.update(Message::DockTab(DockTab::Terminal));
+        app.terminal.active_id = None;
+        let _ = app.update(Message::TerminalFocus(true));
+        assert!(!app.terminal_focused, "no session");
+        // A click anywhere with no terminal on screen does nothing.
+        let _ = app.update(Message::MousePressed);
+        assert!(!app.terminal_focused);
+    }
+
+    #[tokio::test]
+    async fn a_focused_terminal_gets_esc_and_the_plain_keys() {
+        let mut app = terminal_app("web-id").await;
+        let selected = app.containers.selected.clone();
+        let _ = app.update(key(Named::Escape, true));
+        assert!(app.dock.is_some(), "Esc is the shell's");
+        for plain in ["j", "k", "s", "r", "/"] {
+            let _ = app.update(char_key(plain, Modifiers::empty(), true));
+        }
+        for named in [Named::ArrowDown, Named::Enter, Named::Delete] {
+            let _ = app.update(key(named, true));
+        }
+        assert_eq!(app.containers.selected, selected);
+        assert_eq!(app.containers.confirm_remove, None);
+        assert!(app.terminal_focused);
+    }
+
+    #[tokio::test]
+    async fn a_focused_terminal_keeps_ctrl_letters_for_the_shell() {
+        let mut app = terminal_app("web-id").await;
+        let collapsed = app.sidebar_collapsed;
+        for c in ["c", "d", "b", "f", "1", "2"] {
+            let _ = app.update(char_key(c, Modifiers::CTRL, true));
+        }
+        assert_eq!(app.sidebar_collapsed, collapsed, "Ctrl+B is the shell's");
+        assert_eq!(app.screen, Screen::Containers, "Ctrl+2 is the shell's");
+        assert!(app.dock.is_some());
+    }
+
+    #[tokio::test]
+    async fn ctrl_j_closes_the_dock_over_a_focused_terminal() {
+        let mut app = terminal_app("web-id").await;
+        let _ = app.update(char_key("j", Modifiers::CTRL, true));
+        assert_eq!(app.dock, None);
+        assert_eq!(app.terminal.active_id, None);
+        assert!(!app.terminal_focused);
+    }
+
+    #[tokio::test]
+    async fn ctrl_shift_shortcuts_work_over_a_focused_terminal() {
+        let mut app = terminal_app("web-id").await;
+        let _ = app.update(char_key("S", Modifiers::CTRL | Modifiers::SHIFT, true));
+        assert_eq!(app.dock.as_ref().map(|d| d.tab), Some(DockTab::Stats));
+        assert!(!app.terminal_focused);
+        assert_eq!(app.terminal.active_id, Some(1), "the shell goes on");
+
+        let mut app = terminal_app("web-id").await;
+        let _ = app.update(char_key("P", Modifiers::CTRL | Modifiers::SHIFT, true));
+        assert!(app.palette.is_some());
+        assert!(!app.terminal_focused, "the palette takes the focus");
+    }
+
+    #[tokio::test]
+    async fn an_unfocused_terminal_tab_keeps_the_usual_keys() {
+        let mut app = terminal_app("web-id").await;
+        app.terminal_focused = false;
+        let _ = app.update(key(Named::Escape, false));
+        assert_eq!(
+            app.dock, None,
+            "Esc closes the dock when the shell has no focus"
+        );
+        assert_eq!(app.terminal.active_id, None);
+
+        let mut app = terminal_app("web-id").await;
+        app.terminal_focused = false;
+        let _ = app.update(char_key("b", Modifiers::CTRL, false));
+        assert!(app.sidebar_collapsed);
+    }
+
+    #[tokio::test]
+    async fn the_view_shape_tells_when_the_widget_tree_is_rebuilt() {
+        let mut app = terminal_app("web-id").await;
+        let before = app.view_shape();
+        app.push_toast("x".into(), None);
+        assert_ne!(
+            app.view_shape(),
+            before,
+            "a toast wraps the window in a stack"
+        );
+        let before = app.view_shape();
+        app.containers.confirm_remove = Some("web-id".into());
+        assert_ne!(app.view_shape(), before);
+        let before = app.view_shape();
+        app.dock.as_mut().unwrap().maximized = true;
+        assert_ne!(app.view_shape(), before);
+        assert_eq!(app.view_shape(), app.view_shape());
+    }
+
+    #[tokio::test]
+    async fn changing_the_theme_without_a_session_does_nothing_odd() {
+        let mut app = terminal_app("web-id").await;
+        let _ = app.run_action(ActionId::ThemeLight);
+        let _ = app.update(Message::SystemTheme(iced::theme::Mode::Dark));
+        assert_eq!(app.terminal.active_id, Some(1));
+    }
+
+    #[tokio::test]
+    async fn esc_closes_a_modal_over_a_focused_terminal() {
+        let mut app = terminal_app("web-id").await;
+        app.containers.confirm_remove = Some("web-id".into());
+        app.terminal_focused = true;
+        assert!(!app.terminal_has_keys(), "the dialog is on top");
+        let _ = app.update(key(Named::Escape, false));
+        assert_eq!(app.containers.confirm_remove, None);
+        assert!(app.dock.is_some(), "only the dialog closed");
+
+        let mut app = terminal_app("web-id").await;
+        app.volumes.confirm = Some(volumes::VolumeConfirm::Prune(vec![]));
+        assert!(!app.terminal_has_keys());
+        app.volumes.confirm = None;
+        app.networks.confirm_remove = Some("x".into());
+        assert!(!app.terminal_has_keys());
+        app.networks.confirm_remove = None;
+        assert!(app.terminal_has_keys());
+        app.palette = Some(PaletteState::default());
+        assert!(!app.terminal_has_keys());
+    }
+
+    #[tokio::test]
+    async fn a_list_reload_does_not_take_the_focus_from_the_palette() {
+        let mut app = terminal_app("web-id").await;
+        let _ = app.update(Message::Action(ActionId::OpenPalette));
+        assert!(app.palette.is_some());
+        let items = app.containers.items.clone();
+        let _ = app.update(Message::Containers(containers::Msg::Loaded(
+            app.load_seq,
+            Ok(items),
+        )));
+        assert!(!app.terminal_focused);
+        assert!(app.palette.is_some());
     }
 }

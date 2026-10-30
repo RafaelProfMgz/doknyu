@@ -7,6 +7,7 @@ pub mod keymap;
 pub mod logbuf;
 pub mod model;
 pub mod stats;
+pub mod terminal_launcher;
 pub mod ui;
 pub mod views;
 
