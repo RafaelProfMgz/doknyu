@@ -22,6 +22,7 @@ use crate::ui::tokens::{BORDER_WIDTH, ROW_HEIGHT, SPACE_1, SPACE_2, SPACE_6, TEX
 use crate::views::containers::{self, ContainersState};
 use crate::views::detail::{self, DetailState};
 use crate::views::palette::{self, PaletteState};
+use crate::views::volumes::{self, VolumesState};
 use crate::views::widgets::{friendly_error, toast_stack};
 use crate::views::{dock, onboarding, sidebar, status_bar};
 
@@ -98,6 +99,7 @@ pub enum Message {
     /// Shows or hides the technical details of a toast.
     ToggleToast(usize),
     Containers(containers::Msg),
+    Volumes(volumes::Msg),
     /// Something in the container shown in the dock (logs today).
     Detail(detail::Msg),
     Docker(DockerEvent),
@@ -106,6 +108,8 @@ pub enum Message {
     EventsRetry,
     /// The debounce window after a container event is over: reload the list.
     ReloadContainers,
+    /// The debounce window after a volume event is over: reload the volumes.
+    ReloadVolumes,
     /// The system theme (light/dark) was read or changed.
     SystemTheme(iced::theme::Mode),
     ToggleSidebar,
@@ -141,6 +145,7 @@ pub struct App {
     pub conn: Connection,
     pub screen: Screen,
     pub containers: ContainersState,
+    pub volumes: VolumesState,
     pub toasts: Vec<Toast>,
     pub theme_mode: ThemeMode,
     /// Last theme reported by the system; `Mode::None` until it answers or has no preference.
@@ -168,10 +173,48 @@ pub struct App {
     reload_scheduled: bool,
     /// Number of the latest list reload; answers from older ones are discarded.
     load_seq: u64,
+    /// Same as `reload_scheduled` and `load_seq`, for the volume list.
+    volumes_reload_scheduled: bool,
+    volumes_load_seq: u64,
     /// When the current events subscription was opened.
     events_started: Option<tokio::time::Instant>,
     /// How long to wait the next time the events stream ends.
     events_backoff: Duration,
+}
+
+/// Row of a list of `len` rows that a step down (`forward`) or up from `current` lands on,
+/// stopping at the ends. Without a current row, down picks the first and up the last; `None`
+/// for an empty list.
+fn step_target(len: usize, current: Option<usize>, forward: bool) -> Option<usize> {
+    let last = len.checked_sub(1)?;
+    Some(match (current, forward) {
+        (None, true) => 0,
+        (None, false) => last,
+        (Some(i), true) => (i + 1).min(last),
+        (Some(i), false) => i.saturating_sub(1),
+    })
+}
+
+/// Scrolls the list `list_id` so row `index` is fully visible, if it is not. `scroll_y` is the
+/// offset last reported by the list and is updated, since programmatic scrolling is not
+/// reported back.
+fn scroll_row_into_view(
+    list_id: &'static str,
+    index: usize,
+    viewport_h: f32,
+    scroll_y: &mut f32,
+) -> Task<Message> {
+    let Some(y) = containers::scroll_offset(index, ROW_HEIGHT, viewport_h, *scroll_y) else {
+        return Task::none();
+    };
+    *scroll_y = y;
+    iced::widget::operation::scroll_to(
+        Id::new(list_id),
+        iced::widget::operation::AbsoluteOffset {
+            x: None,
+            y: Some(y),
+        },
+    )
 }
 
 /// Maps a system locale (`pt_BR.UTF-8`, `en_US`, `fr`...) to a supported locale.
@@ -252,6 +295,7 @@ impl App {
             conn: Connection::Checking,
             screen: Screen::Containers,
             containers: ContainersState::default(),
+            volumes: VolumesState::default(),
             toasts: Vec::new(),
             theme_mode: config_dir
                 .as_deref()
@@ -270,6 +314,8 @@ impl App {
             removing: std::collections::HashSet::new(),
             reload_scheduled: false,
             load_seq: 0,
+            volumes_reload_scheduled: false,
+            volumes_load_seq: 0,
             events_started: None,
             events_backoff: EVENTS_BACKOFF_MIN,
         };
@@ -303,13 +349,14 @@ impl App {
                 self.screen = screen;
                 // The row under the cursor is not drawn on the new screen, so no exit comes.
                 self.containers.hovered = None;
+                self.volumes.hovered = None;
                 Task::none()
             }
             Message::Pinged(Ok(())) => {
                 self.conn = Connection::Ok;
                 self.events_generation += 1;
                 self.events_started = Some(tokio::time::Instant::now());
-                self.load_containers()
+                Task::batch([self.load_containers(), self.load_volumes()])
             }
             // Whatever the error, the daemon is not usable: the onboarding explains it and the
             // retry timer checks again. Carrying on would reopen the events stream in a loop.
@@ -338,6 +385,15 @@ impl App {
                 Task::none()
             }
             Message::Containers(m) => self.update_containers(m),
+            Message::Volumes(m) => self.update_volumes(m),
+            Message::ReloadVolumes => {
+                self.volumes_reload_scheduled = false;
+                if self.conn == Connection::Ok {
+                    self.load_volumes()
+                } else {
+                    Task::none()
+                }
+            }
             Message::Detail(m) => match &mut self.detail {
                 Some(detail) => detail.update(m),
                 // The dock was closed while the message was on its way.
@@ -472,7 +528,10 @@ impl App {
             GoNetworks => self.update(Message::Navigate(Screen::Networks)),
             ToggleSidebar => self.update(Message::ToggleSidebar),
             ToggleDock => self.update(Message::ToggleDock),
-            FocusSearch => iced::widget::operation::focus(Id::new(containers::SEARCH_ID)),
+            FocusSearch => iced::widget::operation::focus(Id::new(match self.screen {
+                Screen::Volumes => volumes::SEARCH_ID,
+                _ => containers::SEARCH_ID,
+            })),
             FocusLogSearch => iced::widget::operation::focus(Id::new(detail::logs::SEARCH_ID)),
             DockLogs => match self.containers.selected.clone() {
                 Some(id) => {
@@ -506,7 +565,17 @@ impl App {
             }
             RestartSelected => on_selected(self, Msg::Restart),
             // Never removes right away: the dialog asks first.
+            RemoveSelected if self.screen == Screen::Volumes => {
+                match self.volumes.selected.clone() {
+                    Some(name) => self.update_volumes(volumes::Msg::AskRemove(name)),
+                    None => Task::none(),
+                }
+            }
             RemoveSelected => on_selected(self, Msg::AskRemove),
+            PruneVolumes => {
+                let go = self.update(Message::Navigate(Screen::Volumes));
+                Task::batch([go, self.update_volumes(volumes::Msg::AskPrune)])
+            }
             ThemeSystem => self.set_theme_mode(ThemeMode::System),
             ThemeDark => self.set_theme_mode(ThemeMode::Dark),
             ThemeLight => self.set_theme_mode(ThemeMode::Light),
@@ -518,60 +587,73 @@ impl App {
         }
     }
 
+    /// The number the sidebar shows beside Volumes; none unless connected.
+    fn volume_count(&self) -> Option<usize> {
+        (self.conn == Connection::Ok).then_some(self.volumes.items.len())
+    }
+
     /// The selected container, if it is in the list.
     fn selected_container(&self) -> Option<&ContainerInfo> {
         let id = self.containers.selected.as_deref()?;
         self.containers.items.iter().find(|c| c.id == id)
     }
 
-    /// Moves the selection one row down or up the visible list, stopping at its ends. Without a
-    /// selection, down picks the first row and up the last. Scrolls the list if the new row is
-    /// not fully on screen.
+    /// Moves the selection one row down or up the visible list of the current screen, stopping
+    /// at its ends. Without a selection, down picks the first row and up the last. Scrolls the
+    /// list if the new row is not fully on screen.
     fn select_step(&mut self, forward: bool) -> Task<Message> {
-        let visible = self.containers.visible();
-        let Some(last) = visible.len().checked_sub(1) else {
-            return Task::none();
-        };
-        let current = self
-            .containers
-            .selected
-            .as_deref()
-            .and_then(|id| visible.iter().position(|c| c.id == id));
-        let target = match (current, forward) {
-            (None, true) => 0,
-            (None, false) => last,
-            (Some(i), true) => (i + 1).min(last),
-            (Some(i), false) => i.saturating_sub(1),
-        };
-        let id = visible[target].id.clone();
-        self.containers.selected = Some(id);
-        let Some(y) = containers::scroll_offset(
-            target,
-            ROW_HEIGHT,
-            self.containers.viewport_h,
-            self.containers.scroll_y,
-        ) else {
-            return Task::none();
-        };
-        // Programmatic scrolling is not reported back, so remember where it went.
-        self.containers.scroll_y = y;
-        iced::widget::operation::scroll_to(
-            Id::new(containers::LIST_ID),
-            iced::widget::operation::AbsoluteOffset {
-                x: None,
-                y: Some(y),
-            },
-        )
+        match self.screen {
+            Screen::Containers => {
+                let visible = self.containers.visible();
+                let current = self
+                    .containers
+                    .selected
+                    .as_deref()
+                    .and_then(|id| visible.iter().position(|c| c.id == id));
+                let Some(target) = step_target(visible.len(), current, forward) else {
+                    return Task::none();
+                };
+                let id = visible[target].id.clone();
+                self.containers.selected = Some(id);
+                scroll_row_into_view(
+                    containers::LIST_ID,
+                    target,
+                    self.containers.viewport_h,
+                    &mut self.containers.scroll_y,
+                )
+            }
+            Screen::Volumes => {
+                let visible = self.volumes.visible();
+                let current = self
+                    .volumes
+                    .selected
+                    .as_deref()
+                    .and_then(|name| visible.iter().position(|v| v.name == name));
+                let Some(target) = step_target(visible.len(), current, forward) else {
+                    return Task::none();
+                };
+                let name = visible[target].name.clone();
+                self.volumes.selected = Some(name);
+                scroll_row_into_view(
+                    volumes::LIST_ID,
+                    target,
+                    self.volumes.viewport_h,
+                    &mut self.volumes.scroll_y,
+                )
+            }
+            Screen::Networks => Task::none(),
+        }
     }
 
     /// Esc closes one layer, the topmost: the command palette, then the removal dialog, then the
     /// dock (the selection in the logs first, then the log search, if it has text), then the
-    /// search.
+    /// search of the screen.
     fn close_top_layer(&mut self) {
         if self.palette.take().is_some() {
             return;
         }
-        if self.containers.confirm_remove.take().is_some() {
+        if self.containers.confirm_remove.take().is_some() || self.volumes.confirm.take().is_some()
+        {
             return;
         }
         // Selected text in the logs: Esc only deselects it.
@@ -595,9 +677,16 @@ impl App {
             let _ = self.update(Message::CloseDock);
             return;
         }
-        if !self.containers.query.is_empty() {
-            self.containers.query.clear();
-            self.containers.keep_selection_visible();
+        match self.screen {
+            Screen::Containers if !self.containers.query.is_empty() => {
+                self.containers.query.clear();
+                self.containers.keep_selection_visible();
+            }
+            Screen::Volumes if !self.volumes.query.is_empty() => {
+                self.volumes.query.clear();
+                self.volumes.keep_selection_visible();
+            }
+            _ => {}
         }
     }
 
@@ -692,19 +781,24 @@ impl App {
         }
         // With the removal dialog open, Enter presses its main button, even if a text input
         // still holds the event. Esc is left to the keymap and cancels.
-        let dialog_open = containers::remove_force(&self.containers);
-        if let Some(force) = dialog_open
+        let remove_force = containers::remove_force(&self.containers);
+        let dialog_open = remove_force.is_some() || self.volumes.confirm.is_some();
+        if dialog_open
             && *key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter)
             && mods.is_empty()
         {
-            return self.update_containers(containers::Msg::ConfirmRemove { force });
+            return match remove_force {
+                Some(force) => self.update_containers(containers::Msg::ConfirmRemove { force }),
+                // Does nothing if the dialog has nothing to confirm (nothing to prune).
+                None => self.update_volumes(volumes::Msg::Confirm),
+            };
         }
         let Some(id) = keymap::resolve(key, mods, captured) else {
             return Task::none();
         };
         let id = self.contextual(id, mods);
         // The dialog only answers to Enter and Esc; nothing else reaches the window behind it.
-        if dialog_open.is_some() && id != ActionId::Escape {
+        if dialog_open && id != ActionId::Escape {
             return Task::none();
         }
         // A shortcut that works on the window behind the palette closes it first.
@@ -835,8 +929,128 @@ impl App {
         }
     }
 
-    /// Container events refresh the list, debounced so a burst causes a single reload.
-    /// Volume and network events are handled in phase 4.
+    fn update_volumes(&mut self, m: volumes::Msg) -> Task<Message> {
+        use volumes::{Msg, VolumeConfirm};
+        match m {
+            // Reloads can overlap: only the latest one counts.
+            Msg::Loaded(seq, _) if seq != self.volumes_load_seq => Task::none(),
+            Msg::Loaded(_, Ok(items)) => {
+                self.volumes.set_items(items);
+                Task::none()
+            }
+            Msg::Loaded(_, Err(e)) => self.fail(e),
+            Msg::Query(query) => {
+                self.volumes.query = query;
+                self.volumes.keep_selection_visible();
+                Task::none()
+            }
+            Msg::Select(name) => {
+                self.volumes.selected = Some(name);
+                Task::none()
+            }
+            Msg::Hover(name) => {
+                self.volumes.hovered = Some(name);
+                Task::none()
+            }
+            Msg::Leave(name) => {
+                if self.volumes.hovered.as_deref() == Some(name.as_str()) {
+                    self.volumes.hovered = None;
+                }
+                Task::none()
+            }
+            // A volume in use is not offered for removal: Docker would refuse it anyway.
+            Msg::AskRemove(name) => {
+                let removable = self
+                    .volumes
+                    .items
+                    .iter()
+                    .any(|v| v.name == name && v.used_by.is_empty())
+                    && !self.volumes.pending.contains(&name);
+                if removable {
+                    self.volumes.confirm = Some(VolumeConfirm::Remove(name));
+                }
+                Task::none()
+            }
+            Msg::AskPrune => {
+                self.volumes.confirm = Some(VolumeConfirm::Prune(self.volumes.unused()));
+                Task::none()
+            }
+            Msg::Confirm => {
+                if !self.volumes.can_confirm() {
+                    return Task::none();
+                }
+                match self.volumes.confirm.take() {
+                    Some(VolumeConfirm::Remove(name)) => self.remove_volume(name),
+                    Some(VolumeConfirm::Prune(_)) => {
+                        let client = self.client.clone();
+                        Task::perform(async move { client.prune_volumes().await }, |r| {
+                            Message::Volumes(Msg::Pruned(r))
+                        })
+                    }
+                    None => Task::none(),
+                }
+            }
+            Msg::Cancel => {
+                self.volumes.confirm = None;
+                Task::none()
+            }
+            // The list is refreshed by the Docker events the removal causes.
+            Msg::Removed(name, result) => {
+                self.volumes.pending.remove(&name);
+                match result {
+                    Ok(()) => Task::none(),
+                    Err(e) => self.fail(e),
+                }
+            }
+            Msg::Pruned(Ok(names)) => {
+                let text = if names.len() == 1 {
+                    t!("volumes.pruned_one", count = 1)
+                } else {
+                    t!("volumes.pruned", count = names.len())
+                };
+                self.push_toast_of(ToastKind::Info, text.into_owned(), None);
+                Task::none()
+            }
+            Msg::Pruned(Err(e)) => self.fail(e),
+            Msg::Scrolled { offset, height } => {
+                self.volumes.scroll_y = offset;
+                self.volumes.viewport_h = height;
+                Task::none()
+            }
+            Msg::Resized(height) => {
+                self.volumes.viewport_h = height;
+                Task::none()
+            }
+        }
+    }
+
+    /// Removes a volume unless a removal of it is already running.
+    fn remove_volume(&mut self, name: String) -> Task<Message> {
+        if !self.volumes.pending.insert(name.clone()) {
+            return Task::none();
+        }
+        let client = self.client.clone();
+        Task::perform(
+            async move {
+                let result = client.remove_volume(&name).await;
+                (name, result)
+            },
+            |(name, result)| Message::Volumes(volumes::Msg::Removed(name, result)),
+        )
+    }
+
+    fn load_volumes(&mut self) -> Task<Message> {
+        self.volumes_load_seq += 1;
+        let seq = self.volumes_load_seq;
+        let client = self.client.clone();
+        Task::perform(async move { client.list_volumes().await }, move |r| {
+            Message::Volumes(volumes::Msg::Loaded(seq, r))
+        })
+    }
+
+    /// Container events refresh the container list, volume events the volume list; each is
+    /// debounced so a burst causes a single reload. A container created or removed also
+    /// changes who uses each volume, so it refreshes the volumes too.
     fn on_docker_event(&mut self, ev: DockerEvent) -> Task<Message> {
         // The stream is alive.
         self.events_backoff = EVENTS_BACKOFF_MIN;
@@ -863,16 +1077,23 @@ impl App {
             detail.resubscribe();
             rescroll = detail::scroll_list_to(0.0);
         }
-        if ev.kind != ResourceKind::Container || self.reload_scheduled {
-            return rescroll;
-        }
-        self.reload_scheduled = true;
-        Task::batch([
-            rescroll,
-            Task::perform(tokio::time::sleep(RELOAD_DEBOUNCE), |()| {
+        let mut tasks = vec![rescroll];
+        if ev.kind == ResourceKind::Container && !self.reload_scheduled {
+            self.reload_scheduled = true;
+            tasks.push(Task::perform(tokio::time::sleep(RELOAD_DEBOUNCE), |()| {
                 Message::ReloadContainers
-            }),
-        ])
+            }));
+        }
+        let changes_volumes = ev.kind == ResourceKind::Volume
+            || (ev.kind == ResourceKind::Container
+                && matches!(ev.action.as_str(), "create" | "destroy"));
+        if changes_volumes && !self.volumes_reload_scheduled {
+            self.volumes_reload_scheduled = true;
+            tasks.push(Task::perform(tokio::time::sleep(RELOAD_DEBOUNCE), |()| {
+                Message::ReloadVolumes
+            }));
+        }
+        Task::batch(tasks)
     }
 
     /// Waits (with backoff) before checking the daemon again after the events stream ended.
@@ -893,6 +1114,8 @@ impl App {
         self.conn = Connection::Failed(e);
         self.containers.confirm_remove = None;
         self.containers.hovered = None;
+        self.volumes.confirm = None;
+        self.volumes.hovered = None;
         self.close_dock();
     }
 
@@ -977,9 +1200,10 @@ impl App {
             Connection::Ok => self.workspace(),
         };
         let count = (self.conn == Connection::Ok).then_some(self.containers.items.len());
+        let volumes = self.volume_count();
         let body = column![
             row![
-                sidebar::view(&self.screen, self.sidebar_collapsed, count),
+                sidebar::view(&self.screen, self.sidebar_collapsed, count, volumes),
                 container(main).width(Length::Fill).height(Length::Fill),
             ]
             .height(Length::Fill),
@@ -998,6 +1222,10 @@ impl App {
                 card,
                 Message::Containers(containers::Msg::CancelRemove),
             ),
+            None => body,
+        };
+        let body = match volumes::dialog(&self.volumes) {
+            Some(card) => modal(body, card, Message::Volumes(volumes::Msg::Cancel)),
             None => body,
         };
         let body = match &self.palette {
@@ -1047,7 +1275,7 @@ impl App {
     fn screen_content(&self) -> Element<'_, Message> {
         let title = match &self.screen {
             Screen::Containers => return containers::view(&self.containers),
-            Screen::Volumes => t!("sidebar.volumes"),
+            Screen::Volumes => return volumes::view(&self.volumes),
             Screen::Networks => t!("sidebar.networks"),
         };
         container(
@@ -1822,20 +2050,18 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn volume_and_network_events_do_not_reload() {
+    async fn network_events_do_not_reload() {
         let fake = Arc::new(FakeClient::with_sample_data());
         let mut app = loaded_app(&fake).await;
-        let before = list_calls(&fake);
-        for kind in [ResourceKind::Volume, ResourceKind::Network] {
-            let ev = DockerEvent {
-                kind,
-                action: "create".into(),
-                id: "x".into(),
-            };
-            let handled = settle(&mut app, Message::Docker(ev.clone())).await;
-            assert_eq!(handled.len(), 1);
-        }
-        assert_eq!(list_calls(&fake), before);
+        let before = fake.calls().len();
+        let ev = DockerEvent {
+            kind: ResourceKind::Network,
+            action: "create".into(),
+            id: "x".into(),
+        };
+        let handled = settle(&mut app, Message::Docker(ev)).await;
+        assert_eq!(handled.len(), 1);
+        assert_eq!(fake.calls().len(), before);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2726,9 +2952,14 @@ mod tests {
         for id in SELECTED {
             assert!(!actions::available(&app, id), "{id:?}");
         }
-        // Selection, but another screen.
+        // Selection, but another screen: Volumes has its own selection (and no container
+        // actions), Networks has no list yet.
         app.containers.selected = Some("web-id".into());
         app.screen = Screen::Volumes;
+        for id in SELECTED {
+            assert!(!actions::available(&app, id), "{id:?}");
+        }
+        app.screen = Screen::Networks;
         for id in SELECTED.into_iter().chain([ActionId::SelectNext]) {
             assert!(!actions::available(&app, id), "{id:?}");
         }
@@ -3149,7 +3380,7 @@ mod tests {
         let mut app = loaded_app(&fake).await;
         app.containers.selected = Some("web-id".into());
         open_palette(&mut app).await;
-        let _ = app.update(Message::PaletteQuery("volumes".into()));
+        let _ = app.update(Message::PaletteQuery("go to vol".into()));
         let _ = app.update(key(Named::ArrowDown, true));
         assert_eq!(app.palette.as_ref().unwrap().cursor, 0, "one result only");
         let _ = app.update(Message::PaletteQuery(String::new()));
@@ -4249,5 +4480,532 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---- Volumes screen (task 4.1) ----
+
+    fn volume_event(action: &str, name: &str) -> DockerEvent {
+        DockerEvent {
+            kind: ResourceKind::Volume,
+            action: action.into(),
+            id: name.into(),
+        }
+    }
+
+    fn volume_list_calls(fake: &FakeClient) -> usize {
+        fake.calls().iter().filter(|c| *c == "list_volumes").count()
+    }
+
+    fn vol_msg(m: volumes::Msg) -> Message {
+        Message::Volumes(m)
+    }
+
+    /// Connected, on the Volumes screen: `db_data` (used by `db`) and `cache` (unused).
+    async fn volumes_app(fake: &Arc<FakeClient>) -> App {
+        let mut app = loaded_app(fake).await;
+        let _ = app.run_action(ActionId::GoVolumes);
+        assert_eq!(app.screen, Screen::Volumes);
+        app
+    }
+
+    fn named_key(named: iced::keyboard::key::Named) -> Message {
+        key(named, false)
+    }
+
+    #[tokio::test]
+    async fn connecting_loads_the_volumes() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let app = loaded_app(&fake).await;
+        assert_eq!(app.volumes.items.len(), 2);
+        assert_eq!(volume_list_calls(&fake), 1);
+    }
+
+    #[tokio::test]
+    async fn in_use_volume_cannot_be_removed() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = volumes_app(&fake).await;
+        let _ = app.update(vol_msg(volumes::Msg::AskRemove("db_data".into())));
+        assert_eq!(app.volumes.confirm, None);
+
+        // Neither does the Delete key or the palette action offer it.
+        app.volumes.selected = Some("db_data".into());
+        assert!(!actions::available(&app, ActionId::RemoveSelected));
+        settle(&mut app, key(iced::keyboard::key::Named::Delete, false)).await;
+        assert_eq!(app.volumes.confirm, None);
+        assert!(!fake.calls().iter().any(|c| c.starts_with("remove_volume")));
+    }
+
+    #[tokio::test]
+    async fn unused_volume_is_removed_after_confirming() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = volumes_app(&fake).await;
+        let _ = app.update(vol_msg(volumes::Msg::AskRemove("cache".into())));
+        assert_eq!(
+            app.volumes.confirm,
+            Some(volumes::VolumeConfirm::Remove("cache".into()))
+        );
+        assert!(!fake.calls().iter().any(|c| c.starts_with("remove_volume")));
+        settle(&mut app, vol_msg(volumes::Msg::Confirm)).await;
+        assert!(fake.calls().contains(&"remove_volume:cache".to_string()));
+        assert_eq!(app.volumes.confirm, None);
+        assert!(app.volumes.pending.is_empty());
+        assert!(app.toasts.is_empty());
+        // The daemon's `destroy` event refreshes the list.
+        settle(&mut app, Message::Docker(volume_event("destroy", "cache"))).await;
+        let names: Vec<_> = app.volumes.items.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, vec!["db_data"]);
+    }
+
+    #[tokio::test]
+    async fn remove_conflict_keeps_item_and_toasts() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = volumes_app(&fake).await;
+        let _ = app.update(vol_msg(volumes::Msg::AskRemove("cache".into())));
+        fake.fail_next(DockerError::Conflict("volume is in use".into()));
+        settle(&mut app, vol_msg(volumes::Msg::Confirm)).await;
+        assert_eq!(app.volumes.items.len(), 2, "the volume is still listed");
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(
+            app.toasts[0].text,
+            friendly_error(&DockerError::Conflict(String::new()))
+        );
+        assert!(app.volumes.pending.is_empty(), "the row is usable again");
+        assert_eq!(app.conn, Connection::Ok);
+    }
+
+    #[tokio::test]
+    async fn removing_a_volume_twice_runs_one_call() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = volumes_app(&fake).await;
+        let _ = app.update(vol_msg(volumes::Msg::AskRemove("cache".into())));
+        let first = app.update(vol_msg(volumes::Msg::Confirm));
+        // A second dialog for the same volume while the first removal is in flight.
+        let _ = app.update(vol_msg(volumes::Msg::AskRemove("cache".into())));
+        assert_eq!(
+            app.volumes.confirm, None,
+            "busy volumes are not asked about"
+        );
+        let _ = run(first).await;
+        assert_eq!(
+            fake.calls()
+                .iter()
+                .filter(|c| *c == "remove_volume:cache")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_dialog_lists_only_unused() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        fake.add_volume(crate::model::VolumeInfo {
+            name: "tmp".into(),
+            driver: "local".into(),
+            mountpoint: "/var/lib/docker/volumes/tmp/_data".into(),
+            used_by: vec![],
+        });
+        let mut app = loaded_app(&fake).await;
+        let _ = app.run_action(ActionId::GoVolumes);
+        let _ = app.update(vol_msg(volumes::Msg::AskPrune));
+        assert_eq!(
+            app.volumes.confirm,
+            Some(volumes::VolumeConfirm::Prune(vec![
+                "cache".into(),
+                "tmp".into()
+            ]))
+        );
+        let _ = app.view();
+        assert!(!fake.calls().contains(&"prune_volumes".to_string()));
+        settle(&mut app, vol_msg(volumes::Msg::Confirm)).await;
+        assert!(fake.calls().contains(&"prune_volumes".to_string()));
+        assert_eq!(app.volumes.confirm, None);
+    }
+
+    #[tokio::test]
+    async fn prune_with_nothing_unused_does_not_call_docker() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        fake.remove_volume("cache").await.unwrap();
+        let mut app = volumes_app(&fake).await;
+        let _ = app.update(vol_msg(volumes::Msg::AskPrune));
+        assert_eq!(
+            app.volumes.confirm,
+            Some(volumes::VolumeConfirm::Prune(vec![]))
+        );
+        settle(&mut app, vol_msg(volumes::Msg::Confirm)).await;
+        settle(&mut app, enter_key(false)).await;
+        assert!(!fake.calls().contains(&"prune_volumes".to_string()));
+        assert!(app.volumes.confirm.is_some(), "the dialog stays open");
+        let _ = app.view();
+    }
+
+    #[tokio::test]
+    async fn prune_result_toast_counts() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = volumes_app(&fake).await;
+        let text = |n: usize| {
+            if n == 1 {
+                t!("volumes.pruned_one", count = n).into_owned()
+            } else {
+                t!("volumes.pruned", count = n).into_owned()
+            }
+        };
+        for n in [3usize, 1, 0] {
+            let names = (0..n).map(|i| format!("v{i}")).collect();
+            let _ = app.update(vol_msg(volumes::Msg::Pruned(Ok(names))));
+            let last = app.toasts.last().expect("a toast");
+            assert_eq!(last.text, text(n));
+            assert_eq!(last.kind, ToastKind::Info);
+            assert!(last.text.contains(&n.to_string()));
+        }
+        assert_eq!(app.toasts.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn prune_from_the_dialog_toasts_the_removed_count() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = volumes_app(&fake).await;
+        let _ = app.update(vol_msg(volumes::Msg::AskPrune));
+        settle(&mut app, vol_msg(volumes::Msg::Confirm)).await;
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(
+            app.toasts[0].text,
+            t!("volumes.pruned_one", count = 1).into_owned()
+        );
+        settle(&mut app, Message::Docker(volume_event("destroy", "cache"))).await;
+        assert_eq!(app.volumes.items.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn prune_failure_toasts_the_error() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = volumes_app(&fake).await;
+        let _ = app.update(vol_msg(volumes::Msg::AskPrune));
+        fake.fail_next(DockerError::Other("boom".into()));
+        settle(&mut app, vol_msg(volumes::Msg::Confirm)).await;
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(app.toasts[0].kind, ToastKind::Error);
+        assert_eq!(app.volumes.items.len(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn volume_event_triggers_reload() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let before = volume_list_calls(&fake);
+        fake.remove_volume("cache").await.unwrap();
+        settle(&mut app, Message::Docker(volume_event("destroy", "cache"))).await;
+        assert_eq!(volume_list_calls(&fake), before + 1);
+        assert_eq!(app.volumes.items.len(), 1);
+        assert_eq!(list_calls(&fake), 1, "containers are not reloaded for it");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn burst_of_volume_events_reloads_once() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let before = volume_list_calls(&fake);
+        let tasks: Vec<_> = (0..5)
+            .map(|_| app.update(Message::Docker(volume_event("destroy", "x"))))
+            .collect();
+        let mut produced = Vec::new();
+        for task in tasks {
+            produced.extend(run(task).await);
+        }
+        assert_eq!(produced.len(), 1, "only the first event schedules a reload");
+        for m in produced {
+            settle(&mut app, m).await;
+        }
+        assert_eq!(volume_list_calls(&fake), before + 1);
+        // The window is over: the next event schedules again.
+        settle(&mut app, Message::Docker(volume_event("create", "y"))).await;
+        assert_eq!(volume_list_calls(&fake), before + 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn container_create_and_destroy_refresh_who_uses_each_volume() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        for action in ["create", "destroy"] {
+            let before = volume_list_calls(&fake);
+            settle(&mut app, Message::Docker(container_event(action))).await;
+            assert_eq!(volume_list_calls(&fake), before + 1, "{action}");
+        }
+        // A stop does not change which volumes are mounted.
+        let before = volume_list_calls(&fake);
+        settle(&mut app, Message::Docker(container_event("die"))).await;
+        assert_eq!(volume_list_calls(&fake), before);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn volume_reload_is_skipped_when_docker_is_unreachable() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::Docker(volume_event("destroy", "x")));
+        app.conn = Connection::Failed(DockerError::NotRunning);
+        let before = volume_list_calls(&fake);
+        assert!(run(app.update(Message::ReloadVolumes)).await.is_empty());
+        assert_eq!(volume_list_calls(&fake), before);
+        // The flag was cleared: a later event can schedule again.
+        app.conn = Connection::Ok;
+        let produced = run(app.update(Message::Docker(volume_event("create", "y")))).await;
+        assert_eq!(produced.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_older_volume_load_cannot_overwrite_a_newer_one() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = volumes_app(&fake).await;
+        let stale = app.volumes_load_seq;
+        settle(&mut app, Message::ReloadVolumes).await;
+        assert!(app.volumes_load_seq > stale);
+        let _ = app.update(vol_msg(volumes::Msg::Loaded(stale, Ok(vec![]))));
+        assert_eq!(app.volumes.items.len(), 2);
+        let _ = app.update(vol_msg(volumes::Msg::Loaded(
+            stale,
+            Err(DockerError::NotRunning),
+        )));
+        assert_eq!(app.conn, Connection::Ok);
+    }
+
+    #[tokio::test]
+    async fn volume_load_connection_error_goes_to_onboarding() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = volumes_app(&fake).await;
+        app.volumes.confirm = Some(volumes::VolumeConfirm::Prune(vec![]));
+        let seq = app.volumes_load_seq;
+        let _ = app.update(vol_msg(volumes::Msg::Loaded(
+            seq,
+            Err(DockerError::NotRunning),
+        )));
+        assert_eq!(app.conn, Connection::Failed(DockerError::NotRunning));
+        assert_eq!(app.volumes.confirm, None);
+        let _ = app.view();
+    }
+
+    #[tokio::test]
+    async fn volume_keyboard_selection_moves_in_the_visible_list() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = volumes_app(&fake).await;
+        // Visible order is by name: cache, db_data.
+        assert_eq!(app.volumes.selected, None);
+        let _ = app.update(key_msg("j", false));
+        assert_eq!(app.volumes.selected.as_deref(), Some("cache"));
+        let _ = app.update(named_key(iced::keyboard::key::Named::ArrowDown));
+        assert_eq!(app.volumes.selected.as_deref(), Some("db_data"));
+        let _ = app.update(key_msg("j", false));
+        assert_eq!(app.volumes.selected.as_deref(), Some("db_data"), "no wrap");
+        let _ = app.update(key_msg("k", false));
+        assert_eq!(app.volumes.selected.as_deref(), Some("cache"));
+        let _ = app.update(key_msg("k", false));
+        assert_eq!(app.volumes.selected.as_deref(), Some("cache"), "no wrap");
+        assert_eq!(app.containers.selected, None, "containers are untouched");
+        app.volumes.selected = None;
+        let _ = app.run_action(ActionId::SelectPrev);
+        assert_eq!(app.volumes.selected.as_deref(), Some("db_data"));
+    }
+
+    #[tokio::test]
+    async fn volume_selection_scrolls_the_row_into_view() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = volumes_app(&fake).await;
+        let row = crate::ui::tokens::ROW_HEIGHT;
+        app.volumes.selected = Some("cache".into());
+        let _ = app.update(vol_msg(volumes::Msg::Scrolled {
+            offset: 0.0,
+            height: row,
+        }));
+        let _ = app.run_action(ActionId::SelectNext);
+        assert_eq!(app.volumes.scroll_y, row, "db_data is the second row");
+        let _ = app.run_action(ActionId::SelectPrev);
+        assert_eq!(app.volumes.scroll_y, 0.0);
+    }
+
+    #[tokio::test]
+    async fn delete_enter_and_escape_drive_the_volume_dialog() {
+        use iced::keyboard::key::Named;
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = volumes_app(&fake).await;
+        app.volumes.selected = Some("cache".into());
+        settle(&mut app, key(Named::Delete, false)).await;
+        assert_eq!(
+            app.volumes.confirm,
+            Some(volumes::VolumeConfirm::Remove("cache".into()))
+        );
+        let _ = app.view();
+
+        // Esc cancels and removes nothing.
+        settle(&mut app, key(Named::Escape, false)).await;
+        assert_eq!(app.volumes.confirm, None);
+        assert!(!fake.calls().iter().any(|c| c.starts_with("remove_volume")));
+
+        // Behind the dialog the keys do nothing but Enter and Esc.
+        settle(&mut app, key(Named::Delete, false)).await;
+        let _ = app.update(key_msg("j", false));
+        let _ = app.update(key_msg("2", false));
+        assert_eq!(app.volumes.selected.as_deref(), Some("cache"));
+        assert!(!actions::available(&app, ActionId::SelectNext));
+
+        // Enter confirms, even if a text input holds the event.
+        settle(&mut app, enter_key(true)).await;
+        assert_eq!(app.volumes.confirm, None);
+        assert!(fake.calls().contains(&"remove_volume:cache".to_string()));
+    }
+
+    #[tokio::test]
+    async fn enter_on_the_prune_dialog_prunes() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = volumes_app(&fake).await;
+        let _ = app.update(vol_msg(volumes::Msg::AskPrune));
+        settle(&mut app, enter_key(false)).await;
+        assert!(fake.calls().contains(&"prune_volumes".to_string()));
+        assert_eq!(app.volumes.confirm, None);
+    }
+
+    #[tokio::test]
+    async fn enter_on_volumes_does_not_open_the_dock() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = volumes_app(&fake).await;
+        app.containers.selected = Some("web-id".into());
+        app.volumes.selected = Some("cache".into());
+        for id in [
+            ActionId::OpenSelected,
+            ActionId::StartStopSelected,
+            ActionId::RestartSelected,
+        ] {
+            assert!(!actions::available(&app, id), "{id:?}");
+        }
+        settle(&mut app, enter_key(false)).await;
+        assert!(app.dock.is_none());
+        assert!(!fake.calls().iter().any(|c| c.starts_with("start")));
+    }
+
+    #[tokio::test]
+    async fn escape_on_volumes_closes_layers_in_order() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = volumes_app(&fake).await;
+        app.volumes.query = "ca".into();
+        app.containers.query = "we".into();
+        app.volumes.selected = Some("cache".into());
+        app.volumes.confirm = Some(volumes::VolumeConfirm::Remove("cache".into()));
+        let _ = app.run_action(ActionId::Escape);
+        assert_eq!(app.volumes.confirm, None, "the dialog goes first");
+        assert_eq!(app.volumes.query, "ca");
+        let _ = app.run_action(ActionId::Escape);
+        assert_eq!(app.volumes.query, "", "then the search");
+        assert_eq!(
+            app.containers.query, "we",
+            "the other screen's search stays"
+        );
+        assert_eq!(app.volumes.selected.as_deref(), Some("cache"));
+    }
+
+    #[tokio::test]
+    async fn search_filters_volumes_and_keeps_the_selection_visible() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = volumes_app(&fake).await;
+        app.volumes.selected = Some("db_data".into());
+        let _ = app.update(vol_msg(volumes::Msg::Query("cach".into())));
+        assert_eq!(app.volumes.selected.as_deref(), Some("cache"));
+        let _ = app.view();
+    }
+
+    #[tokio::test]
+    async fn volume_search_is_focusable_only_on_the_volumes_screen() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = volumes_app(&fake).await;
+        assert!(actions::available(&app, ActionId::FocusSearch));
+        app.screen = Screen::Networks;
+        assert!(!actions::available(&app, ActionId::FocusSearch));
+        assert!(!actions::available(&app, ActionId::SelectNext));
+    }
+
+    #[tokio::test]
+    async fn remove_selected_on_volumes_opens_the_volume_dialog_not_the_container_one() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = volumes_app(&fake).await;
+        app.containers.selected = Some("web-id".into());
+        app.volumes.selected = Some("cache".into());
+        settle(&mut app, Message::Action(ActionId::RemoveSelected)).await;
+        assert_eq!(app.containers.confirm_remove, None);
+        assert_eq!(
+            app.volumes.confirm,
+            Some(volumes::VolumeConfirm::Remove("cache".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_action_is_a_palette_action_without_shortcut() {
+        let def = actions::def(ActionId::PruneVolumes);
+        assert!(def.in_palette);
+        assert_eq!(def.shortcut, None);
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        assert!(palette::matches(&app, "prune").contains(&ActionId::PruneVolumes));
+        app.conn = Connection::Failed(DockerError::NotRunning);
+        assert!(!actions::available(&app, ActionId::PruneVolumes));
+        assert!(palette::matches(&app, "prune").is_empty());
+    }
+
+    #[tokio::test]
+    async fn prune_action_from_containers_goes_to_volumes_and_asks() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        assert_eq!(app.screen, Screen::Containers);
+        // From the palette, which closes before running it.
+        let _ = app.update(Message::Action(ActionId::OpenPalette));
+        settle(&mut app, Message::PaletteRun(Some(ActionId::PruneVolumes))).await;
+        assert!(app.palette.is_none());
+        assert_eq!(app.screen, Screen::Volumes);
+        assert_eq!(
+            app.volumes.confirm,
+            Some(volumes::VolumeConfirm::Prune(vec!["cache".into()]))
+        );
+        assert!(!fake.calls().contains(&"prune_volumes".to_string()));
+        let _ = app.view();
+    }
+
+    #[tokio::test]
+    async fn sidebar_counts_the_volumes_while_connected() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        assert_eq!(app.volume_count(), Some(2));
+        app.conn = Connection::Failed(DockerError::NotRunning);
+        assert_eq!(app.volume_count(), None);
+        app.conn = Connection::Checking;
+        assert_eq!(app.volume_count(), None);
+        let _ = app.view();
+    }
+
+    #[tokio::test]
+    async fn volumes_view_builds_with_dock_dialog_and_toasts() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = volumes_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        app.volumes.selected = Some("cache".into());
+        app.volumes.hovered = Some("db_data".into());
+        app.volumes.pending.insert("cache".into());
+        for confirm in [
+            None,
+            Some(volumes::VolumeConfirm::Remove("cache".into())),
+            Some(volumes::VolumeConfirm::Prune(vec!["cache".into()])),
+        ] {
+            app.volumes.confirm = confirm;
+            let _ = app.view();
+        }
+        app.push_toast("x".into(), None);
+        let _ = app.update(Message::ToggleMaximize);
+        let _ = app.view();
+    }
+
+    #[tokio::test]
+    async fn navigating_away_clears_the_volume_hover() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = volumes_app(&fake).await;
+        let _ = app.update(vol_msg(volumes::Msg::Hover("cache".into())));
+        assert_eq!(app.volumes.hovered.as_deref(), Some("cache"));
+        let _ = app.update(vol_msg(volumes::Msg::Leave("other".into())));
+        assert_eq!(app.volumes.hovered.as_deref(), Some("cache"), "stale exit");
+        let _ = app.update(Message::Navigate(Screen::Containers));
+        assert_eq!(app.volumes.hovered, None);
     }
 }

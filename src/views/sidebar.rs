@@ -58,9 +58,14 @@ fn entry(
         .into()
 }
 
-/// Navigation column. `containers` is the number shown beside Containers; Volumes and Networks
-/// have no count until phase 4.
-pub fn view(current: &Screen, collapsed: bool, containers: Option<usize>) -> Element<'_, Message> {
+/// Navigation column. `containers` and `volumes` are the numbers shown beside their entries;
+/// Networks has no count until task 4.2.
+pub fn view(
+    current: &Screen,
+    collapsed: bool,
+    containers: Option<usize>,
+    volumes: Option<usize>,
+) -> Element<'_, Message> {
     let entries = column![
         entry(
             Icon::Box,
@@ -73,7 +78,7 @@ pub fn view(current: &Screen, collapsed: bool, containers: Option<usize>) -> Ele
         entry(
             Icon::Database,
             t!("sidebar.volumes").into_owned(),
-            None,
+            volumes,
             ActionId::GoVolumes,
             *current == Screen::Volumes,
             collapsed,
@@ -113,7 +118,7 @@ mod tests {
         for screen in [Screen::Containers, Screen::Volumes, Screen::Networks] {
             for collapsed in [false, true] {
                 for count in [None, Some(0), Some(12)] {
-                    let _: Element<'_, Message> = view(&screen, collapsed, count);
+                    let _: Element<'_, Message> = view(&screen, collapsed, count, count);
                 }
             }
         }
