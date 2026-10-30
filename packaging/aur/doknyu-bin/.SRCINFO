@@ -1,0 +1,25 @@
+pkgbase = doknyu-bin
+	pkgdesc = Desktop manager for Docker containers: logs, stats, volumes, networks and a terminal (prebuilt binary)
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/RafaelProfMgz/doknyu
+	arch = x86_64
+	license = MIT OR Apache-2.0
+	license = OFL-1.1
+	license = ISC
+	depends = gcc-libs
+	depends = glibc
+	depends = libxkbcommon
+	depends = wayland
+	depends = vulkan-icd-loader
+	depends = fontconfig
+	depends = hicolor-icon-theme
+	optdepends = docker: manage local containers
+	provides = doknyu
+	conflicts = doknyu
+	conflicts = doknyu-git
+	noextract = doknyu-bin-0.1.0.deb
+	source = doknyu-bin-0.1.0.deb::https://github.com/RafaelProfMgz/doknyu/releases/download/v0.1.0/doknyu_0.1.0-1_amd64.deb
+	sha256sums = 0000000000000000000000000000000000000000000000000000000000000000
+
+pkgname = doknyu-bin

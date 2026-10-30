@@ -5,6 +5,7 @@ Flathub, dar push em AUR, criar projeto no COPR etc. são passos do humano.
 
 - `appimage/`: AppImage e `.deb` (Fase 6, ver `.github/workflows/release.yml`).
 - `flatpak/`: Flatpak / Flathub (Fase 7, Tarefa 7.2; decisões em `docs/decisions/0002-flatpak.md`).
+- `aur/`: pacotes do AUR `doknyu`, `doknyu-bin` e `doknyu-git` (Fase 7, Tarefa 7.3).
 
 ## Flathub
 
@@ -129,3 +130,95 @@ Checklist:
 ### A cada release
 
 Crie a tag, rode `pin-release.sh <tag>` e atualize o `<release>` do metainfo (antes da tag).
+
+## AUR (Arch Linux)
+
+Três pacotes, cada um em `aur/<pacote>/` com `PKGBUILD` e `.SRCINFO` (o AUR lê o `.SRCINFO`; ele é
+gerado, não editar à mão):
+
+| Pacote | Fonte | Notas |
+|---|---|---|
+| `doknyu` | tarball da tag `v$pkgver` do GitHub | Compila (`cargo build --frozen --release`, `prepare` com `cargo fetch --locked`), roda `cargo test` no `check()`. |
+| `doknyu-bin` | o `.deb` da release (`doknyu_$pkgver-1_amd64.deb`) | Não compila; o `prepare()` abre o `data.tar.*` do `.deb`. `provides=(doknyu)`, `conflicts=(doknyu doknyu-git)`. |
+| `doknyu-git` | `main` | `pkgver()` de `git describe` (`0.1.0.r<N>.g<hash>`); sem tag ainda, cai em `r<contagem>.g<hash>`. Funciona já. |
+
+Decisões (todas conferidas por `namcap`):
+
+- `depends=(gcc-libs glibc libxkbcommon wayland vulkan-icd-loader fontconfig)`. O binário só linka
+  `libgcc_s`, `libm` e `libc`; Wayland, xkbcommon e Vulkan são `dlopen` (winit/wgpu), então o `namcap`
+  não os vê, mas sem eles a janela não abre. O `namcap` por isso avisa (`W:`, aceitos) "may not be
+  needed" para `gcc-libs`, `libxkbcommon`, `wayland`, `vulkan-icd-loader` e `fontconfig`, e
+  "Unused shared library ld-linux"; o único `E:` que apareceu (`hicolor-icon-theme`) virou dependência.
+- Docker só em `optdepends` (o app abre e mostra o onboarding sem ele; o terminal usa a ponte
+  `doknyu --exec-bridge`, não a CLI `docker`).
+- `license=('MIT OR Apache-2.0' 'OFL-1.1' 'ISC')`: `MIT OR Apache-2.0` é a licença do projeto (expressão SPDX,
+  em vez de `('MIT' 'Apache-2.0')`, que o AUR leria como "as duas valem"); o binário embute as fontes IBM Plex
+  (OFL) e o Lucide (ISC), cujo texto vai em `LICENSES-fonts.md`. Os textos ficam em
+  `/usr/share/licenses/<pacote>/` (`LICENSE-MIT`, `LICENSE-APACHE`, `LICENSES-fonts.md`).
+- `options=('!lto')` nos pacotes que compilam (recomendação da ArchWiki para Rust: o LTO do makepkg
+  não combina com o do cargo).
+- Instalam o `.desktop`, o metainfo, o SVG e os PNGs de `hicolor` nos caminhos padrão.
+
+### Os PKGBUILDs ainda têm placeholder
+
+A tag `v0.1.0` e a release não existem, então `doknyu` e `doknyu-bin` têm `sha256sums` de zeros
+(`SKIP` não é aceito para tarball de release). Depois de publicar a release (tag, tarball e o `.deb`
+do `release.yml`), na raiz do repositório:
+
+```sh
+packaging/aur/pin-release.sh v0.1.0   # container archlinux: updpkgsums + makepkg --printsrcinfo
+git diff packaging/aur                # só pkgver/pkgrel, sha256sums e .SRCINFO mudam
+git commit -am "build: pin the aur packages at v0.1.0"
+```
+
+O script também confere o `.deb` contra o `SHA256SUMS` da release. Depois dele, o build completo
+com as fontes reais (que o `scripts/aur-check.sh` não pode fazer antes da tag) é:
+
+```sh
+cd packaging/aur/doknyu && makepkg -sf && namcap PKGBUILD *.pkg.tar.zst
+cd ../doknyu-bin && makepkg -sf && namcap PKGBUILD *.pkg.tar.zst
+```
+
+### Validação (`scripts/aur-check.sh`)
+
+```sh
+scripts/aur-check.sh              # os três; ou: scripts/aur-check.sh doknyu-git
+```
+
+Num container `archlinux:latest` (nome `doknyu-spike-aur-check-*`, removido ao fim), com um usuário sem
+root para o `makepkg`: `namcap PKGBUILD`, `.SRCINFO` gerado igual ao commitado, `makepkg -s`
+completo, `namcap` no pacote, `pacman -U`, `doknyu --version`, `pacman -R` e comparação dos arquivos
+do sistema antes e depois (nada pode sobrar). Como a tag não existe, o build usa um **override só do
+teste** (anexado a uma cópia do PKGBUILD) com as mesmas fontes tiradas da árvore de trabalho: um
+tarball `doknyu-<versão>/`, um clone git local e o `.deb` de `target/debian/` (`cargo build --release
+&& cargo deb --no-build`; sem ele, `doknyu-bin` só passa por `namcap PKGBUILD` e `.SRCINFO`).
+Sai com erro se algo falhar ou se o `namcap` der `E:`.
+
+### Passo a passo: publicar no AUR (humano)
+
+Nada disso é feito por agente.
+
+1. Crie a conta em <https://aur.archlinux.org/register>, cadastre sua chave SSH pública em "My
+   Account" (`ssh-keygen -t ed25519 -f ~/.ssh/aur`; no `~/.ssh/config`: `Host aur.archlinux.org`,
+   `IdentityFile ~/.ssh/aur`, `User aur`).
+2. Rode `packaging/aur/pin-release.sh v0.1.0` (acima) e faça commit.
+3. Para cada pacote (`doknyu`, `doknyu-bin`, `doknyu-git`):
+   ```sh
+   git clone ssh://aur@aur.archlinux.org/<pacote>.git /tmp/aur-<pacote>   # clone vazio na 1a vez
+   cp packaging/aur/<pacote>/{PKGBUILD,.SRCINFO} /tmp/aur-<pacote>/
+   cd /tmp/aur-<pacote> && git add PKGBUILD .SRCINFO
+   git commit -m "Initial import of doknyu v0.1.0"
+   git push        # a branch do AUR é master
+   ```
+   O AUR recusa o push sem `.SRCINFO` ou com `pkgname` diferente do repositório.
+4. Marque `doknyu-bin` e `doknyu-git` como mantidos por você; confira em
+   <https://aur.archlinux.org/packages/doknyu> e instale com `yay -S doknyu` numa máquina Arch.
+
+### A cada release
+
+1. Crie a tag, publique a release (o `release.yml` gera o `.deb` e o `SHA256SUMS`).
+2. `packaging/aur/pin-release.sh vX.Y.Z`: atualiza `pkgver`, volta `pkgrel` para 1, refaz os
+   `sha256sums` (`updpkgsums`) e os `.SRCINFO`. Se só o PKGBUILD mudar (sem versão nova), aumente
+   `pkgrel` à mão e rode `makepkg --printsrcinfo > .SRCINFO` em cada pasta.
+3. Rode `scripts/aur-check.sh` e faça o push de `doknyu` e `doknyu-bin` (o `doknyu-git` só precisa de
+   push se o PKGBUILD mudar; o `pkgver()` acompanha o `main`).

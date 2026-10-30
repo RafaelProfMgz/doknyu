@@ -1,0 +1,26 @@
+pkgbase = doknyu-git
+	pkgdesc = Desktop manager for Docker containers: logs, stats, volumes, networks and a terminal (git version)
+	pkgver = 0.1.0.r0.g0000000
+	pkgrel = 1
+	url = https://github.com/RafaelProfMgz/doknyu
+	arch = x86_64
+	license = MIT OR Apache-2.0
+	license = OFL-1.1
+	license = ISC
+	makedepends = cargo
+	makedepends = git
+	depends = gcc-libs
+	depends = glibc
+	depends = libxkbcommon
+	depends = wayland
+	depends = vulkan-icd-loader
+	depends = fontconfig
+	depends = hicolor-icon-theme
+	optdepends = docker: manage local containers
+	provides = doknyu
+	conflicts = doknyu
+	options = !lto
+	source = doknyu-git::git+https://github.com/RafaelProfMgz/doknyu.git
+	sha256sums = SKIP
+
+pkgname = doknyu-git
