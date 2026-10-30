@@ -604,6 +604,10 @@ impl App {
             }
             RemoveSelected => on_selected(self, Msg::AskRemove),
             PruneVolumes => {
+                // A maximized dock hides the list the dialog is about.
+                if let Some(dock) = &mut self.dock {
+                    dock.maximized = false;
+                }
                 let go = self.update(Message::Navigate(Screen::Volumes));
                 Task::batch([go, self.update_volumes(volumes::Msg::AskPrune)])
             }
@@ -1125,6 +1129,10 @@ impl App {
             .into_iter()
             .filter(|n| self.volumes.pending.insert(n.clone()))
             .collect();
+        // Everything listed is already being removed: nothing to do, nothing to report.
+        if names.is_empty() {
+            return Task::none();
+        }
         let client = self.client.clone();
         Task::perform(
             async move {
@@ -4926,6 +4934,72 @@ mod tests {
         let mut names: Vec<_> = app.volumes.items.iter().map(|v| v.name.as_str()).collect();
         names.sort();
         assert_eq!(names, vec!["cache", "db_data"]);
+    }
+
+    #[tokio::test]
+    async fn prune_action_restores_a_maximized_dock() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        let _ = app.update(Message::ToggleMaximize);
+        assert!(app.dock.as_ref().is_some_and(|d| d.maximized));
+        settle(&mut app, Message::Action(ActionId::PruneVolumes)).await;
+        assert_eq!(app.screen, Screen::Volumes);
+        assert!(app.volumes.confirm.is_some());
+        let dock = app.dock.as_ref().expect("the dock stays open");
+        assert!(
+            !dock.maximized,
+            "the list must be visible behind the dialog"
+        );
+        let _ = app.view();
+    }
+
+    #[tokio::test]
+    async fn prune_with_every_listed_volume_pending_does_nothing() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = volumes_app(&fake).await;
+        let _ = app.update(vol_msg(volumes::Msg::AskPrune));
+        app.volumes.pending.insert("cache".into());
+        let calls = fake.calls().len();
+        settle(&mut app, vol_msg(volumes::Msg::Confirm)).await;
+        assert_eq!(fake.calls().len(), calls, "no call to Docker");
+        assert!(app.toasts.is_empty(), "no \"0 removed\" toast");
+        assert!(
+            app.volumes.pending.contains("cache"),
+            "the other removal keeps its mark"
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_dialog_does_not_list_volumes_being_removed() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = volumes_app(&fake).await;
+        app.volumes.pending.insert("cache".into());
+        let _ = app.update(vol_msg(volumes::Msg::AskPrune));
+        assert_eq!(
+            app.volumes.confirm,
+            Some(volumes::VolumeConfirm::Prune(vec![]))
+        );
+        assert!(!app.volumes.can_confirm());
+    }
+
+    #[tokio::test]
+    async fn remove_dialog_closes_when_the_volume_vanishes() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = volumes_app(&fake).await;
+        let _ = app.update(vol_msg(volumes::Msg::AskRemove("cache".into())));
+        assert!(app.volumes.confirm.is_some());
+        // Removed from outside; the event leads to a reload.
+        fake.remove_volume("cache").await.unwrap();
+        let calls = fake.calls().len();
+        settle(&mut app, Message::ReloadVolumes).await;
+        assert_eq!(app.volumes.confirm, None);
+        let after_reload = fake.calls().len();
+        assert!(after_reload > calls);
+        settle(&mut app, vol_msg(volumes::Msg::Confirm)).await;
+        settle(&mut app, enter_key(false)).await;
+        assert_eq!(fake.calls().len(), after_reload, "no call to Docker");
+        assert!(app.toasts.is_empty(), "no 404 toast");
     }
 
     #[tokio::test]

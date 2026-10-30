@@ -143,12 +143,12 @@ impl VolumesState {
         }
     }
 
-    /// Names of the volumes no container uses, by name.
+    /// Names of the volumes no container uses and nobody is removing, by name.
     pub fn unused(&self) -> Vec<String> {
         let mut names: Vec<String> = self
             .items
             .iter()
-            .filter(|v| v.used_by.is_empty())
+            .filter(|v| v.used_by.is_empty() && !self.pending.contains(&v.name))
             .map(|v| v.name.clone())
             .collect();
         names.sort_by_cached_key(|n| n.to_lowercase());
