@@ -17,7 +17,7 @@ makedepends=('cargo')
 optdepends=('docker: manage local containers')
 options=('!lto')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('0000000000000000000000000000000000000000000000000000000000000000')
+sha256sums=('436d15b81fd9b08035a8553590a89f1e1cd15b07ffa5770088ca0f7145ab8d11')
 
 prepare() {
   cd "$pkgname-$pkgver"
