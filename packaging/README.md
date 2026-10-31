@@ -6,6 +6,8 @@ Flathub, dar push em AUR, criar projeto no COPR etc. são passos do humano.
 - `appimage/`: AppImage e `.deb` (Fase 6, ver `.github/workflows/release.yml`).
 - `flatpak/`: Flatpak / Flathub (Fase 7, Tarefa 7.2; decisões em `docs/decisions/0002-flatpak.md`).
 - `aur/`: pacotes do AUR `doknyu`, `doknyu-bin` e `doknyu-git` (Fase 7, Tarefa 7.3).
+- `rpm/`: `.spec` do COPR (Fedora) (Fase 7, Tarefa 7.4).
+- `nix/` e `../flake.nix`: derivação para o nixpkgs e flake do repositório (Fase 7, Tarefa 7.4).
 
 ## Flathub
 
@@ -222,3 +224,117 @@ Nada disso é feito por agente.
    `pkgrel` à mão e rode `makepkg --printsrcinfo > .SRCINFO` em cada pasta.
 3. Rode `scripts/aur-check.sh` e faça o push de `doknyu` e `doknyu-bin` (o `doknyu-git` só precisa de
    push se o PKGBUILD mudar; o `pkgver()` acompanha o `main`).
+
+## COPR (Fedora)
+
+| Arquivo | Para quê |
+|---|---|
+| `rpm/doknyu.spec` | O `.spec`. `Source0` é o tarball da tag; `Source1` (`doknyu-%{version}-vendor.tar.xz`) são as crates vendorizadas, **não fica no repositório**. Build offline com `%cargo_prep -v vendor`, `%cargo_build`, `%cargo_install` e `%cargo_test` (reaproveita o build). |
+| `rpm/make-vendor.sh` | Gera o `Source1` com `cargo vendor-filterer` (só crates de Linux x86_64/aarch64) e confere que o `Cargo.lock` não mudou. |
+| `rpm/pin-release.sh` | Na release: baixa o tarball da tag, gera o vendor e o SRPM em `rpm/out/` (container `fedora:latest`). |
+| `scripts/rpm-check.sh` | Validação local (abaixo). |
+
+Decisões:
+
+- `Requires` explícitos para o que o binário carrega com `dlopen` (o rpm não vê no ELF):
+  `libwayland-client`, `libwayland-cursor`, `libxkbcommon`, `libxkbcommon-x11`, `libX11`, `libXcursor`,
+  `libXi`, `libxcb`, `libglvnd-egl`, `vulkan-loader` (e `hicolor-icon-theme`, dono dos diretórios de ícones).
+  `Recommends: mesa-vulkan-drivers` e `(moby-engine or docker-ce)`: Docker é só recomendação (o daemon pode ser
+  remoto/rootless; o terminal usa `doknyu --exec-bridge`, não a CLI `docker`).
+- `License:` junta a licença do projeto (`MIT OR Apache-2.0`), as das fontes embutidas (OFL-1.1, ISC) e a das
+  crates (saída de `%{cargo_license_summary}`, conferida na hora do build; o detalhe por crate vai em
+  `LICENSE.dependencies`, junto com `cargo-vendor.txt`, ambos em `%license`). **Ao atualizar o `Cargo.lock`, confira
+  o `License:` com o resumo que o `rpmbuild` imprime.**
+- `%check` valida o `.desktop` (`desktop-file-validate`) e o metainfo (`appstreamcli validate --no-net`).
+- O `Release` é `1%{?dist}` com `%changelog` manual (o COPR constrói de SRPM, sem histórico git).
+
+### Validação (`scripts/rpm-check.sh`)
+
+```sh
+scripts/rpm-check.sh
+```
+
+Num container `fedora:latest` (nome `doknyu-spike-rpm-check-*`, removido ao fim; sem `sudo` no host): gera o
+tarball do código e o vendor a partir da árvore local (a tag não existe ainda), `rpmlint` do `.spec`,
+`rpmbuild -ba` (offline), `rpmlint` do SRPM e do RPM, `dnf install` do RPM, `doknyu --version`, `dnf remove`.
+Erros `E:` do `rpmlint` e qualquer acesso à rede durante o build falham o script; avisos `W:` são conferidos à mão
+(o `invalid-url Source1` é esperado: o vendor é gerado, não baixado).
+
+### Passo a passo: publicar no COPR (humano)
+
+Nada disso é feito por agente.
+
+1. Crie a conta (login pelo FAS) em <https://copr.fedorainfracloud.org>, gere o token em
+   <https://copr.fedorainfracloud.org/api/> e salve em `~/.config/copr`. `sudo dnf install copr-cli`.
+2. Crie o projeto (uma vez), com os chroots que o app suporta (o MSRV 1.89 exige Fedora recente):
+   ```sh
+   copr-cli create doknyu --chroot fedora-rawhide-x86_64 --chroot fedora-rawhide-aarch64 \
+       --description "Desktop manager for Docker containers" \
+       --instructions "sudo dnf copr enable <usuario>/doknyu && sudo dnf install doknyu"
+   ```
+   (acrescente os `fedora-<N>-x86_64`/`aarch64` das versões em suporte; `copr-cli list-chroots`.)
+3. Publique a release `v0.1.0` (Fase 6), depois, na raiz do repositório:
+   ```sh
+   packaging/rpm/pin-release.sh v0.1.0          # SRPM em packaging/rpm/out/
+   copr-cli build doknyu packaging/rpm/out/doknyu-0.1.0-1.*.src.rpm
+   ```
+   O COPR compila sem rede, só com o que está no SRPM (por isso o vendor).
+4. Teste: `sudo dnf copr enable <usuario>/doknyu && sudo dnf install doknyu && doknyu --version`.
+
+### A cada release
+
+Crie a tag, atualize `Version:` e o `%changelog` do `.spec` (`Release` volta para 1; só o `.spec` mudou: aumente
+o `Release`), confira o `License:` e rode `scripts/rpm-check.sh`, `packaging/rpm/pin-release.sh vX.Y.Z` e `copr-cli build`.
+
+## nixpkgs
+
+| Arquivo | Para quê |
+|---|---|
+| `nix/package.nix` | A derivação (`rustPlatform.buildRustPackage`, `fetchFromGitHub` da tag). `hash` e `cargoHash` são `lib.fakeHash` até existir a tag. |
+| `nix/pin-release.sh` | Na release: calcula `hash` (tarball da tag) e `cargoHash` e atualiza `version` (container `nixos/nix`). |
+| `../flake.nix` | Só `packages` (`doknyu`, `default`) e `devShells`. Constrói o mesmo `package.nix` **da árvore local** (`overrideAttrs` com `src` e `cargoDeps = importCargoLock { lockFile }`), é assim que se testa antes da tag. `flake.lock` fixa o `nixos-unstable`. |
+| `scripts/nix-check.sh` | Validação (abaixo). |
+
+Decisões:
+
+- O `package.nix` usa `cargoHash`, não `cargoLock.lockFile`: o nixpkgs não aceita `Cargo.lock` copiado para a árvore
+  (e `lockFile = "${src}/Cargo.lock"` seria IFD). O `lockFile` é usado no flake, para o teste local.
+- Wayland, X11, xkbcommon, Vulkan e GL são `dlopen`: o `postFixup` põe as bibliotecas no rpath com
+  `patchelf --add-rpath`, como o `halloy` (app iced/winit do nixpkgs) faz. `nix-check.sh` confere o rpath.
+- Instala `.desktop`, metainfo, ícones (`hicolor`), LICENSE-MIT, LICENSE-APACHE e `LICENSES-fonts.md`
+  (em `share/licenses/doknyu/`). `meta.license = [ asl20 mit ofl isc ]`. `maintainers` está vazio: ao abrir a PR,
+  acrescente seu handle em `maintainers/maintainer-list.nix` (PR separada ou a mesma) e aqui.
+- `doCheck` fica ligado: o `cargo test --release` do nix roda os 470 testes (os de Docker são `#[ignore]`).
+
+### Validação (`scripts/nix-check.sh`)
+
+```sh
+scripts/nix-check.sh              # build completo (vários minutos: compila iced/wgpu)
+scripts/nix-check.sh --no-build   # só `nix flake check --no-build` e `nix eval`
+```
+
+Num container `nixos/nix` (nome `doknyu-spike-nix-check-*`, removido ao fim; flakes habilitados, `sandbox = false`
+porque o container não é privilegiado): a árvore de trabalho vira um repositório git descartável (o flake só vê
+arquivos rastreados), `nix flake check --no-build`, `nix eval`, `nix build .#doknyu`, `result/bin/doknyu --version`,
+rpath e arquivos instalados. Se não houver `flake.lock`, o gerado é copiado para a raiz; para atualizar o
+`nixpkgs`, apague-o e rode de novo.
+
+### Passo a passo: PR no nixpkgs (humano)
+
+Nada disso é feito por agente. Leia o *contributing guide* do nixpkgs (<https://github.com/NixOS/nixpkgs/blob/master/pkgs/README.md>).
+
+1. Publique a release `v0.1.0` (Fase 6) e rode `packaging/nix/pin-release.sh v0.1.0` (fixa `hash` e `cargoHash`); commit.
+2. Faça o fork de `NixOS/nixpkgs`, crie um branch a partir do `master` e copie:
+   ```sh
+   mkdir -p pkgs/by-name/do/doknyu && cp packaging/nix/package.nix pkgs/by-name/do/doknyu/package.nix
+   ```
+3. Acrescente o seu handle em `maintainers/maintainer-list.nix` (commit separado, `maintainers: add <handle>`) e em
+   `meta.maintainers`; adicione `passthru.updateScript = nix-update-script { };` (com `nix-update-script` nos argumentos).
+4. `nix-build -A doknyu` (e `nixpkgs-review wip`), `nix run nixpkgs#nixfmt -- pkgs/by-name/do/doknyu/package.nix`.
+5. Commit `doknyu: init at 0.1.0`, push e abra a PR contra `master` seguindo o template (marque as caixas que
+   cumprir; o texto da PR deve ser escrito por você).
+
+### A cada release
+
+`packaging/nix/pin-release.sh vX.Y.Z` atualiza o `package.nix` do repositório; no nixpkgs, a atualização costuma ser
+feita pelo `r-ryantm`/`nix-update` (por isso o `updateScript`), ou rode `nix-update doknyu`.

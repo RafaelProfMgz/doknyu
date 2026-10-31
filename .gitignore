@@ -6,3 +6,4 @@
 /packaging/flatpak/*.local.yml
 /packaging/flatpak/build-dir/
 /packaging/flatpak/repo/
+/packaging/rpm/out/

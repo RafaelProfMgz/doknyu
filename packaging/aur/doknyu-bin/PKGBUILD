@@ -20,7 +20,7 @@ conflicts=('doknyu' 'doknyu-git')
 # makepkg would unpack the .deb (an ar archive) into control.tar and data.tar; prepare() does it.
 noextract=("$pkgname-$pkgver.deb")
 source=("$pkgname-$pkgver.deb::$url/releases/download/v$pkgver/doknyu_$pkgver-1_amd64.deb")
-sha256sums=('0000000000000000000000000000000000000000000000000000000000000000')
+sha256sums=('5697569b674220023f26289c23143b1783757621b59d43c9071c0a691858fdbd')
 
 prepare() {
   mkdir -p root
