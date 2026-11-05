@@ -26,6 +26,8 @@ docker run --rm --name "doknyu-nix-pin-$$" -e "VER=$VER" \
     -e 'NIX_CONFIG=experimental-features = nix-command flakes
 sandbox = false' \
     -v "$DIR:/nix-pkg" nixos/nix:latest sh -euc '
+    # A imagem nixos/nix não traz sed.
+    command -v sed >/dev/null || nix-env -iA nixpkgs.gnused >/dev/null
     cp /nix-pkg/package.nix /tmp/package.nix
     sed -i "s/^  version = \".*\";/  version = \"$VER\";/" /tmp/package.nix
     sed -i "s/hash = .*;/hash = lib.fakeHash;/; s/cargoHash = .*;/cargoHash = lib.fakeHash;/" /tmp/package.nix
