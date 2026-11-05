@@ -1,11 +1,13 @@
 name: CI
 
-# Mudança só de documentação não roda o CI.
+# Leve (fmt, clippy, test, msrv): roda em PR para develop e para main e em push nas duas.
+# Mudança só de documentação não roda o CI. Fluxo de branches: CLAUDE.md.
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
     paths-ignore: ["**.md", "docs/**", "LICENSE-*", ".claude/**"]
   pull_request:
+    branches: [main, develop]
     paths-ignore: ["**.md", "docs/**", "LICENSE-*", ".claude/**"]
 
 # Um push novo no mesmo PR cancela o run anterior. Tag e push na main nunca são cancelados.

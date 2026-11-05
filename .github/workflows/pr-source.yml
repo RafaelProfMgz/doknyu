@@ -1,0 +1,27 @@
+name: Origem do PR
+
+# A main só aceita PR vindo da develop (fluxo em CLAUDE.md). O ruleset da main exige este check.
+# `edited` cobre a troca da base de um PR já aberto.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize, edited]
+
+permissions: {}
+
+jobs:
+  source:
+    name: PR para main vem da develop
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confere a branch de origem
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
+        run: |
+          if [ "$HEAD_REF" != "develop" ] || [ "$HEAD_REPO" != "$BASE_REPO" ]; then
+            echo "::error::A main só aceita PR da branch develop deste repositório (recebido: $HEAD_REPO:$HEAD_REF). Abra o PR para a develop."
+            exit 1
+          fi
+          echo "Origem ok: $HEAD_REPO:$HEAD_REF"

@@ -75,6 +75,12 @@ mesmo limite de uso da sessão. O controle é feito por estas regras:
 | 7 | 4 | 3 | 1 | 8 | 20 |
 | **Total** | **31** | **29** | **10** | **70** | **186** |
 
+## Branches
+
+Cada fase trabalha numa branch `feat/fase-N-*` criada a partir da `develop`, e o PR da fase vai
+para a `develop` (`gh pr create --base develop`). A `main` só recebe PR da `develop`; detalhes e o
+que o CI roda em cada caso estão no `CLAUDE.md` da raiz.
+
 ## Fluxo do orquestrador por tarefa
 
 1. Lança o implementador indicado com: arquivo da fase, número da tarefa e feedback anterior (se houver).
