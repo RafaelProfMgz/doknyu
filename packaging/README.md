@@ -9,6 +9,12 @@ Flathub, dar push em AUR, criar projeto no COPR etc. são passos do humano.
 - `rpm/`: `.spec` do COPR (Fedora) (Fase 7, Tarefa 7.4).
 - `nix/` e `../flake.nix`: derivação para o nixpkgs e flake do repositório (Fase 7, Tarefa 7.4).
 
+**Desinstalação:** os comandos de cada canal estão em [README.md › Uninstalling](../README.md#uninstalling).
+Ao criar um canal novo (ex.: Homebrew, Tarefa 7.5) ou mudar o nome de um pacote, atualize aquela
+tabela. O app só escreve em `$XDG_CONFIG_HOME/doknyu` (padrão `~/.config/doknyu`; no Flatpak,
+`~/.var/app/io.github.rafaelprofmgz.Doknyu/config/doknyu`), então nenhum pacote precisa de
+script de pós-remoção.
+
 ## Flathub
 
 ### Arquivos
