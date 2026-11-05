@@ -2,6 +2,11 @@
 
 ## Branches e PRs
 
+- **`main` = produção.** Só contém o que já foi aprovado na `develop`; é dela que saem as tags e
+  releases.
+- **`develop` = desenvolvimento.** Tudo entra aqui primeiro, é testado e aprovado, e só então é
+  promovido para a `main` por um PR `develop` → `main`.
+
 ```
 feat/* · fix/* · ci/* · docs/*  ──PR──▶  develop  ──PR──▶  main  ──tag v*──▶  release
 ```

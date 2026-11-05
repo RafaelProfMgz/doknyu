@@ -14,6 +14,11 @@ Issues labelled `good first issue` are a good place to start.
 
 ## Branches
 
+- **`main` is production:** it only holds what was already approved on `develop`; releases are
+  tagged from it.
+- **`develop` is development:** every change lands here first and is promoted to `main` in
+  batches, through a `develop` → `main` pull request.
+
 ```
 your-branch ──PR──▶ develop ──PR──▶ main ──tag v*──▶ release
 ```
