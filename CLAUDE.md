@@ -12,6 +12,8 @@ feat/* · fix/* · ci/* · docs/*  ──PR──▶  develop  ──PR──▶
   Não há push direto na `main`, nem force-push.
 - Correção urgente também passa pela `develop` (fix/* → develop → main).
 - Tags `v*` são criadas na `main`, depois do merge da `develop`, e só pelo mantenedor.
+- Depois de cada promoção, o workflow `back-merge.yml` abre e mergeia sozinho o PR `main` → `develop`
+  (só o commit de merge da promoção, sem conteúdo). Não abra esse PR à mão.
 - O branch padrão do GitHub é a `develop`: PRs abrem para ela por padrão. Ainda assim, passe
   `--base develop` explicitamente.
 
