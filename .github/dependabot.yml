@@ -1,0 +1,21 @@
+# Version updates go to develop, like every other PR. Cargo updates come grouped once a month;
+# after merging one, run scripts/update-cargo-sources.sh (the Flatpak check fails until then).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: develop
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: cargo
+    directory: /
+    target-branch: develop
+    schedule:
+      interval: monthly
+    groups:
+      cargo:
+        update-types: [minor, patch]
+    open-pull-requests-limit: 5

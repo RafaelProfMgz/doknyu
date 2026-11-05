@@ -20,7 +20,7 @@ pkgbase = doknyu-git
 	provides = doknyu
 	conflicts = doknyu
 	options = !lto
-	source = doknyu-git::git+https://github.com/RafaelProfMgz/doknyu.git
+	source = doknyu-git::git+https://github.com/RafaelProfMgz/doknyu.git#branch=main
 	sha256sums = SKIP
 
 pkgname = doknyu-git
