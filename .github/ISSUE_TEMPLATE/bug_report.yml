@@ -1,0 +1,60 @@
+name: Bug report
+description: Something does not work as expected
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected and what happened instead. Screenshots help.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open the Volumes screen
+        2. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: doknyu version
+      description: Output of `doknyu --version`.
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install doknyu?
+      options:
+        - .deb
+        - AppImage
+        - Flatpak
+        - AUR
+        - COPR (Fedora)
+        - Nix
+        - Homebrew
+        - Built from source
+    validations:
+      required: true
+  - type: input
+    id: distro
+    attributes:
+      label: Distribution and desktop
+      placeholder: Ubuntu 24.04, GNOME, Wayland
+    validations:
+      required: true
+  - type: input
+    id: docker
+    attributes:
+      label: Docker version
+      description: Output of `docker version --format '{{.Server.Version}}'`; say if it is rootless.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Run `RUST_LOG=debug doknyu` and paste the relevant part.
+      render: text

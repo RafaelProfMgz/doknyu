@@ -97,8 +97,8 @@ cargo test
 cargo test -- --ignored      # integration tests, need Docker
 ```
 
-Branch off `develop` and open your pull request **against `develop`**; `main` only accepts pull
-requests from `develop` (see [CLAUDE.md](CLAUDE.md) for the full flow and what CI runs where).
+See [CONTRIBUTING.md](CONTRIBUTING.md). In short: branch off `develop` and open your pull request
+**against `develop`**; `main` only accepts pull requests from `develop`.
 
 Every user-visible string goes through `t!("key")` with entries in both `locales/en.yml`
 and `locales/pt-BR.yml`. Design and roadmap: [spec](docs/specs/2026-10-29-doknyu-design.md) and

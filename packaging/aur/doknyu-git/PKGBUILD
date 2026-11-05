@@ -1,5 +1,5 @@
 # Maintainer: RafaelProfMgz <RafaelProfMgz@users.noreply.github.com>
-# Follows the main branch. pkgver comes from `git describe` (0.1.0.r<commits since the tag>.g<hash>);
+# Follows the main branch (pinned with #branch=main: the repository's default branch is develop). pkgver comes from `git describe` (0.1.0.r<commits since the tag>.g<hash>);
 # while there is no tag yet it falls back to r<commit count>.g<hash>.
 pkgname=doknyu-git
 pkgver=0.1.0.r0.g0000000
@@ -18,7 +18,7 @@ optdepends=('docker: manage local containers')
 provides=('doknyu')
 conflicts=('doknyu')
 options=('!lto')
-source=("$pkgname::git+$url.git")
+source=("$pkgname::git+$url.git#branch=main")
 sha256sums=('SKIP')
 
 pkgver() {

@@ -12,13 +12,14 @@ feat/* · fix/* · ci/* · docs/*  ──PR──▶  develop  ──PR──▶
   Não há push direto na `main`, nem force-push.
 - Correção urgente também passa pela `develop` (fix/* → develop → main).
 - Tags `v*` são criadas na `main`, depois do merge da `develop`, e só pelo mantenedor.
-- Ao abrir PR, use sempre `--base develop` (o branch padrão do GitHub continua sendo a `main`).
+- O branch padrão do GitHub é a `develop`: PRs abrem para ela por padrão. Ainda assim, passe
+  `--base develop` explicitamente.
 
 ## O que roda no CI
 
 | Evento | Workflows |
 |---|---|
-| PR para `develop` | CI leve: `fmt`, `clippy`, `test`, `msrv` (pulado se só mudar `*.md`, `docs/**`, `LICENSE-*`, `.claude/**`) |
+| PR para `develop` | CI leve: `fmt`, `clippy`, `test`, `msrv` (pulado se só mudar `*.md`, `docs/**`, `LICENSE-*`, `.claude/**`) + conferência do `cargo-sources.json` |
 | PR `develop` → `main` | CI leve + Flatpak + Release (build do `.deb`/AppImage) + Origem do PR |
 | tag `v*` | Release (publica) + Flatpak |
 
