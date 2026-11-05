@@ -1,10 +1,11 @@
 name: Origem do PR
 
 # A main só aceita PR vindo da develop (fluxo em CLAUDE.md). O ruleset da main exige este check.
-# `edited` cobre a troca da base de um PR já aberto.
+# Roda em todo PR (leva segundos) e só falha quando a base é a main e a origem não é a develop.
+# Assim, trocar a base de um PR de main para develop (`edited`) roda o check de novo e ele passa,
+# em vez de deixar o resultado antigo vermelho preso no commit.
 on:
   pull_request:
-    branches: [main]
     types: [opened, reopened, synchronize, edited]
 
 permissions: {}
@@ -16,10 +17,15 @@ jobs:
     steps:
       - name: Confere a branch de origem
         env:
+          BASE_REF: ${{ github.base_ref }}
           HEAD_REF: ${{ github.head_ref }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           BASE_REPO: ${{ github.repository }}
         run: |
+          if [ "$BASE_REF" != "main" ]; then
+            echo "Base $BASE_REF: sem restrição de origem."
+            exit 0
+          fi
           if [ "$HEAD_REF" != "develop" ] || [ "$HEAD_REPO" != "$BASE_REPO" ]; then
             echo "::error::A main só aceita PR da branch develop deste repositório (recebido: $HEAD_REPO:$HEAD_REF). Abra o PR para a develop."
             exit 1
