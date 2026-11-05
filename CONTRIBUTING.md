@@ -14,6 +14,11 @@ Issues labelled `good first issue` are a good place to start.
 
 ## Branches
 
+- **`main` is production:** it only holds what was already approved on `develop`; releases are
+  tagged from it.
+- **`develop` is development:** every change lands here first and is promoted to `main` in
+  batches, through a `develop` → `main` pull request.
+
 ```
 your-branch ──PR──▶ develop ──PR──▶ main ──tag v*──▶ release
 ```
@@ -56,10 +61,45 @@ Guidelines:
 - **Translations:** every user-visible string goes through `t!("key")`, with entries in both
   `locales/en.yml` and `locales/pt-BR.yml`. Improvements to either language are welcome.
 - **Docker types stay in `src/docker/`:** the rest of the app only sees the types in `src/model.rs`.
-- **Commits:** short imperative subject with a type prefix, e.g. `feat: images screen`,
-  `fix(build): …`, `docs: …`. Keep unrelated changes in separate pull requests.
+- **One topic per pull request.** Keep unrelated changes in separate pull requests.
 - **Bigger changes:** open an issue or discussion first. Designs live in `docs/specs/` and the
   phased plans in `docs/plans/`.
+
+## Commit messages
+
+```
+<type>(<optional scope>): <what changed, imperative, lower case, no final period>
+
+<optional body: why, and anything a reviewer needs; wrap at 72 columns>
+
+<optional footer: Closes #123>
+```
+
+| Type | For |
+|---|---|
+| `feat` | a new user-visible feature |
+| `fix` | a bug fix |
+| `docs` | documentation only |
+| `test` | tests only |
+| `refactor` | code change that neither fixes a bug nor adds a feature |
+| `perf` | performance |
+| `build` | packaging, dependencies, build scripts |
+| `ci` | GitHub Actions workflows |
+| `chore` | anything else (repository settings, tooling) |
+
+Examples: `feat: images screen`, `fix(terminal): keep the cursor after resize`,
+`build(aur): pin doknyu-git to main`. Subject up to ~72 characters, in English.
+
+A template with this reminder is in [`.gitmessage`](.gitmessage); enable it once with
+`git config commit.template .gitmessage`.
+
+## Pull requests
+
+- Target **`develop`**. The [PR template](.github/pull_request_template.md) has the checklist.
+- Title in the same format as a commit subject (`feat: …`); it is used in the release notes.
+- Small and focused is easier to review. Draft PRs are welcome for early feedback.
+- CI must be green. PRs from first-time contributors need a maintainer's approval to run CI.
+- Maintainers merge into `develop`; `develop` is promoted to `main` in batches before a release.
 
 ## Packaging
 

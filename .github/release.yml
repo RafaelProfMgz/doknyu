@@ -1,0 +1,16 @@
+# Categories for GitHub's "Generate release notes" (PR labels → sections).
+changelog:
+  exclude:
+    labels: [skip-changelog]
+    authors: [dependabot]
+  categories:
+    - title: New features
+      labels: [enhancement]
+    - title: Bug fixes
+      labels: [bug]
+    - title: Translations and accessibility
+      labels: [translation, accessibility]
+    - title: Documentation
+      labels: [documentation]
+    - title: Other changes
+      labels: ["*"]
