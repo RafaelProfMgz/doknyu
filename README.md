@@ -1,5 +1,9 @@
 # doknyu
 
+[![CI](https://github.com/RafaelProfMgz/doknyu/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/RafaelProfMgz/doknyu/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/RafaelProfMgz/doknyu)](https://github.com/RafaelProfMgz/doknyu/releases/latest)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
+
 A fast, keyboard-friendly desktop app for Linux to manage Docker containers, logs, stats, volumes
 and networks, with an embedded terminal for each container. Written in Rust
 ([iced](https://iced.rs) + [bollard](https://github.com/fussybeaver/bollard)). It follows the

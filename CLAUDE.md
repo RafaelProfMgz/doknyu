@@ -15,6 +15,14 @@ feat/* · fix/* · ci/* · docs/*  ──PR──▶  develop  ──PR──▶
 - O branch padrão do GitHub é a `develop`: PRs abrem para ela por padrão. Ainda assim, passe
   `--base develop` explicitamente.
 
+## Commits e PRs
+
+- Mensagem de commit: `<tipo>(<escopo opcional>): <assunto>` em inglês, imperativo, minúsculo,
+  sem ponto final (tipos e exemplos em `CONTRIBUTING.md`; template em `.gitmessage`).
+- PR: título no mesmo formato, corpo seguindo `.github/pull_request_template.md`, base `develop`.
+- Labels do PR (`enhancement`, `bug`, `documentation`, `translation`…) definem a seção nas notas
+  de release (`.github/release.yml`).
+
 ## O que roda no CI
 
 | Evento | Workflows |

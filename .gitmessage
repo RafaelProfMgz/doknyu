@@ -1,0 +1,13 @@
+
+# <type>(<scope>): <subject>     ← imperative, lower case, no period, ~72 chars max
+#
+# type: feat | fix | docs | test | refactor | perf | build | ci | chore
+# e.g.: feat: images screen
+#       fix(terminal): keep the cursor after resize
+#
+# Body (optional, after one blank line): why the change, not how. Wrap at 72.
+#
+# Footer (optional): Closes #123
+#
+# Enable once:  git config commit.template .gitmessage
+# Lines starting with # are ignored.
