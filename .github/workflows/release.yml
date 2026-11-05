@@ -6,10 +6,16 @@ on:
   push:
     tags: ["v*"]
   # Fora de tags só o job `build` roda (empacota e sobe o artefato `dist`), para testar o
-  # empacotamento em PRs e manualmente; o job `release` só roda em tags.
+  # empacotamento no PR develop → main e manualmente; o job `release` só roda em tags.
+  # PRs para develop não rodam este workflow.
   workflow_dispatch:
   pull_request:
-    paths: ["packaging/**", ".github/workflows/release.yml", "Cargo.toml", "assets/**", "src/main.rs"]
+    branches: [main]
+
+# Um push novo no mesmo PR cancela o run anterior. Tag e push na main nunca são cancelados.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
