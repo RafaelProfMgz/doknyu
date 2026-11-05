@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and ideas
+    url: https://github.com/RafaelProfMgz/doknyu/discussions
+    about: Ask and discuss in GitHub Discussions.
+  - name: Report a security vulnerability
+    url: https://github.com/RafaelProfMgz/doknyu/security/advisories/new
+    about: Please report security problems privately, not in a public issue.
