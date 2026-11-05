@@ -2,6 +2,11 @@
 
 ## Branches e PRs
 
+- **`main` = produção.** Só contém o que já foi aprovado na `develop`; é dela que saem as tags e
+  releases.
+- **`develop` = desenvolvimento.** Tudo entra aqui primeiro, é testado e aprovado, e só então é
+  promovido para a `main` por um PR `develop` → `main`.
+
 ```
 feat/* · fix/* · ci/* · docs/*  ──PR──▶  develop  ──PR──▶  main  ──tag v*──▶  release
 ```
@@ -12,6 +17,8 @@ feat/* · fix/* · ci/* · docs/*  ──PR──▶  develop  ──PR──▶
   Não há push direto na `main`, nem force-push.
 - Correção urgente também passa pela `develop` (fix/* → develop → main).
 - Tags `v*` são criadas na `main`, depois do merge da `develop`, e só pelo mantenedor.
+- Depois de cada promoção, o workflow `back-merge.yml` abre e mergeia sozinho o PR `main` → `develop`
+  (só o commit de merge da promoção, sem conteúdo). Não abra esse PR à mão.
 - O branch padrão do GitHub é a `develop`: PRs abrem para ela por padrão. Ainda assim, passe
   `--base develop` explicitamente.
 
