@@ -45,6 +45,27 @@ sudo usermod -aG docker $USER
 Then log out and back in. Note that membership in the `docker` group is equivalent to root on the
 machine. The terminal tab also needs the `docker` CLI to be installed.
 
+### Uninstalling
+
+Use the command that matches how you installed doknyu. Uninstalling never touches Docker: your
+containers, images, volumes and networks stay as they are.
+
+| Installed with | Remove with |
+|---|---|
+| `.deb` | `sudo apt remove doknyu` |
+| AppImage | Delete the `.AppImage` file. If AppImageLauncher or Gear Lever integrated it, remove it from there (or delete its entry in `~/.local/share/applications/`). |
+| Flatpak | `flatpak uninstall --delete-data io.github.rafaelprofmgz.Doknyu` |
+| AUR | `sudo pacman -Rns doknyu` (or `doknyu-bin` / `doknyu-git`, whichever you installed) |
+| COPR (Fedora) | `sudo dnf remove doknyu`, then optionally `sudo dnf copr remove <owner>/doknyu` with the same name you passed to `dnf copr enable` |
+| Nix profile | `nix profile remove doknyu` |
+| NixOS / Home Manager | Remove `doknyu` from `environment.systemPackages` or `home.packages` and rebuild |
+| Homebrew | `brew uninstall doknyu`, then optionally `brew untap RafaelProfMgz/tap` |
+| `cargo install` | `cargo uninstall doknyu` |
+
+Your preferences live in `~/.config/doknyu` (or `$XDG_CONFIG_HOME/doknyu`); remove that folder too
+for a clean uninstall: `rm -rf ~/.config/doknyu`. The Flatpak keeps its data in
+`~/.var/app/io.github.rafaelprofmgz.Doknyu`, which `--delete-data` already removes.
+
 ## Keyboard shortcuts
 
 | Keys | Action |
@@ -97,6 +118,13 @@ um terminal embutido do Docker. Instale o `.deb` (`sudo apt install ./doknyu_*.d
 da [última release](https://github.com/RafaelProfMgz/doknyu/releases/latest). Para acessar o
 Docker, adicione seu usuário ao grupo `docker` (`sudo usermod -aG docker $USER`) e entre na sessão
 de novo. Para testar sem Docker: `cargo run --features fake`.
+
+Para desinstalar, use o comando da forma como você instalou (tabela completa em
+[Uninstalling](#uninstalling)): `.deb` → `sudo apt remove doknyu`; AppImage → apague o arquivo;
+Flatpak → `flatpak uninstall --delete-data io.github.rafaelprofmgz.Doknyu`; AUR →
+`sudo pacman -Rns doknyu`; Fedora → `sudo dnf remove doknyu`; Nix → `nix profile remove doknyu`;
+Homebrew → `brew uninstall doknyu`. As preferências ficam em `~/.config/doknyu` (apague para
+remover tudo). Seus containers, imagens e volumes do Docker não são afetados.
 
 ## License
 
