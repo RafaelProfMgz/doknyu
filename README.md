@@ -24,7 +24,7 @@ Each release also has a `SHA256SUMS` file: `sha256sum --check --ignore-missing S
 **Debian, Ubuntu and derivatives (`.deb`)**
 
 ```sh
-sudo apt install ./doknyu_<version>_amd64.deb
+sudo apt install ./doknyu_<version>-1_amd64.deb    # e.g. doknyu_0.1.0-1_amd64.deb
 ```
 
 **Any distribution (AppImage, needs FUSE 2: `libfuse2` on Ubuntu 22.04/24.04)**

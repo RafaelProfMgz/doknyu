@@ -50,6 +50,22 @@ Sem a janela à vista, confira pelos logs: `_ping` e `containers/json` aparecem 
 A aba Terminal roda `doknyu --exec-bridge <id>` (ponte própria, sem a CLI `docker`) e funciona no
 sandbox; teste: `flatpak run --command=doknyu io.github.rafaelprofmgz.Doknyu --exec-bridge <id>`.
 
+### Remover um build local
+
+O `--install` acima instala o app **e** a extensão `.Debug`, com remotos locais
+(`doknyu-origin`, `debug-origin`, às vezes com sufixo numérico) que apontam para o
+`.flatpak-builder/` da árvore. O comando da seção "Uninstalling" do README não remove a `.Debug`;
+para um build local use:
+
+```sh
+flatpak uninstall --user --delete-data io.github.rafaelprofmgz.Doknyu io.github.rafaelprofmgz.Doknyu.Debug
+flatpak remotes --user | grep -E 'doknyu|debug' || echo "remotos já removidos"   # somem sozinhos
+rm -rf ~/.config/doknyu                       # preferências de quando rodou nativo (cargo run)
+rm -rf packaging/flatpak/{.flatpak-builder,build-dir,repo}   # cache de build (gitignored)
+```
+
+Os SDKs (`org.freedesktop.Sdk`, `rust-stable`) ficam: servem para o próximo build.
+
 ### Linter
 
 ```sh

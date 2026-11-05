@@ -60,7 +60,7 @@ pub enum SelfInstall { ReplaceAppImage { path: PathBuf }, AptInstall }
 | Instalação (`InstallKind`) | Plano | Rede |
 |---|---|---|
 | `AppImage { path }` | `SelfUpdate { asset: "doknyu-x86_64.AppImage", ReplaceAppImage }` | sim |
-| `Deb { .. }` | `SelfUpdate { asset: "doknyu_<versão>_amd64.deb", AptInstall }` | sim |
+| `Deb { .. }` | `SelfUpdate { asset: "doknyu_<versão>-1_amd64.deb", AptInstall }` | sim |
 | `Rpm { package }` | `Privileged`: `pkexec dnf upgrade -y <package>` | não (o dnf usa a dele) |
 | `Pacman { package }` | `ShowCommand`: `paru -S <package>` se `paru` existe, senão `yay -S <package>`, senão `git clone https://aur.archlinux.org/<package>.git && cd <package> && makepkg -si` | não |
 | `Flatpak` | `ShowCommand`: `flatpak update io.github.rafaelprofmgz.Doknyu` (o sandbox não tem permissão de rede, e nem precisa) | não |
@@ -70,7 +70,8 @@ pub enum SelfInstall { ReplaceAppImage { path: PathBuf }, AptInstall }
 | `Unknown { .. }` | `OpenRelease` | sim |
 
 `Rpm` sem `pkexec` → `ShowCommand` com `sudo`, como no Desinstalar. O nome do asset `.deb` é
-montado com a versão da release (sem o `v`) e procurado em `assets[]`; asset ausente → erro
+montado com a versão da release (sem o `v`) mais a revisão Debian `-1` (o `cargo deb` gera
+`doknyu_0.1.0-1_amd64.deb`) e procurado em `assets[]`; asset ausente → erro
 "a release não tem o arquivo para esta instalação".
 
 ## 4. Download e instalação (`SelfUpdate`)
