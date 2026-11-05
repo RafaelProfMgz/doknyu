@@ -11,6 +11,11 @@ on:
   pull_request:
     paths: ["packaging/**", ".github/workflows/release.yml", "Cargo.toml", "assets/**", "src/main.rs"]
 
+# Um push novo no mesmo PR cancela o run anterior. Tag e push na main nunca são cancelados.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   # Versões fixadas das ferramentas de empacotamento. O linuxdeploy e o appimagetool ficam

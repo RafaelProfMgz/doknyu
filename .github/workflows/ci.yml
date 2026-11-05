@@ -1,9 +1,17 @@
 name: CI
 
+# Mudança só de documentação não roda o CI.
 on:
   push:
     branches: [main]
+    paths-ignore: ["**.md", "docs/**", "LICENSE-*", ".claude/**"]
   pull_request:
+    paths-ignore: ["**.md", "docs/**", "LICENSE-*", ".claude/**"]
+
+# Um push novo no mesmo PR cancela o run anterior. Tag e push na main nunca são cancelados.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always

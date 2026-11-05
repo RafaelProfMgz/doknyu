@@ -3,10 +3,25 @@ name: Flatpak
 # Em PR e em tag: confere o cargo-sources.json e constrói o Flatpak a partir do código do
 # próprio checkout (manifesto `.local.yml`, gerado do manifesto do Flathub com `type: dir`).
 # Nada é publicado: o PR no flathub/flathub é um passo do humano (packaging/README.md).
+# Em PR, só quando algo que afeta o Flatpak muda; em tag, sempre.
 on:
   pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "assets/**"
+      - "packaging/flatpak/**"
+      - "scripts/update-cargo-sources.sh"
+      - "src/main.rs"
+      - "src/sandbox.rs"
+      - ".github/workflows/flatpak.yml"
   push:
     tags: ['v*']
+
+# Um push novo no mesmo PR cancela o run anterior. Tag e push na main nunca são cancelados.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
