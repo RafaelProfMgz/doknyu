@@ -56,24 +56,32 @@ jobs:
       - name: Flatpak
         id: flatpak
         continue-on-error: true
-        run: packaging/flatpak/pin-release.sh "${{ steps.tag.outputs.tag }}"
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: packaging/flatpak/pin-release.sh "$TAG"
 
       - name: AUR
         id: aur
         continue-on-error: true
-        run: packaging/aur/pin-release.sh "${{ steps.tag.outputs.tag }}"
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: packaging/aur/pin-release.sh "$TAG"
 
       - name: Nix
         id: nix
         continue-on-error: true
-        run: packaging/nix/pin-release.sh "${{ steps.tag.outputs.tag }}"
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: packaging/nix/pin-release.sh "$TAG"
 
       - name: Homebrew
         id: homebrew
         continue-on-error: true
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           if [ -x packaging/homebrew/pin-release.sh ]; then
-            packaging/homebrew/pin-release.sh "${{ steps.tag.outputs.tag }}"
+            packaging/homebrew/pin-release.sh "$TAG"
           else
             echo "Sem packaging/homebrew/pin-release.sh; pulado."
           fi
