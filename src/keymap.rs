@@ -66,6 +66,7 @@ fn with_ctrl(key: &Key, mods: Modifiers) -> Option<ActionId> {
         ("1", false) => Some(ActionId::GoContainers),
         ("2", false) => Some(ActionId::GoVolumes),
         ("3", false) => Some(ActionId::GoNetworks),
+        ("4", false) => Some(ActionId::GoImages),
         ("b", false) => Some(ActionId::ToggleSidebar),
         ("j", false) => Some(ActionId::ToggleDock),
         ("f", false) => Some(ActionId::FocusSearch),
@@ -125,6 +126,7 @@ mod tests {
             (ch("1"), ctrl, Some(ActionId::GoContainers)),
             (ch("2"), ctrl, Some(ActionId::GoVolumes)),
             (ch("3"), ctrl, Some(ActionId::GoNetworks)),
+            (ch("4"), ctrl, Some(ActionId::GoImages)),
             (ch("b"), ctrl, Some(ActionId::ToggleSidebar)),
             (ch("j"), ctrl, Some(ActionId::ToggleDock)),
             (ch("f"), ctrl, Some(ActionId::FocusSearch)),
@@ -152,6 +154,7 @@ mod tests {
             (ch("S"), Modifiers::SHIFT, None),
             (ch("s"), Modifiers::ALT, None),
             (ch("1"), none, None),
+            (ch("4"), none, None),
             (ch("b"), Modifiers::CTRL | Modifiers::ALT, None),
             (named(Named::Tab), none, None),
         ];

@@ -1,4 +1,4 @@
-//! Navigation column: Containers, Volumes and Networks, collapsible to icons only.
+//! Navigation column: Containers, Volumes, Networks and Images, collapsible to icons only.
 
 use iced::widget::{button, center, column, container, row, rule, text, tooltip};
 use iced::{Alignment, Element, Length, Padding};
@@ -58,14 +58,15 @@ fn entry(
         .into()
 }
 
-/// Navigation column. `containers`, `volumes` and `networks` are the numbers shown beside their
-/// entries.
+/// Navigation column. `containers`, `volumes`, `networks` and `images` are the numbers shown
+/// beside their entries.
 pub fn view(
     current: &Screen,
     collapsed: bool,
     containers: Option<usize>,
     volumes: Option<usize>,
     networks: Option<usize>,
+    images: Option<usize>,
 ) -> Element<'_, Message> {
     let entries = column![
         entry(
@@ -92,6 +93,14 @@ pub fn view(
             *current == Screen::Networks,
             collapsed,
         ),
+        entry(
+            Icon::Image,
+            t!("sidebar.images").into_owned(),
+            images,
+            ActionId::GoImages,
+            *current == Screen::Images,
+            collapsed,
+        ),
     ]
     .spacing(SPACE_1);
     let (width, padding) = if collapsed {
@@ -116,10 +125,16 @@ mod tests {
 
     #[test]
     fn view_builds_collapsed_and_expanded() {
-        for screen in [Screen::Containers, Screen::Volumes, Screen::Networks] {
+        for screen in [
+            Screen::Containers,
+            Screen::Volumes,
+            Screen::Networks,
+            Screen::Images,
+        ] {
             for collapsed in [false, true] {
                 for count in [None, Some(0), Some(12)] {
-                    let _: Element<'_, Message> = view(&screen, collapsed, count, count, count);
+                    let _: Element<'_, Message> =
+                        view(&screen, collapsed, count, count, count, count);
                 }
             }
         }

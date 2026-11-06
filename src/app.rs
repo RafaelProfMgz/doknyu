@@ -23,6 +23,7 @@ use crate::ui::tokens::{BORDER_WIDTH, ROW_HEIGHT, SPACE_1};
 use crate::views::containers::{self, ContainersState};
 use crate::views::detail::terminal::{self, TerminalState};
 use crate::views::detail::{self, DetailState};
+use crate::views::images::{self, ImagesState};
 use crate::views::networks::{self, NetworksState};
 use crate::views::palette::{self, PaletteState};
 use crate::views::volumes::{self, VolumesState};
@@ -34,6 +35,7 @@ pub enum Screen {
     Containers,
     Volumes,
     Networks,
+    Images,
 }
 
 /// Tabs of the bottom dock.
@@ -104,6 +106,7 @@ pub enum Message {
     Containers(containers::Msg),
     Volumes(volumes::Msg),
     Networks(networks::Msg),
+    Images(images::Msg),
     /// Something in the container shown in the dock (logs today).
     Detail(detail::Msg),
     /// An event of the embedded terminal session (output, the shell exiting, a resize).
@@ -125,6 +128,8 @@ pub enum Message {
     ReloadVolumes,
     /// The debounce window after a network event is over: reload the networks.
     ReloadNetworks,
+    /// The debounce window after an image event is over: reload the images.
+    ReloadImages,
     /// The system theme (light/dark) was read or changed.
     SystemTheme(iced::theme::Mode),
     ToggleSidebar,
@@ -164,6 +169,7 @@ pub struct App {
     pub containers: ContainersState,
     pub volumes: VolumesState,
     pub networks: NetworksState,
+    pub images: ImagesState,
     pub toasts: Vec<Toast>,
     pub theme_mode: ThemeMode,
     /// Last theme reported by the system; `Mode::None` until it answers or has no preference.
@@ -209,6 +215,9 @@ pub struct App {
     /// Same again, for the network list.
     networks_reload_scheduled: bool,
     networks_load_seq: u64,
+    /// And for the image list.
+    images_reload_scheduled: bool,
+    images_load_seq: u64,
     /// When the current events subscription was opened.
     events_started: Option<tokio::time::Instant>,
     /// How long to wait the next time the events stream ends.
@@ -330,6 +339,7 @@ impl App {
             containers: ContainersState::default(),
             volumes: VolumesState::default(),
             networks: NetworksState::default(),
+            images: ImagesState::default(),
             toasts: Vec::new(),
             theme_mode: config_dir
                 .as_deref()
@@ -355,6 +365,8 @@ impl App {
             volumes_load_seq: 0,
             networks_reload_scheduled: false,
             networks_load_seq: 0,
+            images_reload_scheduled: false,
+            images_load_seq: 0,
             events_started: None,
             events_backoff: EVENTS_BACKOFF_MIN,
         };
@@ -394,13 +406,14 @@ impl App {
 
     /// What decides the root of the widget tree: a different one is a different tree, and the
     /// state of every widget (a terminal's focus) is lost.
-    fn view_shape(&self) -> [bool; 6] {
+    fn view_shape(&self) -> [bool; 7] {
         [
             !self.toasts.is_empty(),
             self.palette.is_some(),
             self.containers.confirm_remove.is_some(),
             self.volumes.confirm.is_some(),
             self.networks.confirm_remove.is_some(),
+            self.images.confirm.is_some(),
             self.dock.as_ref().is_some_and(|d| d.maximized),
         ]
     }
@@ -411,12 +424,19 @@ impl App {
         }
         match m {
             Message::Navigate(screen) => {
+                let to_images = screen == Screen::Images;
                 self.screen = screen;
                 // The row under the cursor is not drawn on the new screen, so no exit comes.
                 self.containers.hovered = None;
                 self.volumes.hovered = None;
                 self.networks.hovered = None;
-                Task::none()
+                self.images.hovered = None;
+                // Containers may have come and gone while the screen was not looked at.
+                if to_images && self.conn == Connection::Ok {
+                    self.load_images()
+                } else {
+                    Task::none()
+                }
             }
             Message::Pinged(Ok(())) => {
                 self.conn = Connection::Ok;
@@ -426,6 +446,7 @@ impl App {
                     self.load_containers(),
                     self.load_volumes(),
                     self.load_networks(),
+                    self.load_images(),
                 ])
             }
             // Whatever the error, the daemon is not usable: the onboarding explains it and the
@@ -469,6 +490,15 @@ impl App {
                 self.networks_reload_scheduled = false;
                 if self.conn == Connection::Ok {
                     self.load_networks()
+                } else {
+                    Task::none()
+                }
+            }
+            Message::Images(m) => self.update_images(m),
+            Message::ReloadImages => {
+                self.images_reload_scheduled = false;
+                if self.conn == Connection::Ok {
+                    self.load_images()
                 } else {
                     Task::none()
                 }
@@ -650,11 +680,13 @@ impl App {
             GoContainers => self.update(Message::Navigate(Screen::Containers)),
             GoVolumes => self.update(Message::Navigate(Screen::Volumes)),
             GoNetworks => self.update(Message::Navigate(Screen::Networks)),
+            GoImages => self.update(Message::Navigate(Screen::Images)),
             ToggleSidebar => self.update(Message::ToggleSidebar),
             ToggleDock => self.update(Message::ToggleDock),
             FocusSearch => iced::widget::operation::focus(Id::new(match self.screen {
                 Screen::Volumes => volumes::SEARCH_ID,
                 Screen::Networks => networks::SEARCH_ID,
+                Screen::Images => images::SEARCH_ID,
                 _ => containers::SEARCH_ID,
             })),
             FocusLogSearch => iced::widget::operation::focus(Id::new(detail::logs::SEARCH_ID)),
@@ -713,6 +745,10 @@ impl App {
                     None => Task::none(),
                 }
             }
+            RemoveSelected if self.screen == Screen::Images => match self.images.selected.clone() {
+                Some(reference) => self.update_images(images::Msg::AskRemove(reference)),
+                None => Task::none(),
+            },
             RemoveSelected => on_selected(self, Msg::AskRemove),
             PruneVolumes => {
                 // A maximized dock hides the list the dialog is about.
@@ -721,6 +757,14 @@ impl App {
                 }
                 let go = self.update(Message::Navigate(Screen::Volumes));
                 Task::batch([go, self.update_volumes(volumes::Msg::AskPrune)])
+            }
+            PruneImages => {
+                // A maximized dock hides the list the dialog is about.
+                if let Some(dock) = &mut self.dock {
+                    dock.maximized = false;
+                }
+                let go = self.update(Message::Navigate(Screen::Images));
+                Task::batch([go, self.update_images(images::Msg::AskPrune)])
             }
             OpenExternalTerminal => match self.terminal_target().map(|c| c.id.clone()) {
                 Some(id) => Task::perform(
@@ -752,6 +796,12 @@ impl App {
     /// The number the sidebar shows beside Networks; none unless connected.
     fn network_count(&self) -> Option<usize> {
         (self.conn == Connection::Ok).then_some(self.networks.items.len())
+    }
+
+    /// The number the sidebar shows beside Images (one per image, not per tag); none unless
+    /// connected.
+    fn image_count(&self) -> Option<usize> {
+        (self.conn == Connection::Ok).then_some(self.images.items.len())
     }
 
     /// The container a terminal would open in: the dock's, else the selected one.
@@ -830,6 +880,23 @@ impl App {
                     &mut self.networks.scroll_y,
                 )
             }
+            Screen::Images => {
+                let visible = self.images.visible();
+                let current =
+                    self.images.selected.as_deref().and_then(|reference| {
+                        visible.iter().position(|r| r.reference == reference)
+                    });
+                let Some(target) = step_target(visible.len(), current, forward) else {
+                    return Task::none();
+                };
+                self.images.selected = Some(visible[target].reference.clone());
+                scroll_row_into_view(
+                    images::LIST_ID,
+                    target,
+                    self.images.viewport_h,
+                    &mut self.images.scroll_y,
+                )
+            }
         }
     }
 
@@ -843,6 +910,7 @@ impl App {
         if self.containers.confirm_remove.take().is_some()
             || self.volumes.confirm.take().is_some()
             || self.networks.confirm_remove.take().is_some()
+            || self.images.confirm.take().is_some()
         {
             return;
         }
@@ -879,6 +947,10 @@ impl App {
             Screen::Networks if !self.networks.query.is_empty() => {
                 self.networks.query.clear();
                 self.networks.keep_selection_visible();
+            }
+            Screen::Images if !self.images.query.is_empty() => {
+                self.images.query.clear();
+                self.images.keep_selection_visible();
             }
             _ => {}
         }
@@ -985,7 +1057,8 @@ impl App {
         let remove_force = containers::remove_force(&self.containers);
         let dialog_open = remove_force.is_some()
             || self.volumes.confirm.is_some()
-            || self.networks.confirm_remove.is_some();
+            || self.networks.confirm_remove.is_some()
+            || self.images.confirm.is_some();
         if dialog_open
             && *key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter)
             && mods.is_empty()
@@ -995,6 +1068,7 @@ impl App {
                 None if self.networks.confirm_remove.is_some() => {
                     self.update_networks(networks::Msg::Confirm)
                 }
+                None if self.images.confirm.is_some() => self.update_images(images::Msg::Confirm),
                 // Does nothing if the dialog has nothing to confirm (nothing to prune).
                 None => self.update_volumes(volumes::Msg::Confirm),
             };
@@ -1381,6 +1455,143 @@ impl App {
         )
     }
 
+    fn load_images(&mut self) -> Task<Message> {
+        self.images_load_seq += 1;
+        let seq = self.images_load_seq;
+        let client = self.client.clone();
+        Task::perform(async move { client.list_images().await }, move |r| {
+            Message::Images(images::Msg::Loaded(seq, r))
+        })
+    }
+
+    /// Something went wrong with an image operation: tells the user and reloads, since the list
+    /// may be out of date (the image was already gone, or a container took it meanwhile). A
+    /// connection error goes to the onboarding instead.
+    fn fail_and_reload_images(&mut self, e: DockerError) -> Task<Message> {
+        let connection = e.is_connection();
+        let _ = self.fail(e);
+        if connection {
+            Task::none()
+        } else {
+            self.load_images()
+        }
+    }
+
+    fn update_images(&mut self, m: images::Msg) -> Task<Message> {
+        use images::{ImageConfirm, Msg};
+        match m {
+            // Reloads can overlap: only the latest one counts.
+            Msg::Loaded(seq, _) if seq != self.images_load_seq => Task::none(),
+            Msg::Loaded(_, Ok(items)) => {
+                self.images.set_items(items);
+                Task::none()
+            }
+            Msg::Loaded(_, Err(e)) => self.fail(e),
+            Msg::Query(query) => {
+                self.images.query = query;
+                self.images.keep_selection_visible();
+                Task::none()
+            }
+            Msg::Select(reference) => {
+                self.images.selected = Some(reference);
+                Task::none()
+            }
+            Msg::Hover(reference) => {
+                self.images.hovered = Some(reference);
+                Task::none()
+            }
+            Msg::Leave(reference) => {
+                if self.images.hovered.as_deref() == Some(reference.as_str()) {
+                    self.images.hovered = None;
+                }
+                Task::none()
+            }
+            // An image in use is not offered for removal: Docker would refuse it anyway.
+            Msg::AskRemove(reference) => {
+                if self.images.removable(&reference) {
+                    self.images.confirm = Some(ImageConfirm::Remove(reference));
+                }
+                Task::none()
+            }
+            Msg::AskPrune => {
+                self.images.confirm = Some(ImageConfirm::Prune(self.images.dangling()));
+                Task::none()
+            }
+            Msg::Confirm => {
+                if !self.images.can_confirm() {
+                    return Task::none();
+                }
+                match self.images.confirm.take() {
+                    Some(ImageConfirm::Remove(reference)) => self.remove_image(reference),
+                    Some(ImageConfirm::Prune(_)) => self.prune_images(),
+                    None => Task::none(),
+                }
+            }
+            Msg::Cancel => {
+                self.images.confirm = None;
+                Task::none()
+            }
+            // The list is refreshed by the Docker events the removal causes.
+            Msg::Removed(reference, result) => {
+                self.images.pending.remove(&reference);
+                match result {
+                    Ok(()) => Task::none(),
+                    Err(e) => self.fail_and_reload_images(e),
+                }
+            }
+            Msg::Pruned(Ok(report)) => {
+                let text = if report.removed.len() == 1 {
+                    t!(
+                        "images.pruned_one",
+                        count = 1,
+                        size = images::format_size(report.reclaimed)
+                    )
+                } else {
+                    t!(
+                        "images.pruned",
+                        count = report.removed.len(),
+                        size = images::format_size(report.reclaimed)
+                    )
+                };
+                self.push_toast_of(ToastKind::Info, text.into_owned(), None);
+                Task::none()
+            }
+            Msg::Pruned(Err(e)) => self.fail_and_reload_images(e),
+            Msg::Scrolled { offset, height } => {
+                self.images.scroll_y = offset;
+                self.images.viewport_h = height;
+                Task::none()
+            }
+            Msg::Resized(height) => {
+                self.images.viewport_h = height;
+                Task::none()
+            }
+        }
+    }
+
+    /// Removes a tag (or an untagged image, by id) unless a removal of it is already running.
+    fn remove_image(&mut self, reference: String) -> Task<Message> {
+        if !self.images.pending.insert(reference.clone()) {
+            return Task::none();
+        }
+        let client = self.client.clone();
+        Task::perform(
+            async move {
+                let result = client.remove_image(&reference).await;
+                (reference, result)
+            },
+            |(reference, result)| Message::Images(images::Msg::Removed(reference, result)),
+        )
+    }
+
+    /// Asks Docker to remove the untagged images no container uses, as `docker image prune`.
+    fn prune_images(&mut self) -> Task<Message> {
+        let client = self.client.clone();
+        Task::perform(async move { client.prune_images().await }, |result| {
+            Message::Images(images::Msg::Pruned(result))
+        })
+    }
+
     fn load_volumes(&mut self) -> Task<Message> {
         self.volumes_load_seq += 1;
         let seq = self.volumes_load_seq;
@@ -1447,6 +1658,19 @@ impl App {
                 Message::ReloadNetworks
             }));
         }
+        // Images appear and go on their own events. One is in use by a container from its
+        // creation to its removal, so those matter too, but only for the list on screen: the
+        // next visit reloads anyway.
+        let changes_images = ev.kind == ResourceKind::Image
+            || (self.screen == Screen::Images
+                && ev.kind == ResourceKind::Container
+                && matches!(ev.action.as_str(), "create" | "destroy"));
+        if changes_images && !self.images_reload_scheduled {
+            self.images_reload_scheduled = true;
+            tasks.push(Task::perform(tokio::time::sleep(RELOAD_DEBOUNCE), |()| {
+                Message::ReloadImages
+            }));
+        }
         Task::batch(tasks)
     }
 
@@ -1472,6 +1696,8 @@ impl App {
         self.volumes.hovered = None;
         self.networks.confirm_remove = None;
         self.networks.hovered = None;
+        self.images.confirm = None;
+        self.images.hovered = None;
         self.close_dock();
     }
 
@@ -1525,6 +1751,7 @@ impl App {
             && self.containers.confirm_remove.is_none()
             && self.volumes.confirm.is_none()
             && self.networks.confirm_remove.is_none()
+            && self.images.confirm.is_none()
     }
 
     /// A session is due: the Terminal tab is on screen without one, the container runs and the
@@ -1656,6 +1883,7 @@ impl App {
         let count = (self.conn == Connection::Ok).then_some(self.containers.items.len());
         let volumes = self.volume_count();
         let networks = self.network_count();
+        let images = self.image_count();
         let body = column![
             row![
                 sidebar::view(
@@ -1663,7 +1891,8 @@ impl App {
                     self.sidebar_collapsed,
                     count,
                     volumes,
-                    networks
+                    networks,
+                    images
                 ),
                 container(main).width(Length::Fill).height(Length::Fill),
             ]
@@ -1691,6 +1920,10 @@ impl App {
         };
         let body = match networks::dialog(&self.networks) {
             Some(card) => modal(body, card, Message::Networks(networks::Msg::Cancel)),
+            None => body,
+        };
+        let body = match images::dialog(&self.images) {
+            Some(card) => modal(body, card, Message::Images(images::Msg::Cancel)),
             None => body,
         };
         let body = match &self.palette {
@@ -1743,6 +1976,7 @@ impl App {
             Screen::Containers => containers::view(&self.containers),
             Screen::Volumes => volumes::view(&self.volumes),
             Screen::Networks => networks::view(&self.networks),
+            Screen::Images => images::view(&self.images),
         }
     }
 
@@ -1931,6 +2165,8 @@ mod tests {
         assert_eq!(app.screen, Screen::Volumes);
         let _ = app.update(Message::Navigate(Screen::Networks));
         assert_eq!(app.screen, Screen::Networks);
+        let _ = app.update(Message::Navigate(Screen::Images));
+        assert_eq!(app.screen, Screen::Images);
     }
 
     #[test]
@@ -3539,6 +3775,8 @@ mod tests {
         assert_eq!(app.screen, Screen::Networks);
         let _ = app.run_action(ActionId::GoVolumes);
         assert_eq!(app.screen, Screen::Volumes);
+        let _ = app.run_action(ActionId::GoImages);
+        assert_eq!(app.screen, Screen::Images);
         let _ = app.run_action(ActionId::GoContainers);
         assert_eq!(app.screen, Screen::Containers);
     }
@@ -5727,6 +5965,641 @@ mod tests {
         assert_eq!(app.volumes.hovered.as_deref(), Some("cache"), "stale exit");
         let _ = app.update(Message::Navigate(Screen::Containers));
         assert_eq!(app.volumes.hovered, None);
+    }
+
+    // ---- Images screen (task 8.2) ----
+
+    fn image_event(action: &str, id: &str) -> DockerEvent {
+        DockerEvent {
+            kind: ResourceKind::Image,
+            action: action.into(),
+            id: id.into(),
+        }
+    }
+
+    fn image_list_calls(fake: &FakeClient) -> usize {
+        fake.calls().iter().filter(|c| *c == "list_images").count()
+    }
+
+    fn img_msg(m: images::Msg) -> Message {
+        Message::Images(m)
+    }
+
+    fn image_references(app: &App) -> Vec<String> {
+        app.images
+            .visible()
+            .into_iter()
+            .map(|r| r.reference)
+            .collect()
+    }
+
+    /// Connected, on the Images screen. The sample images are `nginx:latest` (used by `web`),
+    /// `postgres:16` (`db`), `app/worker:1.0` (`worker`), `alpine:3.20` (free) and one dangling.
+    async fn images_app(fake: &Arc<FakeClient>) -> App {
+        let mut app = loaded_app(fake).await;
+        settle(&mut app, Message::Action(ActionId::GoImages)).await;
+        assert_eq!(app.screen, Screen::Images);
+        app
+    }
+
+    #[tokio::test]
+    async fn connecting_loads_the_images() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let app = loaded_app(&fake).await;
+        assert_eq!(app.images.items.len(), 5);
+        assert_eq!(image_list_calls(&fake), 1);
+    }
+
+    #[tokio::test]
+    async fn entering_the_screen_reloads_the_images() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        fake.add_image(crate::model::ImageInfo {
+            id: "sha256:new".into(),
+            repo_tags: vec!["new:1".into()],
+            size: 1,
+            created: 0,
+            used_by: vec![],
+        });
+        settle(&mut app, Message::Navigate(Screen::Images)).await;
+        assert_eq!(image_list_calls(&fake), 2);
+        assert_eq!(app.images.items.len(), 6);
+        // Leaving does not.
+        settle(&mut app, Message::Navigate(Screen::Containers)).await;
+        assert_eq!(image_list_calls(&fake), 2);
+    }
+
+    #[tokio::test]
+    async fn go_images_shortcut() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let def = actions::def(ActionId::GoImages);
+        assert_eq!(def.shortcut.map(|s| (s.ctrl, s.key)), Some((true, "4")));
+        assert!(def.in_palette);
+        settle(
+            &mut app,
+            char_key("4", iced::keyboard::Modifiers::CTRL, false),
+        )
+        .await;
+        assert_eq!(app.screen, Screen::Images);
+        // Also with the focus in a text input.
+        let _ = app.update(Message::Navigate(Screen::Containers));
+        settle(
+            &mut app,
+            char_key("4", iced::keyboard::Modifiers::CTRL, true),
+        )
+        .await;
+        assert_eq!(app.screen, Screen::Images);
+    }
+
+    #[tokio::test]
+    async fn in_use_image_cannot_be_removed() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let _ = app.update(img_msg(images::Msg::AskRemove("nginx:latest".into())));
+        assert_eq!(app.images.confirm, None);
+
+        // Neither does the Delete key or the palette action offer it.
+        app.images.selected = Some("nginx:latest".into());
+        assert!(!actions::available(&app, ActionId::RemoveSelected));
+        settle(&mut app, key(iced::keyboard::key::Named::Delete, false)).await;
+        assert_eq!(app.images.confirm, None);
+        assert!(!fake.calls().iter().any(|c| c.starts_with("remove_image")));
+    }
+
+    #[tokio::test]
+    async fn unused_image_is_removed_after_confirming() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let _ = app.update(img_msg(images::Msg::AskRemove("alpine:3.20".into())));
+        assert_eq!(
+            app.images.confirm,
+            Some(images::ImageConfirm::Remove("alpine:3.20".into()))
+        );
+        assert!(!fake.calls().iter().any(|c| c.starts_with("remove_image")));
+        settle(&mut app, img_msg(images::Msg::Confirm)).await;
+        assert!(
+            fake.calls()
+                .contains(&"remove_image:alpine:3.20".to_string())
+        );
+        assert_eq!(app.images.confirm, None);
+        assert!(app.images.pending.is_empty());
+        assert!(app.toasts.is_empty());
+        // The daemon's `delete` event refreshes the list.
+        settle(
+            &mut app,
+            Message::Docker(image_event("delete", "sha256:alpine")),
+        )
+        .await;
+        assert!(!image_references(&app).contains(&"alpine:3.20".to_string()));
+        assert_eq!(app.images.items.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn a_dangling_image_is_removed_by_its_id() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let id = "sha256:dangling";
+        let _ = app.update(img_msg(images::Msg::AskRemove(id.into())));
+        settle(&mut app, img_msg(images::Msg::Confirm)).await;
+        assert!(fake.calls().contains(&format!("remove_image:{id}")));
+    }
+
+    #[tokio::test]
+    async fn removing_an_image_twice_runs_one_call() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let _ = app.update(img_msg(images::Msg::AskRemove("alpine:3.20".into())));
+        let first = app.update(img_msg(images::Msg::Confirm));
+        assert!(app.images.pending.contains("alpine:3.20"));
+        // Asking again while it runs is refused.
+        let _ = app.update(img_msg(images::Msg::AskRemove("alpine:3.20".into())));
+        assert_eq!(app.images.confirm, None);
+        let _ = run(first).await;
+        let removals = fake
+            .calls()
+            .iter()
+            .filter(|c| c.starts_with("remove_image"))
+            .count();
+        assert_eq!(removals, 1);
+    }
+
+    #[tokio::test]
+    async fn remove_dialog_closes_when_row_disappears() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let _ = app.update(img_msg(images::Msg::AskRemove("alpine:3.20".into())));
+        assert!(app.images.confirm.is_some());
+        // Removed from outside; the event leads to a reload.
+        fake.remove_image("alpine:3.20").await.unwrap();
+        let calls = fake.calls().len();
+        settle(&mut app, Message::ReloadImages).await;
+        assert_eq!(app.images.confirm, None);
+        let after_reload = fake.calls().len();
+        assert!(after_reload > calls);
+        settle(&mut app, img_msg(images::Msg::Confirm)).await;
+        settle(&mut app, enter_key(false)).await;
+        assert_eq!(fake.calls().len(), after_reload, "no call to Docker");
+        assert!(app.toasts.is_empty(), "no 404 toast");
+    }
+
+    #[tokio::test]
+    async fn image_remove_conflict_keeps_item_and_toasts() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let _ = app.update(img_msg(images::Msg::AskRemove("alpine:3.20".into())));
+        fake.fail_next(DockerError::Conflict("image is being used".into()));
+        settle(&mut app, img_msg(images::Msg::Confirm)).await;
+        assert_eq!(app.images.items.len(), 5, "the image is still listed");
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(
+            app.toasts[0].text,
+            friendly_error(&DockerError::Conflict(String::new()))
+        );
+        assert!(app.images.pending.is_empty(), "the row is usable again");
+        assert_eq!(app.conn, Connection::Ok);
+        // The list is reloaded after the failure.
+        assert_eq!(image_list_calls(&fake), 3);
+    }
+
+    #[tokio::test]
+    async fn prune_dialog_lists_only_dangling() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let _ = app.update(img_msg(images::Msg::AskPrune));
+        assert_eq!(
+            app.images.confirm,
+            Some(images::ImageConfirm::Prune(vec![(
+                "sha256:dangling".into(),
+                52_000_000
+            )]))
+        );
+        assert!(!fake.calls().contains(&"prune_images".to_string()));
+    }
+
+    #[tokio::test]
+    async fn prune_with_empty_list_cannot_confirm() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        fake.prune_images().await.unwrap();
+        settle(&mut app, Message::ReloadImages).await;
+        let _ = app.update(img_msg(images::Msg::AskPrune));
+        assert_eq!(
+            app.images.confirm,
+            Some(images::ImageConfirm::Prune(vec![]))
+        );
+        let calls = fake.calls().len();
+        settle(&mut app, img_msg(images::Msg::Confirm)).await;
+        settle(&mut app, enter_key(false)).await;
+        assert_eq!(fake.calls().len(), calls, "no call to Docker");
+        assert!(app.toasts.is_empty());
+        let _ = app.view();
+    }
+
+    #[tokio::test]
+    async fn image_prune_dialog_follows_reloads() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let _ = app.update(img_msg(images::Msg::AskPrune));
+        fake.remove_image("sha256:dangling").await.unwrap();
+        settle(&mut app, Message::ReloadImages).await;
+        assert_eq!(
+            app.images.confirm,
+            Some(images::ImageConfirm::Prune(vec![]))
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_toast_counts_and_bytes() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let report = |n: usize, bytes: u64| crate::model::PruneReport {
+            removed: (0..n).map(|i| format!("sha256:{i}")).collect(),
+            reclaimed: bytes,
+        };
+        let _ = app.update(img_msg(images::Msg::Pruned(Ok(report(3, 1_500_000)))));
+        let last = app.toasts.last().expect("a toast");
+        assert_eq!(
+            last.text,
+            t!("images.pruned", count = 3, size = "1.5 MB").into_owned()
+        );
+        assert_eq!(last.kind, ToastKind::Info);
+        assert!(last.text.contains('3') && last.text.contains("1.5 MB"));
+        let _ = app.update(img_msg(images::Msg::Pruned(Ok(report(1, 52_000_000)))));
+        assert_eq!(
+            app.toasts.last().unwrap().text,
+            t!("images.pruned_one", count = 1, size = "52.0 MB").into_owned()
+        );
+        let _ = app.update(img_msg(images::Msg::Pruned(Ok(report(0, 0)))));
+        assert_eq!(
+            app.toasts.last().unwrap().text,
+            t!("images.pruned", count = 0, size = "0 B").into_owned()
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_from_the_dialog_toasts_the_removed_count_and_size() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let _ = app.update(img_msg(images::Msg::AskPrune));
+        settle(&mut app, img_msg(images::Msg::Confirm)).await;
+        assert_eq!(app.images.confirm, None);
+        assert!(fake.calls().contains(&"prune_images".to_string()));
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(
+            app.toasts[0].text,
+            t!("images.pruned_one", count = 1, size = "52.0 MB").into_owned()
+        );
+        settle(
+            &mut app,
+            Message::Docker(image_event("delete", "sha256:dangling")),
+        )
+        .await;
+        assert_eq!(app.images.items.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn prune_failure_toasts_the_error_and_reloads() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let _ = app.update(img_msg(images::Msg::AskPrune));
+        fake.fail_next(DockerError::Other("boom".into()));
+        settle(&mut app, img_msg(images::Msg::Confirm)).await;
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(app.toasts[0].kind, ToastKind::Error);
+        assert_eq!(app.images.items.len(), 5);
+        assert_eq!(image_list_calls(&fake), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn image_event_triggers_reload() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let before = image_list_calls(&fake);
+        fake.remove_image("alpine:3.20").await.unwrap();
+        settle(
+            &mut app,
+            Message::Docker(image_event("delete", "sha256:alpine")),
+        )
+        .await;
+        assert_eq!(image_list_calls(&fake), before + 1);
+        assert_eq!(app.images.items.len(), 4);
+        assert_eq!(list_calls(&fake), 1, "containers are not reloaded for it");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn burst_of_image_events_reloads_once() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let before = image_list_calls(&fake);
+        let tasks: Vec<_> = (0..5)
+            .map(|_| app.update(Message::Docker(image_event("untag", "x"))))
+            .collect();
+        let mut produced = Vec::new();
+        for task in tasks {
+            produced.extend(run(task).await);
+        }
+        assert_eq!(produced.len(), 1, "only the first event schedules a reload");
+        for m in produced {
+            settle(&mut app, m).await;
+        }
+        assert_eq!(image_list_calls(&fake), before + 1);
+        settle(&mut app, Message::Docker(image_event("pull", "y"))).await;
+        assert_eq!(image_list_calls(&fake), before + 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn container_create_and_destroy_reload_images_only_while_on_the_screen() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        // On another screen, the next visit reloads anyway.
+        let before = image_list_calls(&fake);
+        settle(&mut app, Message::Docker(container_event("create"))).await;
+        assert_eq!(image_list_calls(&fake), before);
+
+        let _ = app.update(Message::Navigate(Screen::Images));
+        let before = image_list_calls(&fake);
+        for action in ["create", "destroy"] {
+            let calls = image_list_calls(&fake);
+            settle(&mut app, Message::Docker(container_event(action))).await;
+            assert_eq!(image_list_calls(&fake), calls + 1, "{action}");
+        }
+        // A stop does not change which images are in use.
+        let calls = image_list_calls(&fake);
+        settle(&mut app, Message::Docker(container_event("die"))).await;
+        assert_eq!(image_list_calls(&fake), calls);
+        assert!(image_list_calls(&fake) > before);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn image_reload_is_skipped_when_docker_is_unreachable() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        app.conn = Connection::Failed(DockerError::NotRunning);
+        let before = image_list_calls(&fake);
+        settle(&mut app, Message::ReloadImages).await;
+        assert_eq!(image_list_calls(&fake), before);
+    }
+
+    #[tokio::test]
+    async fn an_older_image_load_cannot_overwrite_a_newer_one() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let seq = app.images_load_seq;
+        let _ = app.update(img_msg(images::Msg::Loaded(seq - 1, Ok(vec![]))));
+        assert_eq!(app.images.items.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn image_load_connection_error_goes_to_onboarding() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let seq = app.images_load_seq;
+        let _ = app.update(img_msg(images::Msg::Loaded(
+            seq,
+            Err(DockerError::NotRunning),
+        )));
+        assert_eq!(app.conn, Connection::Failed(DockerError::NotRunning));
+        assert_eq!(app.images.confirm, None);
+        let _ = app.view();
+    }
+
+    #[tokio::test]
+    async fn image_keyboard_selection_moves_in_the_visible_list() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        // Visible order is by tag: alpine, app/worker, nginx, postgres, then the dangling one.
+        assert_eq!(app.images.selected, None);
+        let _ = app.update(key_msg("j", false));
+        assert_eq!(app.images.selected.as_deref(), Some("alpine:3.20"));
+        let _ = app.update(named_key(iced::keyboard::key::Named::ArrowDown));
+        assert_eq!(app.images.selected.as_deref(), Some("app/worker:1.0"));
+        let _ = app.update(key_msg("k", false));
+        assert_eq!(app.images.selected.as_deref(), Some("alpine:3.20"));
+        let _ = app.update(key_msg("k", false));
+        assert_eq!(
+            app.images.selected.as_deref(),
+            Some("alpine:3.20"),
+            "no wrap"
+        );
+        app.images.selected = None;
+        let _ = app.run_action(ActionId::SelectPrev);
+        assert_eq!(app.images.selected.as_deref(), Some("sha256:dangling"));
+        assert_eq!(app.containers.selected, None, "containers are untouched");
+    }
+
+    #[tokio::test]
+    async fn delete_enter_and_escape_drive_the_image_dialog() {
+        use iced::keyboard::key::Named;
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        app.images.selected = Some("alpine:3.20".into());
+        settle(&mut app, key(Named::Delete, false)).await;
+        assert_eq!(
+            app.images.confirm,
+            Some(images::ImageConfirm::Remove("alpine:3.20".into()))
+        );
+        let _ = app.view();
+
+        // Esc cancels and removes nothing.
+        settle(&mut app, key(Named::Escape, false)).await;
+        assert_eq!(app.images.confirm, None);
+        assert!(!fake.calls().iter().any(|c| c.starts_with("remove_image")));
+
+        // Behind the dialog the keys do nothing but Enter and Esc.
+        settle(&mut app, key(Named::Delete, false)).await;
+        let _ = app.update(key_msg("j", false));
+        assert_eq!(app.images.selected.as_deref(), Some("alpine:3.20"));
+        assert!(!actions::available(&app, ActionId::SelectNext));
+
+        // Enter confirms, even if a text input holds the event.
+        settle(&mut app, enter_key(true)).await;
+        assert_eq!(app.images.confirm, None);
+        assert!(
+            fake.calls()
+                .contains(&"remove_image:alpine:3.20".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn enter_on_the_image_prune_dialog_prunes() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let _ = app.update(img_msg(images::Msg::AskPrune));
+        settle(&mut app, enter_key(false)).await;
+        assert!(fake.calls().contains(&"prune_images".to_string()));
+        assert_eq!(app.images.confirm, None);
+    }
+
+    #[tokio::test]
+    async fn enter_on_images_does_not_open_the_dock() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        app.containers.selected = Some("web-id".into());
+        app.images.selected = Some("alpine:3.20".into());
+        settle(&mut app, enter_key(false)).await;
+        assert!(app.dock.is_none());
+        assert_eq!(app.images.confirm, None);
+    }
+
+    #[tokio::test]
+    async fn escape_on_images_closes_layers_in_order() {
+        use iced::keyboard::key::Named;
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let _ = app.update(img_msg(images::Msg::Query("alp".into())));
+        let _ = app.update(img_msg(images::Msg::AskPrune));
+        settle(&mut app, key(Named::Escape, false)).await;
+        assert_eq!(app.images.confirm, None);
+        assert_eq!(app.images.query, "alp", "the dialog goes first");
+        settle(&mut app, key(Named::Escape, false)).await;
+        assert_eq!(app.images.query, "");
+    }
+
+    #[tokio::test]
+    async fn search_filters_images_and_keeps_the_selection_visible() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        app.images.selected = Some("nginx:latest".into());
+        let _ = app.update(img_msg(images::Msg::Query("postgres".into())));
+        assert_eq!(image_references(&app), vec!["postgres:16"]);
+        assert_eq!(app.images.selected.as_deref(), Some("postgres:16"));
+        let _ = app.update(img_msg(images::Msg::Query("zzz".into())));
+        assert_eq!(app.images.selected, None);
+    }
+
+    #[tokio::test]
+    async fn image_search_is_focusable_only_on_the_images_screen() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        assert!(actions::available(&app, ActionId::FocusSearch));
+        let _ = app.update(Message::Navigate(Screen::Containers));
+        assert!(actions::available(&app, ActionId::FocusSearch));
+        app.images.confirm = Some(images::ImageConfirm::Prune(vec![]));
+        let _ = app.update(Message::Navigate(Screen::Images));
+        assert!(
+            !actions::available(&app, ActionId::FocusSearch),
+            "a dialog covers it"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_selected_on_images_opens_the_image_dialog_not_the_container_one() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        app.containers.selected = Some("web-id".into());
+        app.images.selected = Some("alpine:3.20".into());
+        settle(&mut app, Message::Action(ActionId::RemoveSelected)).await;
+        assert_eq!(app.containers.confirm_remove, None);
+        assert_eq!(
+            app.images.confirm,
+            Some(images::ImageConfirm::Remove("alpine:3.20".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_images_is_a_palette_action_without_shortcut() {
+        let def = actions::def(ActionId::PruneImages);
+        assert!(def.in_palette);
+        assert_eq!(def.shortcut, None);
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        assert!(palette::matches(&app, "prune").contains(&ActionId::PruneImages));
+        app.conn = Connection::Failed(DockerError::NotRunning);
+        assert!(!actions::available(&app, ActionId::PruneImages));
+    }
+
+    #[tokio::test]
+    async fn prune_images_from_containers_goes_to_images_and_asks() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        assert_eq!(app.screen, Screen::Containers);
+        let _ = app.update(Message::Action(ActionId::OpenPalette));
+        settle(&mut app, Message::PaletteRun(Some(ActionId::PruneImages))).await;
+        assert!(app.palette.is_none());
+        assert_eq!(app.screen, Screen::Images);
+        assert_eq!(
+            app.images.confirm,
+            Some(images::ImageConfirm::Prune(vec![(
+                "sha256:dangling".into(),
+                52_000_000
+            )]))
+        );
+        assert!(!fake.calls().contains(&"prune_images".to_string()));
+        let _ = app.view();
+    }
+
+    #[tokio::test]
+    async fn prune_images_action_restores_a_maximized_dock() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        let _ = app.update(Message::ToggleMaximize);
+        assert!(app.dock.as_ref().is_some_and(|d| d.maximized));
+        settle(&mut app, Message::Action(ActionId::PruneImages)).await;
+        assert!(app.dock.as_ref().is_some_and(|d| !d.maximized));
+        assert!(app.images.confirm.is_some());
+    }
+
+    #[tokio::test]
+    async fn sidebar_counts_the_images_while_connected() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        assert_eq!(app.image_count(), Some(5));
+        app.conn = Connection::Failed(DockerError::NotRunning);
+        assert_eq!(app.image_count(), None);
+        app.conn = Connection::Checking;
+        assert_eq!(app.image_count(), None);
+        let _ = app.view();
+    }
+
+    #[tokio::test]
+    async fn an_image_dialog_is_dropped_when_docker_goes_away() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let _ = app.update(img_msg(images::Msg::AskPrune));
+        let _ = app.update(Message::Pinged(Err(DockerError::NotRunning)));
+        assert_eq!(app.images.confirm, None);
+    }
+
+    #[tokio::test]
+    async fn images_view_builds_with_dock_dialog_and_toasts() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        app.images.selected = Some("alpine:3.20".into());
+        app.images.hovered = Some("nginx:latest".into());
+        app.images.pending.insert("alpine:3.20".into());
+        for confirm in [
+            None,
+            Some(images::ImageConfirm::Remove("alpine:3.20".into())),
+            Some(images::ImageConfirm::Prune(vec![(
+                "sha256:dangling".into(),
+                1,
+            )])),
+        ] {
+            app.images.confirm = confirm;
+            let _ = app.view();
+        }
+        app.push_toast("x".into(), None);
+        let _ = app.update(Message::ToggleMaximize);
+        let _ = app.view();
+    }
+
+    #[tokio::test]
+    async fn navigating_away_clears_the_image_hover() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let _ = app.update(img_msg(images::Msg::Hover("alpine:3.20".into())));
+        assert_eq!(app.images.hovered.as_deref(), Some("alpine:3.20"));
+        let _ = app.update(img_msg(images::Msg::Leave("other".into())));
+        assert_eq!(
+            app.images.hovered.as_deref(),
+            Some("alpine:3.20"),
+            "stale exit"
+        );
+        let _ = app.update(Message::Navigate(Screen::Containers));
+        assert_eq!(app.images.hovered, None);
     }
 
     // ---- Networks screen (task 4.2) ----
