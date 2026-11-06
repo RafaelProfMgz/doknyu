@@ -312,6 +312,27 @@ fn docker_ok(args: &[&str]) -> bool {
 }
 
 /// Builds `FROM alpine` plus a unique layer, tagged `tag`.
+/// Builds an image without a tag (`docker build -q -`) and returns its id (`sha256:...`).
+fn build_untagged(marker: &str) -> String {
+    use std::io::Write;
+    let mut child = Command::new("docker")
+        .args(["build", "-q", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("docker build");
+    let dockerfile = format!("FROM {IMAGE}\nRUN echo {marker} > /marker\n");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(dockerfile.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "docker build failed");
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
 fn build_image(tag: &str, marker: &str) {
     use std::io::Write;
     let mut child = Command::new("docker")
@@ -420,26 +441,22 @@ async fn images_prune_removes_a_dangling_one() {
         return;
     }
     let client = BollardClient::new();
-    let tag = format!("{}:t1", unique("img"));
-    let cleanup = ImageCleanup(vec![tag.clone()]);
-    build_image(&tag, &unique("a"));
-    // Retag with other content: the first image loses its tag and becomes dangling.
-    build_image(&tag, &unique("b"));
+    // A build without a tag leaves an untagged image. Retagging does not work for this: with
+    // the containerd image store (the default since Docker 29) the old image just goes away.
+    let id = build_untagged(&unique("a"));
+    let cleanup = ImageCleanup(vec![id.clone()]);
 
-    let dangling = client
-        .list_images()
-        .await
-        .unwrap()
-        .into_iter()
-        .filter(|i| i.repo_tags.is_empty())
-        .collect::<Vec<_>>();
-    assert_eq!(dangling.len(), 1);
+    let listed = client.list_images().await.unwrap();
+    let ours = listed
+        .iter()
+        .find(|i| i.id == id)
+        .expect("untagged image listed");
+    assert!(ours.repo_tags.is_empty());
 
     let report = client.prune_images().await.unwrap();
-    assert!(report.removed.contains(&dangling[0].id));
+    assert!(report.removed.contains(&id), "{report:?}");
     assert!(report.reclaimed > 0);
     let after = client.list_images().await.unwrap();
-    assert!(after.iter().any(|i| i.repo_tags.contains(&tag)));
-    assert!(after.iter().all(|i| !i.repo_tags.is_empty()));
+    assert!(after.iter().all(|i| i.id != id));
     drop(cleanup);
 }
