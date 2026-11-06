@@ -2166,6 +2166,15 @@ mod tests {
         async fn prune_volumes(&self) -> Result<Vec<String>, DockerError> {
             std::future::pending().await
         }
+        async fn list_images(&self) -> Result<Vec<crate::model::ImageInfo>, DockerError> {
+            std::future::pending().await
+        }
+        async fn remove_image(&self, _reference: &str) -> Result<(), DockerError> {
+            std::future::pending().await
+        }
+        async fn prune_images(&self) -> Result<crate::model::PruneReport, DockerError> {
+            std::future::pending().await
+        }
         async fn list_networks(&self) -> Result<Vec<NetworkInfo>, DockerError> {
             std::future::pending().await
         }

@@ -91,6 +91,28 @@ pub struct VolumeInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageInfo {
+    /// Full `sha256:...` id.
+    pub id: String,
+    /// Empty for dangling images.
+    pub repo_tags: Vec<String>,
+    /// Bytes.
+    pub size: u64,
+    /// Unix seconds.
+    pub created: i64,
+    /// Names of the containers (running or stopped) that use the image.
+    pub used_by: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PruneReport {
+    /// Ids of the deleted images.
+    pub removed: Vec<String>,
+    /// Bytes freed.
+    pub reclaimed: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetworkInfo {
     pub id: String,
     pub name: String,
@@ -104,6 +126,7 @@ pub enum ResourceKind {
     Container,
     Volume,
     Network,
+    Image,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -92,6 +92,14 @@ fn prune_volumes_options() -> ::bollard::query_parameters::PruneVolumesOptions {
         .build()
 }
 
+/// Only dangling images (no tag), like `docker image prune` without `-a`.
+fn prune_images_options() -> ::bollard::query_parameters::PruneImagesOptions {
+    let filters = HashMap::from([("dangling".to_string(), vec!["true".to_string()])]);
+    ::bollard::query_parameters::PruneImagesOptionsBuilder::new()
+        .filters(&filters)
+        .build()
+}
+
 impl Default for BollardClient {
     fn default() -> Self {
         Self::new()
@@ -170,7 +178,12 @@ impl DockerClient for BollardClient {
         self.stream_of(move |d| {
             let filters: HashMap<String, Vec<String>> = HashMap::from([(
                 "type".to_string(),
-                vec!["container".into(), "volume".into(), "network".into()],
+                vec![
+                    "container".into(),
+                    "volume".into(),
+                    "network".into(),
+                    "image".into(),
+                ],
             )]);
             let opts = EventsOptionsBuilder::new().filters(&filters).build();
             d.events(Some(opts)).filter_map(move |r| {
@@ -227,6 +240,58 @@ impl DockerClient for BollardClient {
             .await
             .map_err(self.err())?;
         Ok(resp.volumes_deleted.unwrap_or_default())
+    }
+
+    async fn list_images(&self) -> Result<Vec<ImageInfo>, DockerError> {
+        let docker = self.docker()?;
+        let images = docker
+            .list_images(None::<::bollard::query_parameters::ListImagesOptions>)
+            .await
+            .map_err(self.err())?;
+        let containers = self.list_containers_raw(&docker).await?;
+        Ok(images
+            .iter()
+            .map(|i| {
+                let used_by = containers
+                    .iter()
+                    .filter(|c| c.image_id.as_deref() == Some(i.id.as_str()))
+                    .map(|c| convert::container_from_summary(c).name)
+                    .collect();
+                convert::image_from(i, used_by)
+            })
+            .collect())
+    }
+
+    async fn remove_image(&self, reference: &str) -> Result<(), DockerError> {
+        self.docker()?
+            .remove_image(
+                reference,
+                None::<::bollard::query_parameters::RemoveImageOptions>,
+                None,
+            )
+            .await
+            .map(|_| ())
+            .map_err(self.err())
+    }
+
+    async fn prune_images(&self) -> Result<PruneReport, DockerError> {
+        let resp = self
+            .docker()?
+            .prune_images(Some(prune_images_options()))
+            .await
+            .map_err(self.err())?;
+        Ok(PruneReport {
+            removed: resp
+                .images_deleted
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|d| d.deleted)
+                .collect(),
+            reclaimed: resp
+                .space_reclaimed
+                .and_then(|n| u64::try_from(n).ok())
+                .unwrap_or(0),
+        })
     }
 
     /// Fills `containers` by crossing `list_containers(all=true)` with each
@@ -379,5 +444,12 @@ mod tests {
         let opts = prune_volumes_options();
         let filters = opts.filters.expect("filters set");
         assert_eq!(filters.get("all"), Some(&vec!["true".to_string()]));
+    }
+
+    #[test]
+    fn prune_images_options_filter_dangling_only() {
+        let opts = prune_images_options();
+        let filters = opts.filters.expect("filters set");
+        assert_eq!(filters.get("dangling"), Some(&vec!["true".to_string()]));
     }
 }

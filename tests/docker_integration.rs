@@ -292,3 +292,154 @@ async fn unreadable_socket_is_permission_denied() {
     let client = BollardClient::with_socket(path);
     assert_eq!(client.ping().await, Err(DockerError::PermissionDenied));
 }
+
+/// Removes the named image tags on drop, even if the test panics.
+struct ImageCleanup(Vec<String>);
+
+impl Drop for ImageCleanup {
+    fn drop(&mut self) {
+        for r in &self.0 {
+            let _ = Command::new("docker").args(["rmi", "-f", r]).output();
+        }
+    }
+}
+
+fn docker_ok(args: &[&str]) -> bool {
+    Command::new("docker")
+        .args(args)
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// Builds `FROM alpine` plus a unique layer, tagged `tag`.
+fn build_image(tag: &str, marker: &str) {
+    use std::io::Write;
+    let mut child = Command::new("docker")
+        .args(["build", "-q", "-t", tag, "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("docker build");
+    let dockerfile = format!("FROM {IMAGE}\nRUN echo {marker} > /marker\n");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(dockerfile.as_bytes())
+        .unwrap();
+    assert!(child.wait().unwrap().success(), "docker build failed");
+}
+
+#[tokio::test]
+#[ignore]
+async fn images_list_and_remove_a_tag() {
+    let docker = raw().await;
+    drop(docker);
+    let client = BollardClient::new();
+    let tag = format!("{}:t1", unique("img"));
+    let mut cleanup = ImageCleanup(vec![tag.clone()]);
+
+    let before = client.list_images().await.unwrap();
+    let alpine = before
+        .iter()
+        .find(|i| i.repo_tags.iter().any(|t| t == IMAGE))
+        .expect("alpine listed");
+    assert!(alpine.size > 0);
+
+    // A second tag on alpine: removing it must leave alpine in place.
+    assert!(docker_ok(&["tag", IMAGE, &tag]));
+    let listed = client.list_images().await.unwrap();
+    let with_tag = listed
+        .iter()
+        .find(|i| i.repo_tags.contains(&tag))
+        .expect("new tag listed");
+    assert_eq!(with_tag.id, alpine.id);
+
+    client.remove_image(&tag).await.unwrap();
+    cleanup.0.clear();
+    let after = client.list_images().await.unwrap();
+    assert!(after.iter().all(|i| !i.repo_tags.contains(&tag)));
+    assert!(after.iter().any(|i| i.id == alpine.id));
+    assert!(matches!(
+        client.remove_image(&tag).await,
+        Err(DockerError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+#[ignore]
+async fn images_used_by_and_in_use_conflict() {
+    let docker = raw().await;
+    let client = BollardClient::new();
+    let tag = format!("{}:t1", unique("img"));
+    let mut images = ImageCleanup(vec![tag.clone()]);
+    let mut cleanup = Cleanup::new();
+    build_image(&tag, &unique("m"));
+
+    let name = unique("c");
+    cleanup.containers.push(name.clone());
+    let body = ContainerCreateBody {
+        image: Some(tag.clone()),
+        cmd: Some(vec!["true".into()]),
+        ..Default::default()
+    };
+    let opts = CreateContainerOptionsBuilder::new().name(&name).build();
+    docker.create_container(Some(opts), body).await.unwrap();
+
+    // A stopped container still counts as a user of the image.
+    let img = client
+        .list_images()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|i| i.repo_tags.contains(&tag))
+        .expect("built image listed");
+    assert_eq!(img.used_by, vec![name.clone()]);
+    assert!(matches!(
+        client.remove_image(&tag).await,
+        Err(DockerError::Conflict(_))
+    ));
+
+    drop(cleanup);
+    client.remove_image(&tag).await.unwrap();
+    images.0.clear();
+}
+
+/// `docker image prune` takes every dangling image of the daemon, so this only runs on a daemon
+/// with none of its own; otherwise it would delete images the test did not create.
+#[tokio::test]
+#[ignore]
+async fn images_prune_removes_a_dangling_one() {
+    let _ = raw().await;
+    let preexisting = Command::new("docker")
+        .args(["images", "-q", "-f", "dangling=true"])
+        .output()
+        .unwrap();
+    if !preexisting.stdout.is_empty() {
+        eprintln!("skipped: the daemon has dangling images that are not ours");
+        return;
+    }
+    let client = BollardClient::new();
+    let tag = format!("{}:t1", unique("img"));
+    let cleanup = ImageCleanup(vec![tag.clone()]);
+    build_image(&tag, &unique("a"));
+    // Retag with other content: the first image loses its tag and becomes dangling.
+    build_image(&tag, &unique("b"));
+
+    let dangling = client
+        .list_images()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|i| i.repo_tags.is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(dangling.len(), 1);
+
+    let report = client.prune_images().await.unwrap();
+    assert!(report.removed.contains(&dangling[0].id));
+    assert!(report.reclaimed > 0);
+    let after = client.list_images().await.unwrap();
+    assert!(after.iter().any(|i| i.repo_tags.contains(&tag)));
+    assert!(after.iter().all(|i| !i.repo_tags.is_empty()));
+    drop(cleanup);
+}

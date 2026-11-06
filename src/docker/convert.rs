@@ -5,7 +5,7 @@ use crate::model::*;
 use bollard::container::LogOutput;
 use bollard::models::{
     ContainerStatsResponse, ContainerSummary, ContainerSummaryStateEnum, EventMessage,
-    EventMessageTypeEnum, Network, PortSummary, PortSummaryTypeEnum, Volume,
+    EventMessageTypeEnum, ImageSummary, Network, PortSummary, PortSummaryTypeEnum, Volume,
 };
 
 /// Container name without the leading slash; falls back to the 12-char short id.
@@ -152,6 +152,22 @@ pub fn volume_from(v: &Volume, used_by: Vec<String>) -> VolumeInfo {
     }
 }
 
+/// A `<none>:<none>` tag list (or an empty one) marks a dangling image; a negative size becomes 0.
+pub fn image_from(s: &ImageSummary, used_by: Vec<String>) -> ImageInfo {
+    let repo_tags = if s.repo_tags.iter().all(|t| t == "<none>:<none>") {
+        Vec::new()
+    } else {
+        s.repo_tags.clone()
+    };
+    ImageInfo {
+        id: s.id.clone(),
+        repo_tags,
+        size: u64::try_from(s.size).unwrap_or(0),
+        created: s.created,
+        used_by,
+    }
+}
+
 /// `containers` is left empty: bollard's `Network` (list response) carries no
 /// container attachments; the client fills them in separately.
 pub fn network_from(n: &Network) -> NetworkInfo {
@@ -198,6 +214,7 @@ pub fn event_from(m: &EventMessage) -> Option<DockerEvent> {
         EventMessageTypeEnum::CONTAINER => ResourceKind::Container,
         EventMessageTypeEnum::VOLUME => ResourceKind::Volume,
         EventMessageTypeEnum::NETWORK => ResourceKind::Network,
+        EventMessageTypeEnum::IMAGE => ResourceKind::Image,
         _ => return None,
     };
     Some(DockerEvent {
@@ -307,7 +324,7 @@ mod tests {
     use super::*;
     use crate::error::DockerError;
     use bollard::models::{
-        ContainerStatsResponse, ContainerSummary, EventMessage, Network, Volume,
+        ContainerStatsResponse, ContainerSummary, EventMessage, ImageSummary, Network, Volume,
     };
 
     #[test]
@@ -417,10 +434,55 @@ mod tests {
         assert_eq!(info.used_by, vec!["web".to_string()]);
     }
 
+    fn image_summary(tags: &[&str], size: i64) -> ImageSummary {
+        ImageSummary {
+            id: "sha256:abc".into(),
+            repo_tags: tags.iter().map(|t| t.to_string()).collect(),
+            size,
+            created: 1_700_000_000,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn image_from_tagged() {
+        let info = image_from(
+            &image_summary(&["nginx:latest", "nginx:1.27"], 1234),
+            vec!["web".into()],
+        );
+        assert_eq!(info.id, "sha256:abc");
+        assert_eq!(info.repo_tags, vec!["nginx:latest", "nginx:1.27"]);
+        assert_eq!(info.size, 1234);
+        assert_eq!(info.created, 1_700_000_000);
+        assert_eq!(info.used_by, vec!["web".to_string()]);
+    }
+
+    #[test]
+    fn image_from_dangling_none_tag() {
+        let info = image_from(&image_summary(&["<none>:<none>"], -1), vec![]);
+        assert!(info.repo_tags.is_empty());
+        assert_eq!(info.size, 0);
+    }
+
+    #[test]
+    fn image_from_dangling_empty_tags() {
+        let info = image_from(&image_summary(&[], 10), vec![]);
+        assert!(info.repo_tags.is_empty());
+    }
+
+    #[test]
+    fn event_maps_image_type() {
+        let img: EventMessage = serde_json::from_str(EV_IMAGE).unwrap();
+        let ev = event_from(&img).unwrap();
+        assert_eq!(ev.kind, ResourceKind::Image);
+        assert_eq!(ev.action, "pull");
+    }
+
     #[test]
     fn event_ignores_unknown_types() {
-        let img: EventMessage = serde_json::from_str(EV_IMAGE).unwrap();
-        assert_eq!(event_from(&img), None);
+        let mut plugin: EventMessage = serde_json::from_str(EV_IMAGE).unwrap();
+        plugin.typ = Some(EventMessageTypeEnum::PLUGIN);
+        assert_eq!(event_from(&plugin), None);
         let start: EventMessage = serde_json::from_str(EV_START).unwrap();
         let ev = event_from(&start).unwrap();
         assert_eq!(ev.kind, ResourceKind::Container);
