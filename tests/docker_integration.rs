@@ -432,9 +432,10 @@ async fn images_used_by_and_in_use_conflict() {
 #[ignore]
 async fn images_prune_removes_a_dangling_one() {
     let _ = raw().await;
-    let preexisting = Command::new("docker")
+    let preexisting = tokio::process::Command::new("docker")
         .args(["images", "-q", "-f", "dangling=true"])
         .output()
+        .await
         .unwrap();
     if !preexisting.stdout.is_empty() {
         eprintln!("skipped: the daemon has dangling images that are not ours");
