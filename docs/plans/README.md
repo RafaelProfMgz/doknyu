@@ -31,6 +31,7 @@ interface, [`docs/specs/2026-10-29-ui-zed-design.md`](../specs/2026-10-29-ui-zed
 | 5 | [fase-5-terminal.md](fase-5-terminal.md) | Aba Terminal (`iced_term` ou terminal externo) |
 | 6 | [fase-6-i18n-release.md](fase-6-i18n-release.md) | pt-BR/en completos, identidade (App ID, ícone, .desktop, metainfo), AppImage/.deb, release |
 | 7 | [fase-7-distribuicao.md](fase-7-distribuicao.md) | Spike + manifesto Flatpak (Flathub), AUR, COPR e nixpkgs |
+| 8 | [fase-8-imagens.md](fase-8-imagens.md) | Tela de Imagens: lista por tag, remover seguro, limpar sem tag |
 
 Cada fase termina com o app compilando, `cargo clippy -- -D warnings` limpo e testes passando.
 
