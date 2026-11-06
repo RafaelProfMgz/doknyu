@@ -101,6 +101,25 @@ A template with this reminder is in [`.gitmessage`](.gitmessage); enable it once
 - CI must be green. PRs from first-time contributors need a maintainer's approval to run CI.
 - Maintainers merge into `develop`; `develop` is promoted to `main` in batches before a release.
 
+## Releasing (maintainer)
+
+The version lives in several files, so it is never edited by hand:
+
+1. From `develop`, create `chore/release-X.Y.Z`, run `scripts/bump-version.sh X.Y.Z` and open a
+   PR to `develop` titled `chore(release): bump version to X.Y.Z`. The script updates
+   `Cargo.toml`, `Cargo.lock`, the metainfo (`<release>` and the screenshot URLs) and the COPR
+   `.spec`.
+2. Promote `develop` to `main` (PR `develop` → `main`).
+3. On `main`, tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`. The `Release` workflow
+   builds the `.deb`, the AppImage and `SHA256SUMS` and publishes the GitHub release.
+4. When it finishes, the `Pins da release` workflow (`pin-release.yml`) pins Flatpak, AUR, Nix and
+   Homebrew to the new tag and opens a PR to `develop`. Review and merge it.
+5. Publish to each channel (AUR push, Flathub, COPR build, nixpkgs). These steps are manual and
+   described in [packaging/README.md](packaging/README.md).
+
+Use [semver](https://semver.org): a new screen or feature bumps the minor version (`0.1.0` →
+`0.2.0`), and fixes only bump the patch version (`0.2.0` → `0.2.1`).
+
 ## Packaging
 
 Packaging files live in `packaging/<channel>/`; see [packaging/README.md](packaging/README.md)

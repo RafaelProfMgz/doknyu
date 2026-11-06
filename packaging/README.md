@@ -153,7 +153,8 @@ Checklist:
 
 ### A cada release
 
-Crie a tag, rode `pin-release.sh <tag>` e atualize o `<release>` do metainfo (antes da tag).
+O `<release>` do metainfo entra antes da tag, pelo `scripts/bump-version.sh`. Depois da tag, o workflow
+`pin-release.yml` roda o `pin-release.sh <tag>` e abre o PR para a develop (ver `CONTRIBUTING.md`, "Releasing").
 
 ## AUR (Arch Linux)
 
@@ -241,7 +242,8 @@ Nada disso é feito por agente.
 ### A cada release
 
 1. Crie a tag, publique a release (o `release.yml` gera o `.deb` e o `SHA256SUMS`).
-2. `packaging/aur/pin-release.sh vX.Y.Z`: atualiza `pkgver`, volta `pkgrel` para 1, refaz os
+2. O workflow `pin-release.yml` roda `packaging/aur/pin-release.sh vX.Y.Z` e abre o PR para a develop
+   (à mão, se ele falhar): atualiza `pkgver`, volta `pkgrel` para 1, refaz os
    `sha256sums` (`updpkgsums`) e os `.SRCINFO`. Se só o PKGBUILD mudar (sem versão nova), aumente
    `pkgrel` à mão e rode `makepkg --printsrcinfo > .SRCINFO` em cada pasta.
 3. Rode `scripts/aur-check.sh` e faça o push de `doknyu` e `doknyu-bin` (o `doknyu-git` só precisa de
@@ -305,8 +307,8 @@ Nada disso é feito por agente.
 
 ### A cada release
 
-Crie a tag, atualize `Version:` e o `%changelog` do `.spec` (`Release` volta para 1; só o `.spec` mudou: aumente
-o `Release`), confira o `License:` e rode `scripts/rpm-check.sh`, `packaging/rpm/pin-release.sh vX.Y.Z` e `copr-cli build`.
+`Version:`, `Release` e o `%changelog` do `.spec` são atualizados antes da tag pelo `scripts/bump-version.sh` (se só o
+`.spec` mudou, sem versão nova, aumente o `Release` à mão). Depois da tag, confira o `License:` e rode `scripts/rpm-check.sh`, `packaging/rpm/pin-release.sh vX.Y.Z` e `copr-cli build`.
 
 ## nixpkgs
 
@@ -358,5 +360,5 @@ Nada disso é feito por agente. Leia o *contributing guide* do nixpkgs (<https:/
 
 ### A cada release
 
-`packaging/nix/pin-release.sh vX.Y.Z` atualiza o `package.nix` do repositório; no nixpkgs, a atualização costuma ser
+O workflow `pin-release.yml` roda `packaging/nix/pin-release.sh vX.Y.Z`, que atualiza o `package.nix` do repositório; no nixpkgs, a atualização costuma ser
 feita pelo `r-ryantm`/`nix-update` (por isso o `updateScript`), ou rode `nix-update doknyu`.
