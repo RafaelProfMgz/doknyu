@@ -8,9 +8,10 @@ Flathub, dar push em AUR, criar projeto no COPR etc. são passos do humano.
 - `aur/`: pacotes do AUR `doknyu`, `doknyu-bin` e `doknyu-git` (Fase 7, Tarefa 7.3).
 - `rpm/`: `.spec` do COPR (Fedora) (Fase 7, Tarefa 7.4).
 - `nix/` e `../flake.nix`: derivação para o nixpkgs e flake do repositório (Fase 7, Tarefa 7.4).
+- `homebrew/`: fórmula do tap `RafaelProfMgz/homebrew-tap` (Linux) (Fase 7, Tarefa 7.5).
 
 **Desinstalação:** os comandos de cada canal estão em [README.md › Uninstalling](../README.md#uninstalling).
-Ao criar um canal novo (ex.: Homebrew, Tarefa 7.5) ou mudar o nome de um pacote, atualize aquela
+Ao criar um canal novo ou mudar o nome de um pacote, atualize aquela
 tabela. O app só escreve em `$XDG_CONFIG_HOME/doknyu` (padrão `~/.config/doknyu`; no Flatpak,
 `~/.var/app/io.github.rafaelprofmgz.Doknyu/config/doknyu`), então nenhum pacote precisa de
 script de pós-remoção.
@@ -360,3 +361,64 @@ Nada disso é feito por agente. Leia o *contributing guide* do nixpkgs (<https:/
 
 `packaging/nix/pin-release.sh vX.Y.Z` atualiza o `package.nix` do repositório; no nixpkgs, a atualização costuma ser
 feita pelo `r-ryantm`/`nix-update` (por isso o `updateScript`), ou rode `nix-update doknyu`.
+
+## Homebrew (tap)
+
+O `homebrew-core` exige notoriedade (estrelas, forks, uso) que um projeto novo não tem; o caminho é um
+**tap próprio**, `RafaelProfMgz/homebrew-tap`, só para Linux.
+
+| Arquivo | Para quê |
+|---|---|
+| `homebrew/doknyu.rb` | A fórmula. Compila do tarball da tag (`cargo install *std_cargo_args`), `depends_on :linux`. Já fixada na `v0.1.0` (`url` + `sha256` reais). |
+| `homebrew/pin-release.sh` | Na release: baixa o tarball da tag, calcula o `sha256` e reescreve `url`/`sha256` (não precisa de Docker). |
+| `scripts/brew-check.sh` | Validação local (abaixo). |
+
+Decisões:
+
+- `depends_on "rust" => :build` e `"pkgconf" => :build`. Em runtime: `wayland`, `libxkbcommon`, `vulkan-loader`,
+  `libx11`, `libxcb`, `libxcursor`, `libxi`. O binário carrega todas com `dlopen` (winit/wgpu), então o linker não as
+  registra; o Homebrew põe as dependências no rpath do binário, e é isso que faz o `dlopen` achá-las. Não há `mesa`
+  no Homebrew: o driver Vulkan/GL vem do sistema.
+- Instala `.desktop`, metainfo, ícones (`hicolor`) e as licenças em `share/`. O desktop do sistema só vê isso se
+  `$HOMEBREW_PREFIX/share` estiver no `XDG_DATA_DIRS`; a fórmula avisa em `caveats`.
+- Docker não é dependência (o daemon costuma vir do sistema e o terminal usa `doknyu --exec-bridge`, não a CLI).
+- `test do` roda `doknyu --version`.
+
+### Validação (`scripts/brew-check.sh`)
+
+```sh
+scripts/brew-check.sh
+```
+
+Num container `homebrew/brew` (nome `doknyu-spike-brew-check-*`, removido ao fim): cria um tap local descartável,
+copia a fórmula e roda `brew style`, `brew audit --strict --new`, `brew install --build-from-source` (baixa a tag
+fixada na fórmula; leva vários minutos), `doknyu --version`, `brew test`, lista os arquivos instalados e o
+rpath, e `brew uninstall`. Falha se a `url` da fórmula não for a versão do `Cargo.toml`.
+
+### Passo a passo: publicar o tap (humano)
+
+Nada disso é feito por agente.
+
+1. Crie o repositório público **`RafaelProfMgz/homebrew-tap`** no GitHub (o prefixo `homebrew-` é obrigatório; o
+   nome curto do tap vira `RafaelProfMgz/tap`). Pode ter só um README.
+2. Rode `scripts/brew-check.sh` (a fórmula já está fixada na `v0.1.0`; `packaging/homebrew/pin-release.sh v0.1.0`
+   só é preciso para versões novas) e faça commit se algo mudou.
+3. Copie a fórmula para o tap:
+   ```sh
+   git clone git@github.com:RafaelProfMgz/homebrew-tap.git /tmp/homebrew-tap
+   mkdir -p /tmp/homebrew-tap/Formula && cp packaging/homebrew/doknyu.rb /tmp/homebrew-tap/Formula/doknyu.rb
+   cd /tmp/homebrew-tap && git add Formula/doknyu.rb
+   git commit -m "doknyu 0.1.0 (new formula)" && git push
+   ```
+4. Teste numa máquina com Homebrew no Linux:
+   ```sh
+   brew tap RafaelProfMgz/tap
+   brew install doknyu          # compila do fonte; leva vários minutos
+   doknyu --version
+   ```
+
+### A cada release
+
+Crie a tag e publique a release, rode `packaging/homebrew/pin-release.sh vX.Y.Z` (atualiza `url` e `sha256`),
+`scripts/brew-check.sh`, faça commit aqui e copie a fórmula para `Formula/doknyu.rb` do tap (commit
+`doknyu X.Y.Z`, push). Usuários atualizam com `brew update && brew upgrade doknyu`.
