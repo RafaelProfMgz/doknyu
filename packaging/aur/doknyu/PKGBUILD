@@ -2,7 +2,7 @@
 # Builds from the tarball of the release tag. The checksum below is a placeholder until the tag
 # exists; packaging/aur/pin-release.sh <tag> replaces it (updpkgsums) and regenerates .SRCINFO.
 pkgname=doknyu
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc='Desktop manager for Docker containers: logs, stats, volumes, networks and a terminal'
 arch=('x86_64')
@@ -17,7 +17,7 @@ makedepends=('cargo')
 optdepends=('docker: manage local containers')
 options=('!lto')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('436d15b81fd9b08035a8553590a89f1e1cd15b07ffa5770088ca0f7145ab8d11')
+sha256sums=('7bcdcf096fbb0a4991f20f184a4e722ccd40d388391cec8460ce29e8a948ac5a')
 
 prepare() {
   cd "$pkgname-$pkgver"
