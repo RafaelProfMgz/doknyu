@@ -1,13 +1,15 @@
 //! Pieces tied to the app messages: toast stack, state names and friendly error texts.
 
-use iced::widget::{column, container};
-use iced::{Element, Length, Padding};
+use iced::widget::{button, column, container, row, text};
+use iced::{Alignment, Element, Length, Padding};
 use rust_i18n::t;
 
 use crate::app::{Message, Toast};
 use crate::error::DockerError;
 use crate::ui::components::toast;
-use crate::ui::tokens::{SPACE_2, SPACE_4, STATUS_BAR_HEIGHT};
+use crate::ui::fonts::MONO;
+use crate::ui::style;
+use crate::ui::tokens::{SPACE_2, SPACE_3, SPACE_4, STATUS_BAR_HEIGHT, TEXT};
 
 /// Plain-language text for an error; the technical details go in `Toast::details`.
 pub fn friendly_error(e: &DockerError) -> String {
@@ -21,6 +23,23 @@ pub fn friendly_error(e: &DockerError) -> String {
         DockerError::Other(_) => t!("error.other"),
     }
     .into_owned()
+}
+
+/// A shell command in a monospace box with a "Copy" button (update and uninstall dialogs).
+pub fn command_block(command: String) -> Element<'static, Message> {
+    row![
+        container(text(command.clone()).size(TEXT).font(MONO))
+            .padding(SPACE_2)
+            .width(Length::Fill)
+            .style(style::container::bordered),
+        button(text(t!("onboarding.copy").into_owned()).size(TEXT))
+            .padding(Padding::from([SPACE_2, SPACE_3]))
+            .style(style::button::ghost)
+            .on_press(Message::Copy(command)),
+    ]
+    .spacing(SPACE_2)
+    .align_y(Alignment::Center)
+    .into()
 }
 
 /// Toasts stacked in the bottom-right corner, above the status bar; each one can be dismissed.

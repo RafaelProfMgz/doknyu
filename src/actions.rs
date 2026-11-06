@@ -41,6 +41,10 @@ pub enum ActionId {
     PruneVolumes,
     /// Removes the untagged images nobody uses (asks first); from any screen it goes to Images.
     PruneImages,
+    /// Opens the "Check for updates" dialog.
+    CheckUpdate,
+    /// Opens the "Uninstall doknyu" dialog.
+    Uninstall,
     Retry,
     Escape,
 }
@@ -87,7 +91,7 @@ const fn def_of(
 }
 
 /// Every action, in the order the palette lists them when nothing else ranks them.
-static ALL: [ActionDef; 28] = [
+static ALL: [ActionDef; 30] = [
     def_of(
         ActionId::GoContainers,
         "actions.go_containers",
@@ -201,6 +205,8 @@ static ALL: [ActionDef; 28] = [
     def_of(ActionId::ThemeLight, "actions.theme_light", None, true),
     def_of(ActionId::PruneVolumes, "actions.prune_volumes", None, true),
     def_of(ActionId::PruneImages, "actions.prune_images", None, true),
+    def_of(ActionId::CheckUpdate, "actions.check_update", None, true),
+    def_of(ActionId::Uninstall, "actions.uninstall", None, true),
     def_of(ActionId::Retry, "actions.retry", None, true),
     def_of(ActionId::Escape, "actions.escape", key("Esc"), false),
 ];
@@ -231,7 +237,9 @@ pub fn available_in(app: &App, id: ActionId, flatpak: bool) -> bool {
     let dialog_open = app.containers.confirm_remove.is_some()
         || app.volumes.confirm.is_some()
         || app.networks.confirm_remove.is_some()
-        || app.images.confirm.is_some();
+        || app.images.confirm.is_some()
+        || app.uninstall.is_some()
+        || app.update_dialog.is_some();
     let list_usable = connected
         && matches!(
             app.screen,
@@ -282,6 +290,8 @@ pub fn available_in(app: &App, id: ActionId, flatpak: bool) -> bool {
     match id {
         GoContainers | GoVolumes | GoNetworks | GoImages | ToggleSidebar | OpenPalette
         | ThemeSystem | ThemeDark | ThemeLight | Escape => true,
+        // Neither needs Docker; one dialog at a time.
+        CheckUpdate | Uninstall => app.uninstall.is_none() && app.update_dialog.is_none(),
         ToggleDock | PruneVolumes | PruneImages => connected,
         // Works from the maximized dock too: it does not need the list, only the selection.
         DockLogs | DockStats | DockTerminal => {
