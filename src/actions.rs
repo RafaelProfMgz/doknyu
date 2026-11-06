@@ -11,6 +11,7 @@ pub enum ActionId {
     GoContainers,
     GoVolumes,
     GoNetworks,
+    GoImages,
     ToggleSidebar,
     ToggleDock,
     FocusSearch,
@@ -38,6 +39,12 @@ pub enum ActionId {
     ThemeLight,
     /// Removes the volumes nobody uses (asks first); from any screen it goes to Volumes.
     PruneVolumes,
+    /// Removes the untagged images nobody uses (asks first); from any screen it goes to Images.
+    PruneImages,
+    /// Opens the "Check for updates" dialog.
+    CheckUpdate,
+    /// Opens the "Uninstall doknyu" dialog.
+    Uninstall,
     Retry,
     Escape,
 }
@@ -84,7 +91,7 @@ const fn def_of(
 }
 
 /// Every action, in the order the palette lists them when nothing else ranks them.
-static ALL: [ActionDef; 26] = [
+static ALL: [ActionDef; 30] = [
     def_of(
         ActionId::GoContainers,
         "actions.go_containers",
@@ -93,6 +100,7 @@ static ALL: [ActionDef; 26] = [
     ),
     def_of(ActionId::GoVolumes, "actions.go_volumes", ctrl("2"), true),
     def_of(ActionId::GoNetworks, "actions.go_networks", ctrl("3"), true),
+    def_of(ActionId::GoImages, "actions.go_images", ctrl("4"), true),
     def_of(
         ActionId::ToggleSidebar,
         "actions.toggle_sidebar",
@@ -196,6 +204,9 @@ static ALL: [ActionDef; 26] = [
     def_of(ActionId::ThemeDark, "actions.theme_dark", None, true),
     def_of(ActionId::ThemeLight, "actions.theme_light", None, true),
     def_of(ActionId::PruneVolumes, "actions.prune_volumes", None, true),
+    def_of(ActionId::PruneImages, "actions.prune_images", None, true),
+    def_of(ActionId::CheckUpdate, "actions.check_update", None, true),
+    def_of(ActionId::Uninstall, "actions.uninstall", None, true),
     def_of(ActionId::Retry, "actions.retry", None, true),
     def_of(ActionId::Escape, "actions.escape", key("Esc"), false),
 ];
@@ -222,20 +233,24 @@ pub fn available_in(app: &App, id: ActionId, flatpak: bool) -> bool {
     use ActionId::*;
     let connected = app.conn == Connection::Ok;
     // A list can be used: Docker answers, it is on screen (not hidden by the maximized dock)
-    // and no dialog covers it. `on_containers`, `on_volumes` and `on_networks` say which screen it is.
+    // and no dialog covers it. `on_containers`, `on_volumes`, `on_networks` and `on_images` say which screen it is.
     let dialog_open = app.containers.confirm_remove.is_some()
         || app.volumes.confirm.is_some()
-        || app.networks.confirm_remove.is_some();
+        || app.networks.confirm_remove.is_some()
+        || app.images.confirm.is_some()
+        || app.uninstall.is_some()
+        || app.update_dialog.is_some();
     let list_usable = connected
         && matches!(
             app.screen,
-            Screen::Containers | Screen::Volumes | Screen::Networks
+            Screen::Containers | Screen::Volumes | Screen::Networks | Screen::Images
         )
         && !dialog_open
         && !app.dock.as_ref().is_some_and(|d| d.maximized);
     let on_containers = list_usable && app.screen == Screen::Containers;
     let on_volumes = list_usable && app.screen == Screen::Volumes;
     let on_networks = list_usable && app.screen == Screen::Networks;
+    let on_images = list_usable && app.screen == Screen::Images;
     let has_selection = || {
         app.containers
             .selected
@@ -260,14 +275,24 @@ pub fn available_in(app: &App, id: ActionId, flatpak: bool) -> bool {
             .as_deref()
             .is_some_and(|id| app.networks.removable(id))
     };
+    // Docker refuses to remove an image a container uses, so it is not offered; nor one being
+    // removed.
+    let image_removable = || {
+        app.images
+            .selected
+            .as_deref()
+            .is_some_and(|reference| app.images.removable(reference))
+    };
     // The Logs tab is on screen: its search, timestamps and copy only make sense then.
     let logs_open = connected
         && app.dock.as_ref().is_some_and(|d| d.tab == DockTab::Logs)
         && app.detail.is_some();
     match id {
-        GoContainers | GoVolumes | GoNetworks | ToggleSidebar | OpenPalette | ThemeSystem
-        | ThemeDark | ThemeLight | Escape => true,
-        ToggleDock | PruneVolumes => connected,
+        GoContainers | GoVolumes | GoNetworks | GoImages | ToggleSidebar | OpenPalette
+        | ThemeSystem | ThemeDark | ThemeLight | Escape => true,
+        // Neither needs Docker; one dialog at a time.
+        CheckUpdate | Uninstall => app.uninstall.is_none() && app.update_dialog.is_none(),
+        ToggleDock | PruneVolumes | PruneImages => connected,
         // Works from the maximized dock too: it does not need the list, only the selection.
         DockLogs | DockStats | DockTerminal => {
             connected && app.containers.confirm_remove.is_none() && has_selection()
@@ -279,12 +304,13 @@ pub fn available_in(app: &App, id: ActionId, flatpak: bool) -> bool {
         }
         Retry => matches!(app.conn, Connection::Failed(_)),
         FocusSearch | SelectNext | SelectPrev => list_usable,
-        // Volumes and networks have nothing to open, start or restart.
+        // Volumes, networks and images have nothing to open, start or restart.
         OpenSelected | StartStopSelected | RestartSelected => on_containers && has_selection(),
         RemoveSelected => {
             (on_containers && has_selection())
                 || (on_volumes && volume_removable())
                 || (on_networks && network_removable())
+                || (on_images && image_removable())
         }
     }
 }

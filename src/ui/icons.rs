@@ -10,6 +10,7 @@ pub enum Icon {
     Box,
     Database,
     Network,
+    Image,
     Play,
     Square,
     RotateCw,
@@ -37,6 +38,7 @@ impl Icon {
         Icon::Box,
         Icon::Database,
         Icon::Network,
+        Icon::Image,
         Icon::Play,
         Icon::Square,
         Icon::RotateCw,
@@ -65,6 +67,7 @@ impl Icon {
             Icon::Box => '\u{e061}',
             Icon::Database => '\u{e0ad}',
             Icon::Network => '\u{e125}',
+            Icon::Image => '\u{e0f6}',
             Icon::Play => '\u{e13c}',
             Icon::Square => '\u{e167}',
             Icon::RotateCw => '\u{e149}',
@@ -106,6 +109,6 @@ mod tests {
             assert!(('\u{E000}'..='\u{F8FF}').contains(&c), "{i:?} -> {c:?}");
             assert!(seen.insert(c), "{i:?} repeats {c:?}");
         }
-        assert_eq!(seen.len(), 23);
+        assert_eq!(seen.len(), 24);
     }
 }

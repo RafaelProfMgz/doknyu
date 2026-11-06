@@ -45,6 +45,11 @@ pub trait DockerClient: Send + Sync + 'static {
     async fn list_volumes(&self) -> Result<Vec<VolumeInfo>, DockerError>;
     async fn remove_volume(&self, name: &str) -> Result<(), DockerError>;
     async fn prune_volumes(&self) -> Result<Vec<String>, DockerError>;
+    async fn list_images(&self) -> Result<Vec<ImageInfo>, DockerError>;
+    /// `reference` is `repo:tag` (removes that tag) or an image id (for dangling images).
+    async fn remove_image(&self, reference: &str) -> Result<(), DockerError>;
+    /// Removes dangling images only (like `docker image prune`).
+    async fn prune_images(&self) -> Result<PruneReport, DockerError>;
     async fn list_networks(&self) -> Result<Vec<NetworkInfo>, DockerError>;
     async fn remove_network(&self, id: &str) -> Result<(), DockerError>;
     /// Runs `cmd` in the container with a TTY and stdin attached; `env` is `KEY=value` pairs.

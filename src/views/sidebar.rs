@@ -1,6 +1,7 @@
-//! Navigation column: Containers, Volumes and Networks, collapsible to icons only.
+//! Navigation column: Containers, Volumes, Networks and Images, collapsible to icons only, with
+//! "Check for updates" and "Uninstall" at the bottom.
 
-use iced::widget::{button, center, column, container, row, rule, text, tooltip};
+use iced::widget::{button, center, column, container, row, rule, space, text, tooltip};
 use iced::{Alignment, Element, Length, Padding};
 
 use rust_i18n::t;
@@ -58,14 +59,53 @@ fn entry(
         .into()
 }
 
-/// Navigation column. `containers`, `volumes` and `networks` are the numbers shown beside their
-/// entries.
+/// A quiet entry at the bottom of the column (update, uninstall): muted text, no count.
+fn footer_entry(
+    glyph: Icon,
+    label: String,
+    action: ActionId,
+    collapsed: bool,
+) -> Element<'static, Message> {
+    let content: Element<'static, Message> = if collapsed {
+        center(icon(glyph).style(style::text::muted)).into()
+    } else {
+        container(
+            row![
+                icon(glyph).style(style::text::muted),
+                text(label.clone())
+                    .size(TEXT_SM)
+                    .style(style::text::muted)
+                    .width(Length::Fill),
+            ]
+            .spacing(SPACE_2)
+            .align_y(Alignment::Center),
+        )
+        .center_y(Length::Fill)
+        .into()
+    };
+    let item = button(content)
+        .width(Length::Fill)
+        .height(ROW_HEIGHT)
+        .padding(Padding::from([0.0, SPACE_2]))
+        .style(style::button::nav(false))
+        .on_press(Message::Action(action));
+    let tip = container(text(label).size(TEXT_SM))
+        .padding(Padding::from([SPACE_1, SPACE_2]))
+        .style(style::container::elevated);
+    tooltip(item, tip, tooltip::Position::Right)
+        .gap(SPACE_1)
+        .into()
+}
+
+/// Navigation column. `containers`, `volumes`, `networks` and `images` are the numbers shown
+/// beside their entries.
 pub fn view(
     current: &Screen,
     collapsed: bool,
     containers: Option<usize>,
     volumes: Option<usize>,
     networks: Option<usize>,
+    images: Option<usize>,
 ) -> Element<'_, Message> {
     let entries = column![
         entry(
@@ -92,8 +132,32 @@ pub fn view(
             *current == Screen::Networks,
             collapsed,
         ),
+        entry(
+            Icon::Image,
+            t!("sidebar.images").into_owned(),
+            images,
+            ActionId::GoImages,
+            *current == Screen::Images,
+            collapsed,
+        ),
     ]
     .spacing(SPACE_1);
+    let footer = column![
+        footer_entry(
+            Icon::RotateCw,
+            t!("sidebar.check_update").into_owned(),
+            ActionId::CheckUpdate,
+            collapsed,
+        ),
+        footer_entry(
+            Icon::Trash2,
+            t!("sidebar.uninstall").into_owned(),
+            ActionId::Uninstall,
+            collapsed,
+        ),
+    ]
+    .spacing(SPACE_1);
+    let entries = column![entries, space().height(Length::Fill), footer];
     let (width, padding) = if collapsed {
         (SIDEBAR_COLLAPSED, SPACE_1)
     } else {
@@ -116,10 +180,16 @@ mod tests {
 
     #[test]
     fn view_builds_collapsed_and_expanded() {
-        for screen in [Screen::Containers, Screen::Volumes, Screen::Networks] {
+        for screen in [
+            Screen::Containers,
+            Screen::Volumes,
+            Screen::Networks,
+            Screen::Images,
+        ] {
             for collapsed in [false, true] {
                 for count in [None, Some(0), Some(12)] {
-                    let _: Element<'_, Message> = view(&screen, collapsed, count, count, count);
+                    let _: Element<'_, Message> =
+                        view(&screen, collapsed, count, count, count, count);
                 }
             }
         }

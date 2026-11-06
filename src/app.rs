@@ -12,6 +12,7 @@ use rust_i18n::t;
 use crate::actions::{self, ActionId};
 use crate::docker::DockerClient;
 use crate::error::DockerError;
+use crate::install::{self, Env, Runner, SystemEnv, SystemRunner};
 use crate::keymap;
 use crate::model::{ContainerInfo, DockerEvent, ResourceKind};
 use crate::terminal_launcher;
@@ -20,11 +21,16 @@ use crate::ui::prefs;
 use crate::ui::style;
 use crate::ui::theme::{ThemeMode, resolve};
 use crate::ui::tokens::{BORDER_WIDTH, ROW_HEIGHT, SPACE_1};
+use crate::uninstall;
+use crate::update::{self, Http, UpdatePlan, UreqHttp};
 use crate::views::containers::{self, ContainersState};
 use crate::views::detail::terminal::{self, TerminalState};
 use crate::views::detail::{self, DetailState};
+use crate::views::images::{self, ImagesState};
 use crate::views::networks::{self, NetworksState};
 use crate::views::palette::{self, PaletteState};
+use crate::views::uninstall::{self as uninstall_view, UninstallState};
+use crate::views::update::{self as update_view, Outcome, UpdateState};
 use crate::views::volumes::{self, VolumesState};
 use crate::views::widgets::{friendly_error, toast_stack};
 use crate::views::{dock, onboarding, sidebar, status_bar};
@@ -34,6 +40,7 @@ pub enum Screen {
     Containers,
     Volumes,
     Networks,
+    Images,
 }
 
 /// Tabs of the bottom dock.
@@ -104,6 +111,7 @@ pub enum Message {
     Containers(containers::Msg),
     Volumes(volumes::Msg),
     Networks(networks::Msg),
+    Images(images::Msg),
     /// Something in the container shown in the dock (logs today).
     Detail(detail::Msg),
     /// An event of the embedded terminal session (output, the shell exiting, a resize).
@@ -125,6 +133,8 @@ pub enum Message {
     ReloadVolumes,
     /// The debounce window after a network event is over: reload the networks.
     ReloadNetworks,
+    /// The debounce window after an image event is over: reload the images.
+    ReloadImages,
     /// The system theme (light/dark) was read or changed.
     SystemTheme(iced::theme::Mode),
     ToggleSidebar,
@@ -147,6 +157,10 @@ pub enum Message {
         mods: iced::keyboard::Modifiers,
         captured: bool,
     },
+    /// Something in the "Uninstall doknyu" dialog.
+    Uninstall(uninstall_view::Msg),
+    /// Something in the "Check for updates" dialog.
+    Update(update_view::Msg),
     /// The palette's search text changed.
     PaletteQuery(String),
     /// Moves the highlighted palette result by this many rows.
@@ -157,6 +171,50 @@ pub enum Message {
     PaletteScrolled(f32),
 }
 
+/// The parts of the system the update and uninstall dialogs use; the tests swap in fakes.
+#[derive(Clone)]
+pub struct System {
+    pub env: Arc<dyn Env>,
+    pub runner: Arc<dyn Runner>,
+    pub http: Arc<dyn Http>,
+    pub home: PathBuf,
+    /// Where a downloaded `.deb` waits for apt.
+    pub cache: PathBuf,
+}
+
+impl System {
+    pub fn real() -> Self {
+        Self {
+            env: Arc::new(SystemEnv),
+            runner: Arc::new(SystemRunner),
+            http: Arc::new(UreqHttp),
+            home: std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_default(),
+            cache: update::cache_dir(),
+        }
+    }
+}
+
+/// Runs blocking work (package managers, files, network) off the UI thread.
+fn blocking<T: Send + 'static>(
+    job: impl FnOnce() -> T + Send + 'static,
+    done: impl Fn(T) -> Message + Send + 'static,
+) -> Task<Message> {
+    Task::perform(
+        async move { tokio::task::spawn_blocking(job).await },
+        move |result| done(result.expect("background job panicked")),
+    )
+}
+
+/// Starts the new version after an update.
+fn restart_into(runner: &dyn Runner, exe: Option<PathBuf>) -> Outcome {
+    match exe.map(|exe| runner.spawn_detached(&exe)) {
+        Some(Ok(())) => Outcome::Restarted,
+        _ => Outcome::RestartFailed,
+    }
+}
+
 pub struct App {
     client: Arc<dyn DockerClient>,
     pub conn: Connection,
@@ -164,6 +222,7 @@ pub struct App {
     pub containers: ContainersState,
     pub volumes: VolumesState,
     pub networks: NetworksState,
+    pub images: ImagesState,
     pub toasts: Vec<Toast>,
     pub theme_mode: ThemeMode,
     /// Last theme reported by the system; `Mode::None` until it answers or has no preference.
@@ -186,6 +245,14 @@ pub struct App {
     pub terminal_enabled: bool,
     /// The command palette, while it is open.
     pub palette: Option<PaletteState>,
+    /// The "Uninstall doknyu" dialog, while it is open.
+    pub uninstall: Option<UninstallState>,
+    /// The "Check for updates" dialog, while it is open.
+    pub update_dialog: Option<UpdateState>,
+    /// The system the two dialogs above work on.
+    pub system: System,
+    /// The app asked iced to close (after an uninstall or an update).
+    pub exiting: bool,
     /// Scroll offset of the palette results, to keep the cursor in view.
     palette_scroll_y: f32,
     /// Where preferences are saved; `None` keeps them in memory only.
@@ -209,6 +276,9 @@ pub struct App {
     /// Same again, for the network list.
     networks_reload_scheduled: bool,
     networks_load_seq: u64,
+    /// And for the image list.
+    images_reload_scheduled: bool,
+    images_load_seq: u64,
     /// When the current events subscription was opened.
     events_started: Option<tokio::time::Instant>,
     /// How long to wait the next time the events stream ends.
@@ -330,6 +400,7 @@ impl App {
             containers: ContainersState::default(),
             volumes: VolumesState::default(),
             networks: NetworksState::default(),
+            images: ImagesState::default(),
             toasts: Vec::new(),
             theme_mode: config_dir
                 .as_deref()
@@ -343,6 +414,10 @@ impl App {
             terminal_focused: false,
             terminal_enabled: true,
             palette: None,
+            uninstall: None,
+            update_dialog: None,
+            system: System::real(),
+            exiting: false,
             palette_scroll_y: 0.0,
             config_dir,
             panes: initial_panes(),
@@ -355,6 +430,8 @@ impl App {
             volumes_load_seq: 0,
             networks_reload_scheduled: false,
             networks_load_seq: 0,
+            images_reload_scheduled: false,
+            images_load_seq: 0,
             events_started: None,
             events_backoff: EVENTS_BACKOFF_MIN,
         };
@@ -394,13 +471,14 @@ impl App {
 
     /// What decides the root of the widget tree: a different one is a different tree, and the
     /// state of every widget (a terminal's focus) is lost.
-    fn view_shape(&self) -> [bool; 6] {
+    fn view_shape(&self) -> [bool; 7] {
         [
             !self.toasts.is_empty(),
             self.palette.is_some(),
             self.containers.confirm_remove.is_some(),
             self.volumes.confirm.is_some(),
             self.networks.confirm_remove.is_some(),
+            self.images.confirm.is_some(),
             self.dock.as_ref().is_some_and(|d| d.maximized),
         ]
     }
@@ -411,12 +489,19 @@ impl App {
         }
         match m {
             Message::Navigate(screen) => {
+                let to_images = screen == Screen::Images;
                 self.screen = screen;
                 // The row under the cursor is not drawn on the new screen, so no exit comes.
                 self.containers.hovered = None;
                 self.volumes.hovered = None;
                 self.networks.hovered = None;
-                Task::none()
+                self.images.hovered = None;
+                // Containers may have come and gone while the screen was not looked at.
+                if to_images && self.conn == Connection::Ok {
+                    self.load_images()
+                } else {
+                    Task::none()
+                }
             }
             Message::Pinged(Ok(())) => {
                 self.conn = Connection::Ok;
@@ -426,6 +511,7 @@ impl App {
                     self.load_containers(),
                     self.load_volumes(),
                     self.load_networks(),
+                    self.load_images(),
                 ])
             }
             // Whatever the error, the daemon is not usable: the onboarding explains it and the
@@ -469,6 +555,17 @@ impl App {
                 self.networks_reload_scheduled = false;
                 if self.conn == Connection::Ok {
                     self.load_networks()
+                } else {
+                    Task::none()
+                }
+            }
+            Message::Images(m) => self.update_images(m),
+            Message::Uninstall(m) => self.update_uninstall(m),
+            Message::Update(m) => self.update_update(m),
+            Message::ReloadImages => {
+                self.images_reload_scheduled = false;
+                if self.conn == Connection::Ok {
+                    self.load_images()
                 } else {
                     Task::none()
                 }
@@ -650,11 +747,13 @@ impl App {
             GoContainers => self.update(Message::Navigate(Screen::Containers)),
             GoVolumes => self.update(Message::Navigate(Screen::Volumes)),
             GoNetworks => self.update(Message::Navigate(Screen::Networks)),
+            GoImages => self.update(Message::Navigate(Screen::Images)),
             ToggleSidebar => self.update(Message::ToggleSidebar),
             ToggleDock => self.update(Message::ToggleDock),
             FocusSearch => iced::widget::operation::focus(Id::new(match self.screen {
                 Screen::Volumes => volumes::SEARCH_ID,
                 Screen::Networks => networks::SEARCH_ID,
+                Screen::Images => images::SEARCH_ID,
                 _ => containers::SEARCH_ID,
             })),
             FocusLogSearch => iced::widget::operation::focus(Id::new(detail::logs::SEARCH_ID)),
@@ -713,6 +812,10 @@ impl App {
                     None => Task::none(),
                 }
             }
+            RemoveSelected if self.screen == Screen::Images => match self.images.selected.clone() {
+                Some(reference) => self.update_images(images::Msg::AskRemove(reference)),
+                None => Task::none(),
+            },
             RemoveSelected => on_selected(self, Msg::AskRemove),
             PruneVolumes => {
                 // A maximized dock hides the list the dialog is about.
@@ -721,6 +824,16 @@ impl App {
                 }
                 let go = self.update(Message::Navigate(Screen::Volumes));
                 Task::batch([go, self.update_volumes(volumes::Msg::AskPrune)])
+            }
+            Uninstall => self.open_uninstall(),
+            CheckUpdate => self.open_update(),
+            PruneImages => {
+                // A maximized dock hides the list the dialog is about.
+                if let Some(dock) = &mut self.dock {
+                    dock.maximized = false;
+                }
+                let go = self.update(Message::Navigate(Screen::Images));
+                Task::batch([go, self.update_images(images::Msg::AskPrune)])
             }
             OpenExternalTerminal => match self.terminal_target().map(|c| c.id.clone()) {
                 Some(id) => Task::perform(
@@ -752,6 +865,12 @@ impl App {
     /// The number the sidebar shows beside Networks; none unless connected.
     fn network_count(&self) -> Option<usize> {
         (self.conn == Connection::Ok).then_some(self.networks.items.len())
+    }
+
+    /// The number the sidebar shows beside Images (one per image, not per tag); none unless
+    /// connected.
+    fn image_count(&self) -> Option<usize> {
+        (self.conn == Connection::Ok).then_some(self.images.items.len())
     }
 
     /// The container a terminal would open in: the dock's, else the selected one.
@@ -830,6 +949,23 @@ impl App {
                     &mut self.networks.scroll_y,
                 )
             }
+            Screen::Images => {
+                let visible = self.images.visible();
+                let current =
+                    self.images.selected.as_deref().and_then(|reference| {
+                        visible.iter().position(|r| r.reference == reference)
+                    });
+                let Some(target) = step_target(visible.len(), current, forward) else {
+                    return Task::none();
+                };
+                self.images.selected = Some(visible[target].reference.clone());
+                scroll_row_into_view(
+                    images::LIST_ID,
+                    target,
+                    self.images.viewport_h,
+                    &mut self.images.scroll_y,
+                )
+            }
         }
     }
 
@@ -840,9 +976,23 @@ impl App {
         if self.palette.take().is_some() {
             return;
         }
+        // These two never close in the middle of their work.
+        if let Some(state) = &self.uninstall {
+            if state.can_close() {
+                self.uninstall = None;
+            }
+            return;
+        }
+        if let Some(state) = &self.update_dialog {
+            if state.can_close() {
+                self.update_dialog = None;
+            }
+            return;
+        }
         if self.containers.confirm_remove.take().is_some()
             || self.volumes.confirm.take().is_some()
             || self.networks.confirm_remove.take().is_some()
+            || self.images.confirm.take().is_some()
         {
             return;
         }
@@ -879,6 +1029,10 @@ impl App {
             Screen::Networks if !self.networks.query.is_empty() => {
                 self.networks.query.clear();
                 self.networks.keep_selection_visible();
+            }
+            Screen::Images if !self.images.query.is_empty() => {
+                self.images.query.clear();
+                self.images.keep_selection_visible();
             }
             _ => {}
         }
@@ -985,7 +1139,8 @@ impl App {
         let remove_force = containers::remove_force(&self.containers);
         let dialog_open = remove_force.is_some()
             || self.volumes.confirm.is_some()
-            || self.networks.confirm_remove.is_some();
+            || self.networks.confirm_remove.is_some()
+            || self.images.confirm.is_some();
         if dialog_open
             && *key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter)
             && mods.is_empty()
@@ -995,6 +1150,7 @@ impl App {
                 None if self.networks.confirm_remove.is_some() => {
                     self.update_networks(networks::Msg::Confirm)
                 }
+                None if self.images.confirm.is_some() => self.update_images(images::Msg::Confirm),
                 // Does nothing if the dialog has nothing to confirm (nothing to prune).
                 None => self.update_volumes(volumes::Msg::Confirm),
             };
@@ -1381,6 +1537,422 @@ impl App {
         )
     }
 
+    /// Opens the uninstall dialog and finds out how the app was installed.
+    fn open_uninstall(&mut self) -> Task<Message> {
+        self.uninstall = Some(UninstallState::new(self.config_dir.clone()));
+        let system = self.system.clone();
+        blocking(
+            move || {
+                let kind = install::detect(system.env.as_ref(), system.runner.as_ref());
+                let has_pkexec = system.env.has_program("pkexec");
+                let plan = uninstall::plan(&kind, &system.home, has_pkexec);
+                (kind, plan)
+            },
+            |(kind, plan)| Message::Uninstall(uninstall_view::Msg::Detected(kind, plan)),
+        )
+    }
+
+    fn update_uninstall(&mut self, m: uninstall_view::Msg) -> Task<Message> {
+        use uninstall_view::{Msg, Stage};
+        let Some(state) = &mut self.uninstall else {
+            return Task::none();
+        };
+        match m {
+            Msg::Detected(kind, plan) => {
+                state.kind = Some(kind);
+                state.plan = Some(plan);
+                state.stage = Stage::Ready;
+                Task::none()
+            }
+            Msg::DeletePrefs(on) => {
+                if state.stage != Stage::Running {
+                    state.delete_prefs = on;
+                }
+                Task::none()
+            }
+            Msg::Confirm => {
+                let Some(plan) = state.plan.clone() else {
+                    return Task::none();
+                };
+                if state.stage == Stage::Running {
+                    return Task::none();
+                }
+                // Only a command to show and nothing to delete: there is nothing to run.
+                let prefs = state.prefs_to_delete();
+                if matches!(plan, uninstall::UninstallPlan::ShowCommand { .. }) && prefs.is_none() {
+                    return Task::none();
+                }
+                state.stage = Stage::Running;
+                let runner = self.system.runner.clone();
+                blocking(
+                    move || uninstall::execute(&plan, runner.as_ref(), prefs.as_deref()),
+                    |r| Message::Uninstall(Msg::Done(r)),
+                )
+            }
+            Msg::Cancel => {
+                if state.can_close() {
+                    self.uninstall = None;
+                }
+                Task::none()
+            }
+            Msg::Done(Ok(())) => self.exit(),
+            Msg::Done(Err(uninstall::UninstallError::Cancelled)) => {
+                state.stage = Stage::Ready;
+                self.push_toast_of(
+                    ToastKind::Info,
+                    t!("uninstall.cancelled").into_owned(),
+                    None,
+                );
+                Task::none()
+            }
+            Msg::Done(Err(e)) => {
+                state.stage = Stage::Failed(uninstall_view::error_text(&e));
+                Task::none()
+            }
+        }
+    }
+
+    /// Closes the app (after an uninstall, or once the new version is running).
+    fn exit(&mut self) -> Task<Message> {
+        self.exiting = true;
+        iced::exit()
+    }
+
+    /// Opens the update dialog and finds out how the app was installed.
+    fn open_update(&mut self) -> Task<Message> {
+        self.update_dialog = Some(UpdateState::default());
+        self.detect_for_update()
+    }
+
+    fn detect_for_update(&self) -> Task<Message> {
+        let system = self.system.clone();
+        blocking(
+            move || {
+                let env = system.env.as_ref();
+                let kind = install::detect(env, system.runner.as_ref());
+                let plan = update::plan(&kind, &|p| env.has_program(p));
+                (kind, plan, env.current_exe())
+            },
+            |(kind, plan, exe)| Message::Update(update_view::Msg::Detected { kind, plan, exe }),
+        )
+    }
+
+    /// Asks GitHub for the newest release.
+    fn check_latest(&self) -> Task<Message> {
+        let http = self.system.http.clone();
+        blocking(
+            move || update::latest(http.as_ref()),
+            |r| Message::Update(update_view::Msg::Checked(r)),
+        )
+    }
+
+    /// Puts the dialog in the stage its plan starts in, with the work that needs.
+    fn start_plan(&mut self) -> Task<Message> {
+        use update_view::Stage;
+        let Some(state) = &mut self.update_dialog else {
+            return Task::none();
+        };
+        match state.plan.clone() {
+            Some(UpdatePlan::SelfUpdate { .. } | UpdatePlan::OpenRelease) => {
+                state.stage = Stage::Checking;
+                self.check_latest()
+            }
+            Some(UpdatePlan::Privileged { .. }) => {
+                state.stage = Stage::ConfirmPrivileged;
+                Task::none()
+            }
+            Some(UpdatePlan::ShowCommand { command }) => {
+                state.stage = Stage::Command(command);
+                Task::none()
+            }
+            None => self.detect_for_update(),
+        }
+    }
+
+    fn update_update(&mut self, m: update_view::Msg) -> Task<Message> {
+        use update_view::{Msg, Stage};
+        let Some(state) = &mut self.update_dialog else {
+            return Task::none();
+        };
+        match m {
+            Msg::Detected { kind, plan, exe } => {
+                state.kind = Some(kind);
+                state.plan = Some(plan);
+                state.exe = exe;
+                self.start_plan()
+            }
+            Msg::Checked(Ok(release)) => {
+                state.stage = if release.is_newer() {
+                    Stage::Available(release)
+                } else {
+                    Stage::UpToDate
+                };
+                Task::none()
+            }
+            Msg::Checked(Err(e)) => {
+                state.stage = Stage::Error {
+                    message: update_view::error_text(&e),
+                    release_url: Some(update::RELEASES_URL.to_owned()),
+                };
+                Task::none()
+            }
+            Msg::Start => self.start_update(),
+            Msg::Progress(done, total) => {
+                if matches!(state.stage, Stage::Downloading { .. }) {
+                    // A finished download goes on to the install (apt asks for the password).
+                    state.stage = if total > 0 && done >= total {
+                        Stage::Installing
+                    } else {
+                        Stage::Downloading { done, total }
+                    };
+                }
+                Task::none()
+            }
+            Msg::Finished(Ok(Outcome::Restarted)) => self.exit(),
+            Msg::Finished(Ok(Outcome::RestartFailed)) => {
+                state.stage = Stage::RestartFailed;
+                Task::none()
+            }
+            Msg::Finished(Ok(Outcome::Unchanged)) => {
+                state.stage = Stage::UpToDate;
+                Task::none()
+            }
+            Msg::Finished(Err(update::UpdateError::Cancelled)) => {
+                // Back to where the user clicked.
+                state.stage = match (&state.plan, state.release.clone()) {
+                    (Some(UpdatePlan::Privileged { .. }), _) => Stage::ConfirmPrivileged,
+                    (_, Some(release)) => Stage::Available(release),
+                    _ => Stage::UpToDate,
+                };
+                self.push_toast_of(ToastKind::Info, t!("update.cancelled").into_owned(), None);
+                Task::none()
+            }
+            Msg::Finished(Err(e)) => {
+                let release_url = state.release.as_ref().map(|r| r.html_url.clone());
+                state.stage = Stage::Error {
+                    message: update_view::error_text(&e),
+                    release_url,
+                };
+                Task::none()
+            }
+            Msg::Retry => self.start_plan(),
+            Msg::Close => {
+                if state.can_close() {
+                    self.update_dialog = None;
+                }
+                Task::none()
+            }
+            Msg::Quit => self.exit(),
+        }
+    }
+
+    /// "Update and restart", "Update" or "Open release page".
+    fn start_update(&mut self) -> Task<Message> {
+        use update_view::{Msg, Stage};
+        let Some(state) = &mut self.update_dialog else {
+            return Task::none();
+        };
+        let system = self.system.clone();
+        match (state.plan.clone(), state.stage.clone()) {
+            (Some(UpdatePlan::OpenRelease), Stage::Available(release)) => {
+                self.update_dialog = None;
+                self.update(Message::OpenUrl(release.html_url))
+            }
+            (Some(UpdatePlan::SelfUpdate { install }), Stage::Available(release)) => {
+                let name = update::asset_name(&install, &release);
+                let total = release.asset(&name).map_or(0, |a| a.size);
+                state.stage = Stage::Downloading { done: 0, total };
+                state.release = Some(release.clone());
+                // The new version starts from the same place: the AppImage, or the executable
+                // the package put back.
+                let restart = match &install {
+                    update::SelfInstall::ReplaceAppImage { path } => Some(path.clone()),
+                    update::SelfInstall::AptInstall => state.exe.clone(),
+                };
+                let (tx, rx) = futures::channel::mpsc::unbounded();
+                let job = blocking(
+                    move || {
+                        let mut last = 0u64;
+                        update::self_update(
+                            &release,
+                            &install,
+                            system.http.as_ref(),
+                            system.runner.as_ref(),
+                            &system.cache,
+                            &mut |done, total| {
+                                // About every 256 KiB, and the end.
+                                if done >= last + 256 * 1024 || done >= total {
+                                    last = done;
+                                    let _ = tx.unbounded_send((done, total));
+                                }
+                            },
+                        )?;
+                        Ok(restart_into(system.runner.as_ref(), restart))
+                    },
+                    |r| Message::Update(Msg::Finished(r)),
+                );
+                let progress = Task::run(rx, |(done, total)| {
+                    Message::Update(Msg::Progress(done, total))
+                });
+                Task::batch([progress, job])
+            }
+            (Some(UpdatePlan::Privileged { package, args, .. }), Stage::ConfirmPrivileged) => {
+                state.stage = Stage::Installing;
+                let restart = state.exe.clone();
+                blocking(
+                    move || {
+                        let changed =
+                            update::privileged_upgrade(system.runner.as_ref(), &package, &args)?;
+                        Ok(if changed {
+                            restart_into(system.runner.as_ref(), restart)
+                        } else {
+                            Outcome::Unchanged
+                        })
+                    },
+                    |r| Message::Update(Msg::Finished(r)),
+                )
+            }
+            _ => Task::none(),
+        }
+    }
+
+    fn load_images(&mut self) -> Task<Message> {
+        self.images_load_seq += 1;
+        let seq = self.images_load_seq;
+        let client = self.client.clone();
+        Task::perform(async move { client.list_images().await }, move |r| {
+            Message::Images(images::Msg::Loaded(seq, r))
+        })
+    }
+
+    /// Something went wrong with an image operation: tells the user and reloads, since the list
+    /// may be out of date (the image was already gone, or a container took it meanwhile). A
+    /// connection error goes to the onboarding instead.
+    fn fail_and_reload_images(&mut self, e: DockerError) -> Task<Message> {
+        let connection = e.is_connection();
+        let _ = self.fail(e);
+        if connection {
+            Task::none()
+        } else {
+            self.load_images()
+        }
+    }
+
+    fn update_images(&mut self, m: images::Msg) -> Task<Message> {
+        use images::{ImageConfirm, Msg};
+        match m {
+            // Reloads can overlap: only the latest one counts.
+            Msg::Loaded(seq, _) if seq != self.images_load_seq => Task::none(),
+            Msg::Loaded(_, Ok(items)) => {
+                self.images.set_items(items);
+                Task::none()
+            }
+            Msg::Loaded(_, Err(e)) => self.fail(e),
+            Msg::Query(query) => {
+                self.images.query = query;
+                self.images.keep_selection_visible();
+                Task::none()
+            }
+            Msg::Select(reference) => {
+                self.images.selected = Some(reference);
+                Task::none()
+            }
+            Msg::Hover(reference) => {
+                self.images.hovered = Some(reference);
+                Task::none()
+            }
+            Msg::Leave(reference) => {
+                if self.images.hovered.as_deref() == Some(reference.as_str()) {
+                    self.images.hovered = None;
+                }
+                Task::none()
+            }
+            // An image in use is not offered for removal: Docker would refuse it anyway.
+            Msg::AskRemove(reference) => {
+                if self.images.removable(&reference) {
+                    self.images.confirm = Some(ImageConfirm::Remove(reference));
+                }
+                Task::none()
+            }
+            Msg::AskPrune => {
+                self.images.confirm = Some(ImageConfirm::Prune(self.images.dangling()));
+                Task::none()
+            }
+            Msg::Confirm => {
+                if !self.images.can_confirm() {
+                    return Task::none();
+                }
+                match self.images.confirm.take() {
+                    Some(ImageConfirm::Remove(reference)) => self.remove_image(reference),
+                    Some(ImageConfirm::Prune(_)) => self.prune_images(),
+                    None => Task::none(),
+                }
+            }
+            Msg::Cancel => {
+                self.images.confirm = None;
+                Task::none()
+            }
+            // The list is refreshed by the Docker events the removal causes.
+            Msg::Removed(reference, result) => {
+                self.images.pending.remove(&reference);
+                match result {
+                    Ok(()) => Task::none(),
+                    Err(e) => self.fail_and_reload_images(e),
+                }
+            }
+            Msg::Pruned(Ok(report)) => {
+                let text = if report.removed.len() == 1 {
+                    t!(
+                        "images.pruned_one",
+                        count = 1,
+                        size = images::format_size(report.reclaimed)
+                    )
+                } else {
+                    t!(
+                        "images.pruned",
+                        count = report.removed.len(),
+                        size = images::format_size(report.reclaimed)
+                    )
+                };
+                self.push_toast_of(ToastKind::Info, text.into_owned(), None);
+                Task::none()
+            }
+            Msg::Pruned(Err(e)) => self.fail_and_reload_images(e),
+            Msg::Scrolled { offset, height } => {
+                self.images.scroll_y = offset;
+                self.images.viewport_h = height;
+                Task::none()
+            }
+            Msg::Resized(height) => {
+                self.images.viewport_h = height;
+                Task::none()
+            }
+        }
+    }
+
+    /// Removes a tag (or an untagged image, by id) unless a removal of it is already running.
+    fn remove_image(&mut self, reference: String) -> Task<Message> {
+        if !self.images.pending.insert(reference.clone()) {
+            return Task::none();
+        }
+        let client = self.client.clone();
+        Task::perform(
+            async move {
+                let result = client.remove_image(&reference).await;
+                (reference, result)
+            },
+            |(reference, result)| Message::Images(images::Msg::Removed(reference, result)),
+        )
+    }
+
+    /// Asks Docker to remove the untagged images no container uses, as `docker image prune`.
+    fn prune_images(&mut self) -> Task<Message> {
+        let client = self.client.clone();
+        Task::perform(async move { client.prune_images().await }, |result| {
+            Message::Images(images::Msg::Pruned(result))
+        })
+    }
+
     fn load_volumes(&mut self) -> Task<Message> {
         self.volumes_load_seq += 1;
         let seq = self.volumes_load_seq;
@@ -1447,6 +2019,19 @@ impl App {
                 Message::ReloadNetworks
             }));
         }
+        // Images appear and go on their own events. One is in use by a container from its
+        // creation to its removal, so those matter too, but only for the list on screen: the
+        // next visit reloads anyway.
+        let changes_images = ev.kind == ResourceKind::Image
+            || (self.screen == Screen::Images
+                && ev.kind == ResourceKind::Container
+                && matches!(ev.action.as_str(), "create" | "destroy"));
+        if changes_images && !self.images_reload_scheduled {
+            self.images_reload_scheduled = true;
+            tasks.push(Task::perform(tokio::time::sleep(RELOAD_DEBOUNCE), |()| {
+                Message::ReloadImages
+            }));
+        }
         Task::batch(tasks)
     }
 
@@ -1472,6 +2057,8 @@ impl App {
         self.volumes.hovered = None;
         self.networks.confirm_remove = None;
         self.networks.hovered = None;
+        self.images.confirm = None;
+        self.images.hovered = None;
         self.close_dock();
     }
 
@@ -1525,6 +2112,7 @@ impl App {
             && self.containers.confirm_remove.is_none()
             && self.volumes.confirm.is_none()
             && self.networks.confirm_remove.is_none()
+            && self.images.confirm.is_none()
     }
 
     /// A session is due: the Terminal tab is on screen without one, the container runs and the
@@ -1656,6 +2244,7 @@ impl App {
         let count = (self.conn == Connection::Ok).then_some(self.containers.items.len());
         let volumes = self.volume_count();
         let networks = self.network_count();
+        let images = self.image_count();
         let body = column![
             row![
                 sidebar::view(
@@ -1663,7 +2252,8 @@ impl App {
                     self.sidebar_collapsed,
                     count,
                     volumes,
-                    networks
+                    networks,
+                    images
                 ),
                 container(main).width(Length::Fill).height(Length::Fill),
             ]
@@ -1691,6 +2281,26 @@ impl App {
         };
         let body = match networks::dialog(&self.networks) {
             Some(card) => modal(body, card, Message::Networks(networks::Msg::Cancel)),
+            None => body,
+        };
+        let body = match images::dialog(&self.images) {
+            Some(card) => modal(body, card, Message::Images(images::Msg::Cancel)),
+            None => body,
+        };
+        let body = match &self.uninstall {
+            Some(state) => modal(
+                body,
+                uninstall_view::dialog(state),
+                Message::Uninstall(uninstall_view::Msg::Cancel),
+            ),
+            None => body,
+        };
+        let body = match &self.update_dialog {
+            Some(state) => modal(
+                body,
+                update_view::dialog(state),
+                Message::Update(update_view::Msg::Close),
+            ),
             None => body,
         };
         let body = match &self.palette {
@@ -1743,6 +2353,7 @@ impl App {
             Screen::Containers => containers::view(&self.containers),
             Screen::Volumes => volumes::view(&self.volumes),
             Screen::Networks => networks::view(&self.networks),
+            Screen::Images => images::view(&self.images),
         }
     }
 
@@ -1931,6 +2542,8 @@ mod tests {
         assert_eq!(app.screen, Screen::Volumes);
         let _ = app.update(Message::Navigate(Screen::Networks));
         assert_eq!(app.screen, Screen::Networks);
+        let _ = app.update(Message::Navigate(Screen::Images));
+        assert_eq!(app.screen, Screen::Images);
     }
 
     #[test]
@@ -2164,6 +2777,15 @@ mod tests {
             std::future::pending().await
         }
         async fn prune_volumes(&self) -> Result<Vec<String>, DockerError> {
+            std::future::pending().await
+        }
+        async fn list_images(&self) -> Result<Vec<crate::model::ImageInfo>, DockerError> {
+            std::future::pending().await
+        }
+        async fn remove_image(&self, _reference: &str) -> Result<(), DockerError> {
+            std::future::pending().await
+        }
+        async fn prune_images(&self) -> Result<crate::model::PruneReport, DockerError> {
             std::future::pending().await
         }
         async fn list_networks(&self) -> Result<Vec<NetworkInfo>, DockerError> {
@@ -3530,6 +4152,8 @@ mod tests {
         assert_eq!(app.screen, Screen::Networks);
         let _ = app.run_action(ActionId::GoVolumes);
         assert_eq!(app.screen, Screen::Volumes);
+        let _ = app.run_action(ActionId::GoImages);
+        assert_eq!(app.screen, Screen::Images);
         let _ = app.run_action(ActionId::GoContainers);
         assert_eq!(app.screen, Screen::Containers);
     }
@@ -5720,6 +6344,641 @@ mod tests {
         assert_eq!(app.volumes.hovered, None);
     }
 
+    // ---- Images screen (task 8.2) ----
+
+    fn image_event(action: &str, id: &str) -> DockerEvent {
+        DockerEvent {
+            kind: ResourceKind::Image,
+            action: action.into(),
+            id: id.into(),
+        }
+    }
+
+    fn image_list_calls(fake: &FakeClient) -> usize {
+        fake.calls().iter().filter(|c| *c == "list_images").count()
+    }
+
+    fn img_msg(m: images::Msg) -> Message {
+        Message::Images(m)
+    }
+
+    fn image_references(app: &App) -> Vec<String> {
+        app.images
+            .visible()
+            .into_iter()
+            .map(|r| r.reference)
+            .collect()
+    }
+
+    /// Connected, on the Images screen. The sample images are `nginx:latest` (used by `web`),
+    /// `postgres:16` (`db`), `app/worker:1.0` (`worker`), `alpine:3.20` (free) and one dangling.
+    async fn images_app(fake: &Arc<FakeClient>) -> App {
+        let mut app = loaded_app(fake).await;
+        settle(&mut app, Message::Action(ActionId::GoImages)).await;
+        assert_eq!(app.screen, Screen::Images);
+        app
+    }
+
+    #[tokio::test]
+    async fn connecting_loads_the_images() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let app = loaded_app(&fake).await;
+        assert_eq!(app.images.items.len(), 5);
+        assert_eq!(image_list_calls(&fake), 1);
+    }
+
+    #[tokio::test]
+    async fn entering_the_screen_reloads_the_images() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        fake.add_image(crate::model::ImageInfo {
+            id: "sha256:new".into(),
+            repo_tags: vec!["new:1".into()],
+            size: 1,
+            created: 0,
+            used_by: vec![],
+        });
+        settle(&mut app, Message::Navigate(Screen::Images)).await;
+        assert_eq!(image_list_calls(&fake), 2);
+        assert_eq!(app.images.items.len(), 6);
+        // Leaving does not.
+        settle(&mut app, Message::Navigate(Screen::Containers)).await;
+        assert_eq!(image_list_calls(&fake), 2);
+    }
+
+    #[tokio::test]
+    async fn go_images_shortcut() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let def = actions::def(ActionId::GoImages);
+        assert_eq!(def.shortcut.map(|s| (s.ctrl, s.key)), Some((true, "4")));
+        assert!(def.in_palette);
+        settle(
+            &mut app,
+            char_key("4", iced::keyboard::Modifiers::CTRL, false),
+        )
+        .await;
+        assert_eq!(app.screen, Screen::Images);
+        // Also with the focus in a text input.
+        let _ = app.update(Message::Navigate(Screen::Containers));
+        settle(
+            &mut app,
+            char_key("4", iced::keyboard::Modifiers::CTRL, true),
+        )
+        .await;
+        assert_eq!(app.screen, Screen::Images);
+    }
+
+    #[tokio::test]
+    async fn in_use_image_cannot_be_removed() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let _ = app.update(img_msg(images::Msg::AskRemove("nginx:latest".into())));
+        assert_eq!(app.images.confirm, None);
+
+        // Neither does the Delete key or the palette action offer it.
+        app.images.selected = Some("nginx:latest".into());
+        assert!(!actions::available(&app, ActionId::RemoveSelected));
+        settle(&mut app, key(iced::keyboard::key::Named::Delete, false)).await;
+        assert_eq!(app.images.confirm, None);
+        assert!(!fake.calls().iter().any(|c| c.starts_with("remove_image")));
+    }
+
+    #[tokio::test]
+    async fn unused_image_is_removed_after_confirming() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let _ = app.update(img_msg(images::Msg::AskRemove("alpine:3.20".into())));
+        assert_eq!(
+            app.images.confirm,
+            Some(images::ImageConfirm::Remove("alpine:3.20".into()))
+        );
+        assert!(!fake.calls().iter().any(|c| c.starts_with("remove_image")));
+        settle(&mut app, img_msg(images::Msg::Confirm)).await;
+        assert!(
+            fake.calls()
+                .contains(&"remove_image:alpine:3.20".to_string())
+        );
+        assert_eq!(app.images.confirm, None);
+        assert!(app.images.pending.is_empty());
+        assert!(app.toasts.is_empty());
+        // The daemon's `delete` event refreshes the list.
+        settle(
+            &mut app,
+            Message::Docker(image_event("delete", "sha256:alpine")),
+        )
+        .await;
+        assert!(!image_references(&app).contains(&"alpine:3.20".to_string()));
+        assert_eq!(app.images.items.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn a_dangling_image_is_removed_by_its_id() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let id = "sha256:dangling";
+        let _ = app.update(img_msg(images::Msg::AskRemove(id.into())));
+        settle(&mut app, img_msg(images::Msg::Confirm)).await;
+        assert!(fake.calls().contains(&format!("remove_image:{id}")));
+    }
+
+    #[tokio::test]
+    async fn removing_an_image_twice_runs_one_call() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let _ = app.update(img_msg(images::Msg::AskRemove("alpine:3.20".into())));
+        let first = app.update(img_msg(images::Msg::Confirm));
+        assert!(app.images.pending.contains("alpine:3.20"));
+        // Asking again while it runs is refused.
+        let _ = app.update(img_msg(images::Msg::AskRemove("alpine:3.20".into())));
+        assert_eq!(app.images.confirm, None);
+        let _ = run(first).await;
+        let removals = fake
+            .calls()
+            .iter()
+            .filter(|c| c.starts_with("remove_image"))
+            .count();
+        assert_eq!(removals, 1);
+    }
+
+    #[tokio::test]
+    async fn remove_dialog_closes_when_row_disappears() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let _ = app.update(img_msg(images::Msg::AskRemove("alpine:3.20".into())));
+        assert!(app.images.confirm.is_some());
+        // Removed from outside; the event leads to a reload.
+        fake.remove_image("alpine:3.20").await.unwrap();
+        let calls = fake.calls().len();
+        settle(&mut app, Message::ReloadImages).await;
+        assert_eq!(app.images.confirm, None);
+        let after_reload = fake.calls().len();
+        assert!(after_reload > calls);
+        settle(&mut app, img_msg(images::Msg::Confirm)).await;
+        settle(&mut app, enter_key(false)).await;
+        assert_eq!(fake.calls().len(), after_reload, "no call to Docker");
+        assert!(app.toasts.is_empty(), "no 404 toast");
+    }
+
+    #[tokio::test]
+    async fn image_remove_conflict_keeps_item_and_toasts() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let _ = app.update(img_msg(images::Msg::AskRemove("alpine:3.20".into())));
+        fake.fail_next(DockerError::Conflict("image is being used".into()));
+        settle(&mut app, img_msg(images::Msg::Confirm)).await;
+        assert_eq!(app.images.items.len(), 5, "the image is still listed");
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(
+            app.toasts[0].text,
+            friendly_error(&DockerError::Conflict(String::new()))
+        );
+        assert!(app.images.pending.is_empty(), "the row is usable again");
+        assert_eq!(app.conn, Connection::Ok);
+        // The list is reloaded after the failure.
+        assert_eq!(image_list_calls(&fake), 3);
+    }
+
+    #[tokio::test]
+    async fn prune_dialog_lists_only_dangling() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let _ = app.update(img_msg(images::Msg::AskPrune));
+        assert_eq!(
+            app.images.confirm,
+            Some(images::ImageConfirm::Prune(vec![(
+                "sha256:dangling".into(),
+                52_000_000
+            )]))
+        );
+        assert!(!fake.calls().contains(&"prune_images".to_string()));
+    }
+
+    #[tokio::test]
+    async fn prune_with_empty_list_cannot_confirm() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        fake.prune_images().await.unwrap();
+        settle(&mut app, Message::ReloadImages).await;
+        let _ = app.update(img_msg(images::Msg::AskPrune));
+        assert_eq!(
+            app.images.confirm,
+            Some(images::ImageConfirm::Prune(vec![]))
+        );
+        let calls = fake.calls().len();
+        settle(&mut app, img_msg(images::Msg::Confirm)).await;
+        settle(&mut app, enter_key(false)).await;
+        assert_eq!(fake.calls().len(), calls, "no call to Docker");
+        assert!(app.toasts.is_empty());
+        let _ = app.view();
+    }
+
+    #[tokio::test]
+    async fn image_prune_dialog_follows_reloads() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let _ = app.update(img_msg(images::Msg::AskPrune));
+        fake.remove_image("sha256:dangling").await.unwrap();
+        settle(&mut app, Message::ReloadImages).await;
+        assert_eq!(
+            app.images.confirm,
+            Some(images::ImageConfirm::Prune(vec![]))
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_toast_counts_and_bytes() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let report = |n: usize, bytes: u64| crate::model::PruneReport {
+            removed: (0..n).map(|i| format!("sha256:{i}")).collect(),
+            reclaimed: bytes,
+        };
+        let _ = app.update(img_msg(images::Msg::Pruned(Ok(report(3, 1_500_000)))));
+        let last = app.toasts.last().expect("a toast");
+        assert_eq!(
+            last.text,
+            t!("images.pruned", count = 3, size = "1.5 MB").into_owned()
+        );
+        assert_eq!(last.kind, ToastKind::Info);
+        assert!(last.text.contains('3') && last.text.contains("1.5 MB"));
+        let _ = app.update(img_msg(images::Msg::Pruned(Ok(report(1, 52_000_000)))));
+        assert_eq!(
+            app.toasts.last().unwrap().text,
+            t!("images.pruned_one", count = 1, size = "52.0 MB").into_owned()
+        );
+        let _ = app.update(img_msg(images::Msg::Pruned(Ok(report(0, 0)))));
+        assert_eq!(
+            app.toasts.last().unwrap().text,
+            t!("images.pruned", count = 0, size = "0 B").into_owned()
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_from_the_dialog_toasts_the_removed_count_and_size() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let _ = app.update(img_msg(images::Msg::AskPrune));
+        settle(&mut app, img_msg(images::Msg::Confirm)).await;
+        assert_eq!(app.images.confirm, None);
+        assert!(fake.calls().contains(&"prune_images".to_string()));
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(
+            app.toasts[0].text,
+            t!("images.pruned_one", count = 1, size = "52.0 MB").into_owned()
+        );
+        settle(
+            &mut app,
+            Message::Docker(image_event("delete", "sha256:dangling")),
+        )
+        .await;
+        assert_eq!(app.images.items.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn prune_failure_toasts_the_error_and_reloads() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let _ = app.update(img_msg(images::Msg::AskPrune));
+        fake.fail_next(DockerError::Other("boom".into()));
+        settle(&mut app, img_msg(images::Msg::Confirm)).await;
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(app.toasts[0].kind, ToastKind::Error);
+        assert_eq!(app.images.items.len(), 5);
+        assert_eq!(image_list_calls(&fake), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn image_event_triggers_reload() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let before = image_list_calls(&fake);
+        fake.remove_image("alpine:3.20").await.unwrap();
+        settle(
+            &mut app,
+            Message::Docker(image_event("delete", "sha256:alpine")),
+        )
+        .await;
+        assert_eq!(image_list_calls(&fake), before + 1);
+        assert_eq!(app.images.items.len(), 4);
+        assert_eq!(list_calls(&fake), 1, "containers are not reloaded for it");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn burst_of_image_events_reloads_once() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let before = image_list_calls(&fake);
+        let tasks: Vec<_> = (0..5)
+            .map(|_| app.update(Message::Docker(image_event("untag", "x"))))
+            .collect();
+        let mut produced = Vec::new();
+        for task in tasks {
+            produced.extend(run(task).await);
+        }
+        assert_eq!(produced.len(), 1, "only the first event schedules a reload");
+        for m in produced {
+            settle(&mut app, m).await;
+        }
+        assert_eq!(image_list_calls(&fake), before + 1);
+        settle(&mut app, Message::Docker(image_event("pull", "y"))).await;
+        assert_eq!(image_list_calls(&fake), before + 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn container_create_and_destroy_reload_images_only_while_on_the_screen() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        // On another screen, the next visit reloads anyway.
+        let before = image_list_calls(&fake);
+        settle(&mut app, Message::Docker(container_event("create"))).await;
+        assert_eq!(image_list_calls(&fake), before);
+
+        let _ = app.update(Message::Navigate(Screen::Images));
+        let before = image_list_calls(&fake);
+        for action in ["create", "destroy"] {
+            let calls = image_list_calls(&fake);
+            settle(&mut app, Message::Docker(container_event(action))).await;
+            assert_eq!(image_list_calls(&fake), calls + 1, "{action}");
+        }
+        // A stop does not change which images are in use.
+        let calls = image_list_calls(&fake);
+        settle(&mut app, Message::Docker(container_event("die"))).await;
+        assert_eq!(image_list_calls(&fake), calls);
+        assert!(image_list_calls(&fake) > before);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn image_reload_is_skipped_when_docker_is_unreachable() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        app.conn = Connection::Failed(DockerError::NotRunning);
+        let before = image_list_calls(&fake);
+        settle(&mut app, Message::ReloadImages).await;
+        assert_eq!(image_list_calls(&fake), before);
+    }
+
+    #[tokio::test]
+    async fn an_older_image_load_cannot_overwrite_a_newer_one() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let seq = app.images_load_seq;
+        let _ = app.update(img_msg(images::Msg::Loaded(seq - 1, Ok(vec![]))));
+        assert_eq!(app.images.items.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn image_load_connection_error_goes_to_onboarding() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let seq = app.images_load_seq;
+        let _ = app.update(img_msg(images::Msg::Loaded(
+            seq,
+            Err(DockerError::NotRunning),
+        )));
+        assert_eq!(app.conn, Connection::Failed(DockerError::NotRunning));
+        assert_eq!(app.images.confirm, None);
+        let _ = app.view();
+    }
+
+    #[tokio::test]
+    async fn image_keyboard_selection_moves_in_the_visible_list() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        // Visible order is by tag: alpine, app/worker, nginx, postgres, then the dangling one.
+        assert_eq!(app.images.selected, None);
+        let _ = app.update(key_msg("j", false));
+        assert_eq!(app.images.selected.as_deref(), Some("alpine:3.20"));
+        let _ = app.update(named_key(iced::keyboard::key::Named::ArrowDown));
+        assert_eq!(app.images.selected.as_deref(), Some("app/worker:1.0"));
+        let _ = app.update(key_msg("k", false));
+        assert_eq!(app.images.selected.as_deref(), Some("alpine:3.20"));
+        let _ = app.update(key_msg("k", false));
+        assert_eq!(
+            app.images.selected.as_deref(),
+            Some("alpine:3.20"),
+            "no wrap"
+        );
+        app.images.selected = None;
+        let _ = app.run_action(ActionId::SelectPrev);
+        assert_eq!(app.images.selected.as_deref(), Some("sha256:dangling"));
+        assert_eq!(app.containers.selected, None, "containers are untouched");
+    }
+
+    #[tokio::test]
+    async fn delete_enter_and_escape_drive_the_image_dialog() {
+        use iced::keyboard::key::Named;
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        app.images.selected = Some("alpine:3.20".into());
+        settle(&mut app, key(Named::Delete, false)).await;
+        assert_eq!(
+            app.images.confirm,
+            Some(images::ImageConfirm::Remove("alpine:3.20".into()))
+        );
+        let _ = app.view();
+
+        // Esc cancels and removes nothing.
+        settle(&mut app, key(Named::Escape, false)).await;
+        assert_eq!(app.images.confirm, None);
+        assert!(!fake.calls().iter().any(|c| c.starts_with("remove_image")));
+
+        // Behind the dialog the keys do nothing but Enter and Esc.
+        settle(&mut app, key(Named::Delete, false)).await;
+        let _ = app.update(key_msg("j", false));
+        assert_eq!(app.images.selected.as_deref(), Some("alpine:3.20"));
+        assert!(!actions::available(&app, ActionId::SelectNext));
+
+        // Enter confirms, even if a text input holds the event.
+        settle(&mut app, enter_key(true)).await;
+        assert_eq!(app.images.confirm, None);
+        assert!(
+            fake.calls()
+                .contains(&"remove_image:alpine:3.20".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn enter_on_the_image_prune_dialog_prunes() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let _ = app.update(img_msg(images::Msg::AskPrune));
+        settle(&mut app, enter_key(false)).await;
+        assert!(fake.calls().contains(&"prune_images".to_string()));
+        assert_eq!(app.images.confirm, None);
+    }
+
+    #[tokio::test]
+    async fn enter_on_images_does_not_open_the_dock() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        app.containers.selected = Some("web-id".into());
+        app.images.selected = Some("alpine:3.20".into());
+        settle(&mut app, enter_key(false)).await;
+        assert!(app.dock.is_none());
+        assert_eq!(app.images.confirm, None);
+    }
+
+    #[tokio::test]
+    async fn escape_on_images_closes_layers_in_order() {
+        use iced::keyboard::key::Named;
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let _ = app.update(img_msg(images::Msg::Query("alp".into())));
+        let _ = app.update(img_msg(images::Msg::AskPrune));
+        settle(&mut app, key(Named::Escape, false)).await;
+        assert_eq!(app.images.confirm, None);
+        assert_eq!(app.images.query, "alp", "the dialog goes first");
+        settle(&mut app, key(Named::Escape, false)).await;
+        assert_eq!(app.images.query, "");
+    }
+
+    #[tokio::test]
+    async fn search_filters_images_and_keeps_the_selection_visible() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        app.images.selected = Some("nginx:latest".into());
+        let _ = app.update(img_msg(images::Msg::Query("postgres".into())));
+        assert_eq!(image_references(&app), vec!["postgres:16"]);
+        assert_eq!(app.images.selected.as_deref(), Some("postgres:16"));
+        let _ = app.update(img_msg(images::Msg::Query("zzz".into())));
+        assert_eq!(app.images.selected, None);
+    }
+
+    #[tokio::test]
+    async fn image_search_is_focusable_only_on_the_images_screen() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        assert!(actions::available(&app, ActionId::FocusSearch));
+        let _ = app.update(Message::Navigate(Screen::Containers));
+        assert!(actions::available(&app, ActionId::FocusSearch));
+        app.images.confirm = Some(images::ImageConfirm::Prune(vec![]));
+        let _ = app.update(Message::Navigate(Screen::Images));
+        assert!(
+            !actions::available(&app, ActionId::FocusSearch),
+            "a dialog covers it"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_selected_on_images_opens_the_image_dialog_not_the_container_one() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        app.containers.selected = Some("web-id".into());
+        app.images.selected = Some("alpine:3.20".into());
+        settle(&mut app, Message::Action(ActionId::RemoveSelected)).await;
+        assert_eq!(app.containers.confirm_remove, None);
+        assert_eq!(
+            app.images.confirm,
+            Some(images::ImageConfirm::Remove("alpine:3.20".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_images_is_a_palette_action_without_shortcut() {
+        let def = actions::def(ActionId::PruneImages);
+        assert!(def.in_palette);
+        assert_eq!(def.shortcut, None);
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        assert!(palette::matches(&app, "prune").contains(&ActionId::PruneImages));
+        app.conn = Connection::Failed(DockerError::NotRunning);
+        assert!(!actions::available(&app, ActionId::PruneImages));
+    }
+
+    #[tokio::test]
+    async fn prune_images_from_containers_goes_to_images_and_asks() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        assert_eq!(app.screen, Screen::Containers);
+        let _ = app.update(Message::Action(ActionId::OpenPalette));
+        settle(&mut app, Message::PaletteRun(Some(ActionId::PruneImages))).await;
+        assert!(app.palette.is_none());
+        assert_eq!(app.screen, Screen::Images);
+        assert_eq!(
+            app.images.confirm,
+            Some(images::ImageConfirm::Prune(vec![(
+                "sha256:dangling".into(),
+                52_000_000
+            )]))
+        );
+        assert!(!fake.calls().contains(&"prune_images".to_string()));
+        let _ = app.view();
+    }
+
+    #[tokio::test]
+    async fn prune_images_action_restores_a_maximized_dock() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        let _ = app.update(Message::ToggleMaximize);
+        assert!(app.dock.as_ref().is_some_and(|d| d.maximized));
+        settle(&mut app, Message::Action(ActionId::PruneImages)).await;
+        assert!(app.dock.as_ref().is_some_and(|d| !d.maximized));
+        assert!(app.images.confirm.is_some());
+    }
+
+    #[tokio::test]
+    async fn sidebar_counts_the_images_while_connected() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = loaded_app(&fake).await;
+        assert_eq!(app.image_count(), Some(5));
+        app.conn = Connection::Failed(DockerError::NotRunning);
+        assert_eq!(app.image_count(), None);
+        app.conn = Connection::Checking;
+        assert_eq!(app.image_count(), None);
+        let _ = app.view();
+    }
+
+    #[tokio::test]
+    async fn an_image_dialog_is_dropped_when_docker_goes_away() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let _ = app.update(img_msg(images::Msg::AskPrune));
+        let _ = app.update(Message::Pinged(Err(DockerError::NotRunning)));
+        assert_eq!(app.images.confirm, None);
+    }
+
+    #[tokio::test]
+    async fn images_view_builds_with_dock_dialog_and_toasts() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let _ = app.update(Message::OpenDock("web-id".into()));
+        app.images.selected = Some("alpine:3.20".into());
+        app.images.hovered = Some("nginx:latest".into());
+        app.images.pending.insert("alpine:3.20".into());
+        for confirm in [
+            None,
+            Some(images::ImageConfirm::Remove("alpine:3.20".into())),
+            Some(images::ImageConfirm::Prune(vec![(
+                "sha256:dangling".into(),
+                1,
+            )])),
+        ] {
+            app.images.confirm = confirm;
+            let _ = app.view();
+        }
+        app.push_toast("x".into(), None);
+        let _ = app.update(Message::ToggleMaximize);
+        let _ = app.view();
+    }
+
+    #[tokio::test]
+    async fn navigating_away_clears_the_image_hover() {
+        let fake = Arc::new(FakeClient::with_sample_data());
+        let mut app = images_app(&fake).await;
+        let _ = app.update(img_msg(images::Msg::Hover("alpine:3.20".into())));
+        assert_eq!(app.images.hovered.as_deref(), Some("alpine:3.20"));
+        let _ = app.update(img_msg(images::Msg::Leave("other".into())));
+        assert_eq!(
+            app.images.hovered.as_deref(),
+            Some("alpine:3.20"),
+            "stale exit"
+        );
+        let _ = app.update(Message::Navigate(Screen::Containers));
+        assert_eq!(app.images.hovered, None);
+    }
+
     // ---- Networks screen (task 4.2) ----
 
     fn network_event(action: &str, id: &str) -> DockerEvent {
@@ -6532,5 +7791,234 @@ mod tests {
         )));
         assert!(!app.terminal_focused);
         assert!(app.palette.is_some());
+    }
+}
+
+#[cfg(test)]
+mod install_dialog_tests {
+    use std::collections::HashMap;
+    use std::path::Path;
+
+    use super::test_support::settle;
+    use super::*;
+    use crate::docker::FakeClient;
+    use crate::install::InstallKind;
+    use crate::install::fakes::{FakeEnv, FakeRunner, temp_dir};
+    use crate::uninstall::UninstallPlan;
+    use crate::update::UpdateError;
+    use crate::update::fakes::{FakeHttp, release_with};
+    use crate::views::uninstall::Stage as UStage;
+    use crate::views::update::Stage;
+
+    /// An app whose system is fake: `env` decides the install, `runner` and `http` answer.
+    fn app_with(env: FakeEnv, runner: Arc<FakeRunner>, http: FakeHttp, dir: &Path) -> App {
+        let (mut app, _) = App::new(Arc::new(FakeClient::new()));
+        app.system = System {
+            env: Arc::new(env),
+            runner,
+            http: Arc::new(http),
+            home: dir.to_path_buf(),
+            cache: dir.join("cache"),
+        };
+        app
+    }
+
+    fn env(exe: &Path, appimage: Option<&Path>, programs: &[&str]) -> FakeEnv {
+        let mut vars = HashMap::from([("HOME".to_owned(), "/nowhere".to_owned())]);
+        let mut files = Vec::new();
+        if let Some(path) = appimage {
+            vars.insert("APPIMAGE".to_owned(), path.to_string_lossy().into_owned());
+            files.push(path.to_path_buf());
+        }
+        FakeEnv {
+            vars,
+            exe: Some(exe.to_path_buf()),
+            files,
+            programs: programs.iter().map(|p| (*p).to_owned()).collect(),
+            flatpak: false,
+        }
+    }
+
+    fn upd(m: update_view::Msg) -> Message {
+        Message::Update(m)
+    }
+
+    fn uni(m: uninstall_view::Msg) -> Message {
+        Message::Uninstall(m)
+    }
+
+    #[tokio::test]
+    async fn appimage_update_downloads_replaces_and_restarts() {
+        let dir = temp_dir("app-update-appimage");
+        let image = dir.join("doknyu.AppImage");
+        std::fs::write(&image, b"old").unwrap();
+        let (_, http) = release_with("99.0.0", b"new build", b"deb");
+        let runner = Arc::new(FakeRunner::default());
+        let mut app = app_with(env(&image, Some(&image), &[]), runner.clone(), http, &dir);
+
+        settle(&mut app, Message::Action(ActionId::CheckUpdate)).await;
+        let state = app.update_dialog.as_ref().unwrap();
+        assert!(matches!(&state.stage, Stage::Available(r) if r.version == "99.0.0"));
+        // Not while the dialog is open: one at a time.
+        assert!(!actions::available(&app, ActionId::Uninstall));
+
+        settle(&mut app, upd(update_view::Msg::Start)).await;
+        assert_eq!(std::fs::read(&image).unwrap(), b"new build");
+        assert_eq!(*runner.spawned.lock().unwrap(), vec![image.clone()]);
+        assert!(app.exiting);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn up_to_date_and_network_errors() {
+        let dir = temp_dir("app-update-latest");
+        let image = dir.join("doknyu.AppImage");
+        std::fs::write(&image, b"old").unwrap();
+        let (_, http) = release_with(update::CURRENT, b"x", b"y");
+        let mut app = app_with(env(&image, Some(&image), &[]), Arc::default(), http, &dir);
+        settle(&mut app, Message::Action(ActionId::CheckUpdate)).await;
+        assert_eq!(app.update_dialog.as_ref().unwrap().stage, Stage::UpToDate);
+
+        let http = FakeHttp::default().failing(
+            "https://api.github.com/repos/RafaelProfMgz/doknyu/releases/latest",
+            UpdateError::RateLimited,
+        );
+        let mut app = app_with(env(&image, Some(&image), &[]), Arc::default(), http, &dir);
+        settle(&mut app, Message::Action(ActionId::CheckUpdate)).await;
+        assert!(matches!(
+            &app.update_dialog.as_ref().unwrap().stage,
+            Stage::Error { message, .. } if *message == update_view::error_text(&UpdateError::RateLimited)
+        ));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn deb_update_cancelled_goes_back_and_toasts() {
+        let dir = temp_dir("app-update-deb");
+        let exe = Path::new("/usr/bin/doknyu");
+        let (_, http) = release_with("99.0.0", b"img", b"the deb");
+        let runner = Arc::new(FakeRunner::default());
+        runner.answer("dpkg-query", 0, "doknyu: /usr/bin/doknyu");
+        runner.answer("pkexec", 126, "");
+        let mut app = app_with(env(exe, None, &["dpkg-query"]), runner.clone(), http, &dir);
+        settle(&mut app, Message::Action(ActionId::CheckUpdate)).await;
+        settle(&mut app, upd(update_view::Msg::Start)).await;
+        let state = app.update_dialog.as_ref().unwrap();
+        assert!(matches!(&state.stage, Stage::Available(_)));
+        assert!(!app.exiting);
+        assert!(app.toasts.iter().any(|t| t.text == t!("update.cancelled")));
+        assert!(runner.spawned.lock().unwrap().is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn update_dialog_does_not_close_while_installing() {
+        let state = UpdateState {
+            stage: Stage::Installing,
+            ..UpdateState::default()
+        };
+        let (mut app, _) = App::new(Arc::new(FakeClient::new()));
+        app.update_dialog = Some(state);
+        settle(&mut app, upd(update_view::Msg::Close)).await;
+        settle(&mut app, Message::Action(ActionId::Escape)).await;
+        assert!(app.update_dialog.is_some());
+        app.update_dialog.as_mut().unwrap().stage = Stage::UpToDate;
+        settle(&mut app, Message::Action(ActionId::Escape)).await;
+        assert!(app.update_dialog.is_none());
+    }
+
+    #[tokio::test]
+    async fn homebrew_update_and_uninstall_only_show_commands() {
+        let dir = temp_dir("app-brew");
+        let exe = Path::new("/home/linuxbrew/.linuxbrew/Cellar/doknyu/0.1.0/bin/doknyu");
+        let http = FakeHttp::default();
+        let mut app = app_with(env(exe, None, &[]), Arc::default(), http, &dir);
+        settle(&mut app, Message::Action(ActionId::CheckUpdate)).await;
+        assert_eq!(
+            app.update_dialog.as_ref().unwrap().stage,
+            Stage::Command("brew upgrade doknyu".into())
+        );
+        settle(&mut app, upd(update_view::Msg::Close)).await;
+
+        settle(&mut app, Message::Action(ActionId::Uninstall)).await;
+        let state = app.uninstall.as_ref().unwrap();
+        assert_eq!(state.kind, Some(InstallKind::Homebrew));
+        assert_eq!(
+            state.plan,
+            Some(UninstallPlan::ShowCommand {
+                command: "brew uninstall doknyu".into()
+            })
+        );
+        // No preferences directory in this app: nothing for "Confirm" to run.
+        settle(&mut app, uni(uninstall_view::Msg::Confirm)).await;
+        assert!(!app.exiting);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn deb_uninstall_runs_pkexec_and_exits() {
+        let dir = temp_dir("app-uninstall-deb");
+        let exe = Path::new("/usr/bin/doknyu");
+        let runner = Arc::new(FakeRunner::default());
+        runner.answer("dpkg-query", 0, "doknyu: /usr/bin/doknyu");
+        runner.answer("pkexec", 0, "");
+        let mut app = app_with(
+            env(exe, None, &["dpkg-query", "pkexec"]),
+            runner.clone(),
+            FakeHttp::default(),
+            &dir,
+        );
+        settle(&mut app, Message::Action(ActionId::Uninstall)).await;
+        settle(&mut app, uni(uninstall_view::Msg::Confirm)).await;
+        assert!(app.exiting);
+        assert!(runner.calls().iter().any(|(p, args)| p == "pkexec"
+            && *args == ["apt-get", "remove", "-y", "doknyu"].map(String::from)));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn uninstall_cancel_and_failure_stay_open() {
+        let dir = temp_dir("app-uninstall-fail");
+        let exe = Path::new("/usr/bin/doknyu");
+        for (code, cancelled) in [(126, true), (100, false)] {
+            let runner = Arc::new(FakeRunner::default());
+            runner.answer("dpkg-query", 0, "doknyu: /usr/bin/doknyu");
+            runner.answer("pkexec", code, "");
+            let mut app = app_with(
+                env(exe, None, &["dpkg-query", "pkexec"]),
+                runner,
+                FakeHttp::default(),
+                &dir,
+            );
+            settle(&mut app, Message::Action(ActionId::Uninstall)).await;
+            settle(&mut app, uni(uninstall_view::Msg::Confirm)).await;
+            assert!(!app.exiting);
+            let stage = &app.uninstall.as_ref().unwrap().stage;
+            if cancelled {
+                assert_eq!(*stage, UStage::Ready);
+                assert!(
+                    app.toasts
+                        .iter()
+                        .any(|t| t.text == t!("uninstall.cancelled"))
+                );
+            } else {
+                assert!(matches!(stage, UStage::Failed(m) if m.contains("pkexec failed")));
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn uninstall_dialog_does_not_close_while_running() {
+        let (mut app, _) = App::new(Arc::new(FakeClient::new()));
+        let mut state = UninstallState::new(None);
+        state.stage = UStage::Running;
+        app.uninstall = Some(state);
+        settle(&mut app, uni(uninstall_view::Msg::Cancel)).await;
+        settle(&mut app, Message::Action(ActionId::Escape)).await;
+        assert!(app.uninstall.is_some());
+        app.uninstall.as_mut().unwrap().stage = UStage::Ready;
+        settle(&mut app, Message::Action(ActionId::Escape)).await;
+        assert!(app.uninstall.is_none());
     }
 }

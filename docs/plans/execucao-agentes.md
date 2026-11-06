@@ -39,6 +39,8 @@ de outros plugins (frontend-design, vercel:*, …) não se aplicam a um app iced
 | 6 | 6.3 Release | `research-implementer` | `task-reviewer` |
 | 7 | 7.1 Spike Flatpak | `research-implementer` | — (o humano lê o ADR) |
 | 7 | 7.2 – 7.4 Flatpak, AUR, COPR/Nix | `research-implementer` | `task-reviewer` |
+| 8 | 8.1 Core de imagens | `rust-implementer` | `task-reviewer` |
+| 8 | 8.2 Tela Imagens | `ui-implementer` | `task-reviewer` |
 | todas | fim de fase | — | `phase-reviewer` |
 
 ## Regras de orçamento (o que de fato limita o gasto)

@@ -13,8 +13,10 @@ system light/dark theme and is available in English and Brazilian Portuguese.
 
 <!-- The files below live in docs/screenshots/. -->
 ![Container list, dark theme](docs/screenshots/list-dark.png)
-![Container details in the dock](docs/screenshots/dock.png)
-![Command palette, light theme](docs/screenshots/palette-light.png)
+![Live container stats, light theme](docs/screenshots/stats-light.png)
+![Command palette, dark theme](docs/screenshots/palette-dark.png)
+![Volumes, dark theme](docs/screenshots/volumes-dark.png)
+![Networks, dark theme](docs/screenshots/networks-dark.png)
 
 ## Installation
 
@@ -24,7 +26,7 @@ Each release also has a `SHA256SUMS` file: `sha256sum --check --ignore-missing S
 **Debian, Ubuntu and derivatives (`.deb`)**
 
 ```sh
-sudo apt install ./doknyu_<version>_amd64.deb
+sudo apt install ./doknyu_<version>-1_amd64.deb    # e.g. doknyu_0.1.0-1_amd64.deb
 ```
 
 **Any distribution (AppImage, needs FUSE 2: `libfuse2` on Ubuntu 22.04/24.04)**
@@ -58,17 +60,13 @@ containers, images, volumes and networks stay as they are.
 |---|---|
 | `.deb` | `sudo apt remove doknyu` |
 | AppImage | Delete the `.AppImage` file. If AppImageLauncher or Gear Lever integrated it, remove it from there (or delete its entry in `~/.local/share/applications/`). |
-| Flatpak | `flatpak uninstall --delete-data io.github.rafaelprofmgz.Doknyu` |
-| AUR | `sudo pacman -Rns doknyu` (or `doknyu-bin` / `doknyu-git`, whichever you installed) |
-| COPR (Fedora) | `sudo dnf remove doknyu`, then optionally `sudo dnf copr remove <owner>/doknyu` with the same name you passed to `dnf copr enable` |
-| Nix profile | `nix profile remove doknyu` |
-| NixOS / Home Manager | Remove `doknyu` from `environment.systemPackages` or `home.packages` and rebuild |
-| Homebrew | `brew uninstall doknyu`, then optionally `brew untap RafaelProfMgz/tap` |
-| `cargo install` | `cargo uninstall doknyu` |
+| `cargo install --path .` (from source) | `cargo uninstall doknyu` |
 
 Your preferences live in `~/.config/doknyu` (or `$XDG_CONFIG_HOME/doknyu`); remove that folder too
-for a clean uninstall: `rm -rf ~/.config/doknyu`. The Flatpak keeps its data in
-`~/.var/app/io.github.rafaelprofmgz.Doknyu`, which `--delete-data` already removes.
+for a clean uninstall: `rm -rf ~/.config/doknyu`.
+
+Flathub, AUR, COPR and nixpkgs packages are prepared in [`packaging/`](packaging/README.md) but not
+published yet; this table gains their rows as each one goes live.
 
 ## Keyboard shortcuts
 
@@ -128,9 +126,8 @@ de novo. Para testar sem Docker: `cargo run --features fake`.
 
 Para desinstalar, use o comando da forma como você instalou (tabela completa em
 [Uninstalling](#uninstalling)): `.deb` → `sudo apt remove doknyu`; AppImage → apague o arquivo;
-Flatpak → `flatpak uninstall --delete-data io.github.rafaelprofmgz.Doknyu`; AUR →
-`sudo pacman -Rns doknyu`; Fedora → `sudo dnf remove doknyu`; Nix → `nix profile remove doknyu`;
-Homebrew → `brew uninstall doknyu`. As preferências ficam em `~/.config/doknyu` (apague para
+compilado com `cargo install --path .` → `cargo uninstall doknyu`. Flathub, AUR, COPR e nixpkgs
+ainda não foram publicados. As preferências ficam em `~/.config/doknyu` (apague para
 remover tudo). Seus containers, imagens e volumes do Docker não são afetados.
 
 ## License

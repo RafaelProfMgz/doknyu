@@ -1,0 +1,137 @@
+name: Pins da release
+
+# Depois que o workflow Release publica uma tag v*, fixa os canais de empacotamento nela (Flatpak,
+# AUR, Nix e Homebrew, se existir) e abre um PR para a develop com o resultado. O PR não é mergeado
+# sozinho: o mantenedor revisa. Publicar nos canais (push no AUR, PR no Flathub/nixpkgs, tap)
+# continua sendo passo humano (packaging/README.md). Fluxo completo em CONTRIBUTING.md, "Release".
+#
+# `workflow_run` e não `release: published`: a release é criada com o GITHUB_TOKEN, e eventos
+# gerados por ele não disparam outros workflows. Para refazer à mão: Actions → "Pins da release" →
+# Run workflow, informando a tag.
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag já publicada (ex.: v0.2.0)"
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: pin-release
+  cancel-in-progress: false
+
+jobs:
+  pin:
+    # Só depois de um Release bem-sucedido numa tag (o Release também roda em PR e à mão, sem tag).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          RUN_TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          tag="${INPUT_TAG:-$RUN_TAG}"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::tag inválida: $tag"; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      # A develop (onde os pins entram), com o histórico e as tags (o pin do Flatpak lê a tag).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: develop
+          fetch-depth: 0
+
+      - name: Flatpak
+        id: flatpak
+        continue-on-error: true
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: packaging/flatpak/pin-release.sh "$TAG"
+
+      - name: AUR
+        id: aur
+        continue-on-error: true
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: packaging/aur/pin-release.sh "$TAG"
+
+      - name: Nix
+        id: nix
+        continue-on-error: true
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: packaging/nix/pin-release.sh "$TAG"
+
+      - name: Homebrew
+        id: homebrew
+        continue-on-error: true
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          if [ -x packaging/homebrew/pin-release.sh ]; then
+            packaging/homebrew/pin-release.sh "$TAG"
+          else
+            echo "Sem packaging/homebrew/pin-release.sh; pulado."
+          fi
+
+      - name: Abre o PR para a develop
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          R_FLATPAK: ${{ steps.flatpak.outcome }}
+          R_AUR: ${{ steps.aur.outcome }}
+          R_NIX: ${{ steps.nix.outcome }}
+          R_HOMEBREW: ${{ steps.homebrew.outcome }}
+        run: |
+          # Os scripts rodam containers como root; devolve os arquivos ao usuário do runner.
+          sudo chown -R "$(id -u):$(id -g)" packaging
+          git status --short
+          if git diff --quiet -- packaging; then
+            echo "Nenhum pin mudou; nada a fazer."
+            failed=0
+            for r in "$R_FLATPAK" "$R_AUR" "$R_NIX" "$R_HOMEBREW"; do [ "$r" = success ] || failed=1; done
+            exit "$failed"
+          fi
+
+          branch="chore/pin-$TAG"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C "$branch"
+          git add -- packaging
+          git commit -m "chore(release): pin packaging at $TAG"
+          git push --force-with-lease origin "$branch"
+
+          body="$(cat <<EOF
+          Aberto pelo workflow \`pin-release.yml\` depois da release \`$TAG\`.
+
+          | Canal | Resultado |
+          |---|---|
+          | Flatpak | $R_FLATPAK |
+          | AUR | $R_AUR |
+          | Nix | $R_NIX |
+          | Homebrew | $R_HOMEBREW |
+
+          Canais com \`failure\` não entraram neste PR: veja o log do run e rode o \`pin-release.sh\` do canal à mão.
+          Depois do merge, publique nos canais (passos humanos em \`packaging/README.md\`).
+          EOF
+          )"
+          if ! gh pr view "$branch" --json state -q .state 2>/dev/null | grep -q OPEN; then
+            gh pr create --base develop --head "$branch" \
+              --title "chore(release): pin packaging at $TAG" --body "$body" --label skip-changelog
+          fi
+          # Algum canal falhou: o run fica vermelho para chamar atenção, mesmo com o PR aberto.
+          for r in "$R_FLATPAK" "$R_AUR" "$R_NIX" "$R_HOMEBREW"; do
+            [ "$r" = success ] || { echo "::warning::um ou mais pins falharam"; exit 1; }
+          done

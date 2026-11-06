@@ -22,6 +22,7 @@ struct NetworkEntry {
 struct State {
     containers: Vec<ContainerInfo>,
     volumes: Vec<VolumeInfo>,
+    images: Vec<ImageInfo>,
     networks: Vec<NetworkEntry>,
     ping_error: Option<DockerError>,
     /// Makes `events()` fail at once while everything else keeps working.
@@ -105,6 +106,16 @@ fn synthetic_sample(seed: u64, n: u64) -> RawStats {
         net_tx: n * 8_192,
         blk_read: n * 4_096,
         blk_write: n * 12_288,
+    }
+}
+
+fn img(id: &str, tags: &[&str], size: u64, used_by: &[&str]) -> ImageInfo {
+    ImageInfo {
+        id: id.into(),
+        repo_tags: tags.iter().map(|t| t.to_string()).collect(),
+        size,
+        created: 1_700_000_000,
+        used_by: used_by.iter().map(|n| n.to_string()).collect(),
     }
 }
 
@@ -192,6 +203,18 @@ impl FakeClient {
                     mountpoint: "/var/lib/docker/volumes/cache/_data".into(),
                     used_by: vec![],
                 },
+            ],
+            images: vec![
+                img("sha256:nginx", &["nginx:latest"], 187_000_000, &["web"]),
+                img("sha256:pg16", &["postgres:16"], 432_000_000, &["db"]),
+                img(
+                    "sha256:worker",
+                    &["app/worker:1.0"],
+                    95_000_000,
+                    &["worker"],
+                ),
+                img("sha256:alpine", &["alpine:3.20"], 8_000_000, &[]),
+                img("sha256:dangling", &[], 52_000_000, &[]),
             ],
             networks: vec![
                 network("bridge", "bridge", Some("172.17.0.0/16"), &[]),
@@ -288,6 +311,15 @@ impl FakeClient {
         let name = v.name.clone();
         st.volumes.push(v);
         emit(&mut st, ResourceKind::Volume, "create", &name);
+    }
+
+    /// Adds an image, with the `pull` event the daemon sends. An id that exists is replaced.
+    pub fn add_image(&self, i: ImageInfo) {
+        let mut st = self.lock();
+        st.images.retain(|o| o.id != i.id);
+        let id = i.id.clone();
+        st.images.push(i);
+        emit(&mut st, ResourceKind::Image, "pull", &id);
     }
 
     /// Adds a network (its id is `<name>-id`), with the `create` event the daemon sends; `members`
@@ -570,6 +602,52 @@ impl DockerClient for FakeClient {
         Ok(removed)
     }
 
+    async fn list_images(&self) -> Result<Vec<ImageInfo>, DockerError> {
+        Ok(self.begin("list_images".into())?.images.clone())
+    }
+
+    async fn remove_image(&self, reference: &str) -> Result<(), DockerError> {
+        let mut st = self.begin(format!("remove_image:{reference}"))?;
+        let not_found = || DockerError::NotFound(format!("No such image: {reference}"));
+        let pos = st
+            .images
+            .iter()
+            .position(|i| i.id == reference || i.repo_tags.iter().any(|t| t == reference))
+            .ok_or_else(not_found)?;
+        if !st.images[pos].used_by.is_empty() {
+            return Err(DockerError::Conflict(format!(
+                "conflict: unable to delete {reference}: image is being used by a container"
+            )));
+        }
+        let id = st.images[pos].id.clone();
+        let by_tag = st.images[pos].repo_tags.iter().any(|t| t == reference);
+        if by_tag {
+            st.images[pos].repo_tags.retain(|t| t != reference);
+            emit(&mut st, ResourceKind::Image, "untag", &id);
+        }
+        if !by_tag || st.images[pos].repo_tags.is_empty() {
+            st.images.remove(pos);
+            emit(&mut st, ResourceKind::Image, "delete", &id);
+        }
+        Ok(())
+    }
+
+    async fn prune_images(&self) -> Result<PruneReport, DockerError> {
+        let mut st = self.begin("prune_images".into())?;
+        let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut st.images)
+            .into_iter()
+            .partition(|i| i.repo_tags.is_empty() && i.used_by.is_empty());
+        st.images = kept;
+        let report = PruneReport {
+            removed: gone.iter().map(|i| i.id.clone()).collect(),
+            reclaimed: gone.iter().map(|i| i.size).sum(),
+        };
+        for id in &report.removed {
+            emit(&mut st, ResourceKind::Image, "delete", id);
+        }
+        Ok(report)
+    }
+
     async fn list_networks(&self) -> Result<Vec<NetworkInfo>, DockerError> {
         let st = self.begin("list_networks".into())?;
         Ok(st
@@ -755,6 +833,72 @@ mod tests {
             Err(DockerError::Conflict(_))
         ));
         assert!(c.remove_network("bridge-id").await.is_err());
+    }
+
+    fn image(id: &str, tags: &[&str], size: u64, used_by: &[&str]) -> ImageInfo {
+        ImageInfo {
+            id: id.into(),
+            repo_tags: tags.iter().map(|t| t.to_string()).collect(),
+            size,
+            created: 1,
+            used_by: used_by.iter().map(|n| n.to_string()).collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn fake_remove_tag_keeps_image() {
+        let c = FakeClient::new();
+        c.add_image(image("sha256:a", &["app:1", "app:latest"], 5, &[]));
+        c.remove_image("app:1").await.unwrap();
+        let imgs = c.list_images().await.unwrap();
+        assert_eq!(imgs.len(), 1);
+        assert_eq!(imgs[0].repo_tags, vec!["app:latest".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn fake_remove_last_tag_deletes_image() {
+        let c = FakeClient::new();
+        c.add_image(image("sha256:a", &["app:1"], 5, &[]));
+        c.add_image(image("sha256:b", &[], 7, &[]));
+        c.remove_image("app:1").await.unwrap();
+        c.remove_image("sha256:b").await.unwrap();
+        assert!(c.list_images().await.unwrap().is_empty());
+        assert!(matches!(
+            c.remove_image("app:1").await,
+            Err(DockerError::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn fake_remove_in_use_conflicts() {
+        let c = FakeClient::new();
+        c.add_image(image("sha256:a", &["app:1"], 5, &["web"]));
+        assert!(matches!(
+            c.remove_image("app:1").await,
+            Err(DockerError::Conflict(_))
+        ));
+        assert_eq!(c.list_images().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fake_prune_removes_only_dangling_and_sums_size() {
+        let c = FakeClient::new();
+        c.add_image(image("sha256:a", &["app:1"], 5, &[]));
+        c.add_image(image("sha256:b", &[], 7, &[]));
+        c.add_image(image("sha256:c", &[], 11, &[]));
+        let report = c.prune_images().await.unwrap();
+        assert_eq!(report.removed, vec!["sha256:b", "sha256:c"]);
+        assert_eq!(report.reclaimed, 18);
+        assert_eq!(c.list_images().await.unwrap().len(), 1);
+        assert!(c.calls().contains(&"prune_images".to_string()));
+    }
+
+    #[tokio::test]
+    async fn fake_image_calls_honor_fail_next() {
+        let c = FakeClient::new();
+        c.fail_next(DockerError::PermissionDenied);
+        assert_eq!(c.list_images().await, Err(DockerError::PermissionDenied));
+        assert!(c.list_images().await.is_ok());
     }
 
     #[tokio::test]

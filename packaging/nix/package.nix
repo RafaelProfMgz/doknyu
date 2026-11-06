@@ -1,7 +1,7 @@
 # Derivation for nixpkgs (copy to pkgs/by-name/do/doknyu/package.nix, see packaging/README.md).
 #
-# `hash` and `cargoHash` are placeholders until the tag v0.1.0 exists; packaging/nix/pin-release.sh
-# fills them in. flake.nix builds the same derivation from the local tree (src and cargoDeps
+# `hash` and `cargoHash` are pinned to the tag in `version` by packaging/nix/pin-release.sh; rerun it
+# on each release. flake.nix builds the same derivation from the local tree (src and cargoDeps
 # overridden), which is how `scripts/nix-check.sh` tests it before the tag.
 {
   lib,
@@ -26,10 +26,10 @@ rustPlatform.buildRustPackage (finalAttrs: {
     owner = "RafaelProfMgz";
     repo = "doknyu";
     tag = "v${finalAttrs.version}";
-    hash = lib.fakeHash;
+    hash = "sha256-zqbxKFW4U/crOmM9RAHm7/YOvLjX6fMGIm70h5HtMuE=";
   };
 
-  cargoHash = lib.fakeHash;
+  cargoHash = "sha256-zzgLNQSyTF/lRl1tnC+DOBef10B3qkf3zVshQ0hDX88=";
 
   # Wayland, X11, xkbcommon, Vulkan and GL are loaded with dlopen (winit/wgpu), so the linker does
   # not record them: put them in the rpath by hand, as other winit/wgpu apps in nixpkgs do (halloy).
