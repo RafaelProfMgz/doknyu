@@ -13,8 +13,10 @@ system light/dark theme and is available in English and Brazilian Portuguese.
 
 <!-- The files below live in docs/screenshots/. -->
 ![Container list, dark theme](docs/screenshots/list-dark.png)
-![Container details in the dock](docs/screenshots/dock.png)
-![Command palette, light theme](docs/screenshots/palette-light.png)
+![Live container stats, light theme](docs/screenshots/stats-light.png)
+![Command palette, dark theme](docs/screenshots/palette-dark.png)
+![Volumes, dark theme](docs/screenshots/volumes-dark.png)
+![Networks, dark theme](docs/screenshots/networks-dark.png)
 
 ## Installation
 

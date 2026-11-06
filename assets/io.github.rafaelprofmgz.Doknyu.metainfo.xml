@@ -38,14 +38,24 @@
       <caption xml:lang="pt-BR">Lista de containers no tema escuro</caption>
     </screenshot>
     <screenshot>
-      <image>https://raw.githubusercontent.com/RafaelProfMgz/doknyu/v0.1.0/docs/screenshots/dock.png</image>
-      <caption>Container details in the dock</caption>
-      <caption xml:lang="pt-BR">Detalhes do container no dock</caption>
+      <image>https://raw.githubusercontent.com/RafaelProfMgz/doknyu/v0.1.0/docs/screenshots/stats-light.png</image>
+      <caption>Live container stats in the light theme</caption>
+      <caption xml:lang="pt-BR">Estatísticas do container ao vivo no tema claro</caption>
     </screenshot>
     <screenshot>
-      <image>https://raw.githubusercontent.com/RafaelProfMgz/doknyu/v0.1.0/docs/screenshots/palette-light.png</image>
-      <caption>Command palette in the light theme</caption>
-      <caption xml:lang="pt-BR">Paleta de comandos no tema claro</caption>
+      <image>https://raw.githubusercontent.com/RafaelProfMgz/doknyu/v0.1.0/docs/screenshots/palette-dark.png</image>
+      <caption>Command palette</caption>
+      <caption xml:lang="pt-BR">Paleta de comandos</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/RafaelProfMgz/doknyu/v0.1.0/docs/screenshots/volumes-dark.png</image>
+      <caption>Volumes</caption>
+      <caption xml:lang="pt-BR">Volumes</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/RafaelProfMgz/doknyu/v0.1.0/docs/screenshots/networks-dark.png</image>
+      <caption>Networks</caption>
+      <caption xml:lang="pt-BR">Redes</caption>
     </screenshot>
   </screenshots>
   <releases>
