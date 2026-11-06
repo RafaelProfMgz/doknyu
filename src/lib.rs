@@ -4,6 +4,7 @@ pub mod docker;
 pub mod error;
 pub mod exec_bridge;
 pub mod fuzzy;
+pub mod install;
 pub mod keymap;
 pub mod logbuf;
 pub mod model;
@@ -11,6 +12,8 @@ pub mod sandbox;
 pub mod stats;
 pub mod terminal_launcher;
 pub mod ui;
+pub mod uninstall;
+pub mod update;
 pub mod views;
 
 rust_i18n::i18n!("locales", fallback = "en");

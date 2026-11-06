@@ -12,6 +12,7 @@ use rust_i18n::t;
 use crate::actions::{self, ActionId};
 use crate::docker::DockerClient;
 use crate::error::DockerError;
+use crate::install::{self, Env, Runner, SystemEnv, SystemRunner};
 use crate::keymap;
 use crate::model::{ContainerInfo, DockerEvent, ResourceKind};
 use crate::terminal_launcher;
@@ -20,12 +21,16 @@ use crate::ui::prefs;
 use crate::ui::style;
 use crate::ui::theme::{ThemeMode, resolve};
 use crate::ui::tokens::{BORDER_WIDTH, ROW_HEIGHT, SPACE_1};
+use crate::uninstall;
+use crate::update::{self, Http, UpdatePlan, UreqHttp};
 use crate::views::containers::{self, ContainersState};
 use crate::views::detail::terminal::{self, TerminalState};
 use crate::views::detail::{self, DetailState};
 use crate::views::images::{self, ImagesState};
 use crate::views::networks::{self, NetworksState};
 use crate::views::palette::{self, PaletteState};
+use crate::views::uninstall::{self as uninstall_view, UninstallState};
+use crate::views::update::{self as update_view, Outcome, UpdateState};
 use crate::views::volumes::{self, VolumesState};
 use crate::views::widgets::{friendly_error, toast_stack};
 use crate::views::{dock, onboarding, sidebar, status_bar};
@@ -152,6 +157,10 @@ pub enum Message {
         mods: iced::keyboard::Modifiers,
         captured: bool,
     },
+    /// Something in the "Uninstall doknyu" dialog.
+    Uninstall(uninstall_view::Msg),
+    /// Something in the "Check for updates" dialog.
+    Update(update_view::Msg),
     /// The palette's search text changed.
     PaletteQuery(String),
     /// Moves the highlighted palette result by this many rows.
@@ -160,6 +169,50 @@ pub enum Message {
     PaletteRun(Option<ActionId>),
     /// The results of the palette were scrolled to this offset.
     PaletteScrolled(f32),
+}
+
+/// The parts of the system the update and uninstall dialogs use; the tests swap in fakes.
+#[derive(Clone)]
+pub struct System {
+    pub env: Arc<dyn Env>,
+    pub runner: Arc<dyn Runner>,
+    pub http: Arc<dyn Http>,
+    pub home: PathBuf,
+    /// Where a downloaded `.deb` waits for apt.
+    pub cache: PathBuf,
+}
+
+impl System {
+    pub fn real() -> Self {
+        Self {
+            env: Arc::new(SystemEnv),
+            runner: Arc::new(SystemRunner),
+            http: Arc::new(UreqHttp),
+            home: std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_default(),
+            cache: update::cache_dir(),
+        }
+    }
+}
+
+/// Runs blocking work (package managers, files, network) off the UI thread.
+fn blocking<T: Send + 'static>(
+    job: impl FnOnce() -> T + Send + 'static,
+    done: impl Fn(T) -> Message + Send + 'static,
+) -> Task<Message> {
+    Task::perform(
+        async move { tokio::task::spawn_blocking(job).await },
+        move |result| done(result.expect("background job panicked")),
+    )
+}
+
+/// Starts the new version after an update.
+fn restart_into(runner: &dyn Runner, exe: Option<PathBuf>) -> Outcome {
+    match exe.map(|exe| runner.spawn_detached(&exe)) {
+        Some(Ok(())) => Outcome::Restarted,
+        _ => Outcome::RestartFailed,
+    }
 }
 
 pub struct App {
@@ -192,6 +245,14 @@ pub struct App {
     pub terminal_enabled: bool,
     /// The command palette, while it is open.
     pub palette: Option<PaletteState>,
+    /// The "Uninstall doknyu" dialog, while it is open.
+    pub uninstall: Option<UninstallState>,
+    /// The "Check for updates" dialog, while it is open.
+    pub update_dialog: Option<UpdateState>,
+    /// The system the two dialogs above work on.
+    pub system: System,
+    /// The app asked iced to close (after an uninstall or an update).
+    pub exiting: bool,
     /// Scroll offset of the palette results, to keep the cursor in view.
     palette_scroll_y: f32,
     /// Where preferences are saved; `None` keeps them in memory only.
@@ -353,6 +414,10 @@ impl App {
             terminal_focused: false,
             terminal_enabled: true,
             palette: None,
+            uninstall: None,
+            update_dialog: None,
+            system: System::real(),
+            exiting: false,
             palette_scroll_y: 0.0,
             config_dir,
             panes: initial_panes(),
@@ -495,6 +560,8 @@ impl App {
                 }
             }
             Message::Images(m) => self.update_images(m),
+            Message::Uninstall(m) => self.update_uninstall(m),
+            Message::Update(m) => self.update_update(m),
             Message::ReloadImages => {
                 self.images_reload_scheduled = false;
                 if self.conn == Connection::Ok {
@@ -758,6 +825,8 @@ impl App {
                 let go = self.update(Message::Navigate(Screen::Volumes));
                 Task::batch([go, self.update_volumes(volumes::Msg::AskPrune)])
             }
+            Uninstall => self.open_uninstall(),
+            CheckUpdate => self.open_update(),
             PruneImages => {
                 // A maximized dock hides the list the dialog is about.
                 if let Some(dock) = &mut self.dock {
@@ -905,6 +974,19 @@ impl App {
     /// search of the screen.
     fn close_top_layer(&mut self) {
         if self.palette.take().is_some() {
+            return;
+        }
+        // These two never close in the middle of their work.
+        if let Some(state) = &self.uninstall {
+            if state.can_close() {
+                self.uninstall = None;
+            }
+            return;
+        }
+        if let Some(state) = &self.update_dialog {
+            if state.can_close() {
+                self.update_dialog = None;
+            }
             return;
         }
         if self.containers.confirm_remove.take().is_some()
@@ -1455,6 +1537,285 @@ impl App {
         )
     }
 
+    /// Opens the uninstall dialog and finds out how the app was installed.
+    fn open_uninstall(&mut self) -> Task<Message> {
+        self.uninstall = Some(UninstallState::new(self.config_dir.clone()));
+        let system = self.system.clone();
+        blocking(
+            move || {
+                let kind = install::detect(system.env.as_ref(), system.runner.as_ref());
+                let has_pkexec = system.env.has_program("pkexec");
+                let plan = uninstall::plan(&kind, &system.home, has_pkexec);
+                (kind, plan)
+            },
+            |(kind, plan)| Message::Uninstall(uninstall_view::Msg::Detected(kind, plan)),
+        )
+    }
+
+    fn update_uninstall(&mut self, m: uninstall_view::Msg) -> Task<Message> {
+        use uninstall_view::{Msg, Stage};
+        let Some(state) = &mut self.uninstall else {
+            return Task::none();
+        };
+        match m {
+            Msg::Detected(kind, plan) => {
+                state.kind = Some(kind);
+                state.plan = Some(plan);
+                state.stage = Stage::Ready;
+                Task::none()
+            }
+            Msg::DeletePrefs(on) => {
+                if state.stage != Stage::Running {
+                    state.delete_prefs = on;
+                }
+                Task::none()
+            }
+            Msg::Confirm => {
+                let Some(plan) = state.plan.clone() else {
+                    return Task::none();
+                };
+                if state.stage == Stage::Running {
+                    return Task::none();
+                }
+                // Only a command to show and nothing to delete: there is nothing to run.
+                let prefs = state.prefs_to_delete();
+                if matches!(plan, uninstall::UninstallPlan::ShowCommand { .. }) && prefs.is_none() {
+                    return Task::none();
+                }
+                state.stage = Stage::Running;
+                let runner = self.system.runner.clone();
+                blocking(
+                    move || uninstall::execute(&plan, runner.as_ref(), prefs.as_deref()),
+                    |r| Message::Uninstall(Msg::Done(r)),
+                )
+            }
+            Msg::Cancel => {
+                if state.can_close() {
+                    self.uninstall = None;
+                }
+                Task::none()
+            }
+            Msg::Done(Ok(())) => self.exit(),
+            Msg::Done(Err(uninstall::UninstallError::Cancelled)) => {
+                state.stage = Stage::Ready;
+                self.push_toast_of(
+                    ToastKind::Info,
+                    t!("uninstall.cancelled").into_owned(),
+                    None,
+                );
+                Task::none()
+            }
+            Msg::Done(Err(e)) => {
+                state.stage = Stage::Failed(uninstall_view::error_text(&e));
+                Task::none()
+            }
+        }
+    }
+
+    /// Closes the app (after an uninstall, or once the new version is running).
+    fn exit(&mut self) -> Task<Message> {
+        self.exiting = true;
+        iced::exit()
+    }
+
+    /// Opens the update dialog and finds out how the app was installed.
+    fn open_update(&mut self) -> Task<Message> {
+        self.update_dialog = Some(UpdateState::default());
+        self.detect_for_update()
+    }
+
+    fn detect_for_update(&self) -> Task<Message> {
+        let system = self.system.clone();
+        blocking(
+            move || {
+                let env = system.env.as_ref();
+                let kind = install::detect(env, system.runner.as_ref());
+                let plan = update::plan(&kind, &|p| env.has_program(p));
+                (kind, plan, env.current_exe())
+            },
+            |(kind, plan, exe)| Message::Update(update_view::Msg::Detected { kind, plan, exe }),
+        )
+    }
+
+    /// Asks GitHub for the newest release.
+    fn check_latest(&self) -> Task<Message> {
+        let http = self.system.http.clone();
+        blocking(
+            move || update::latest(http.as_ref()),
+            |r| Message::Update(update_view::Msg::Checked(r)),
+        )
+    }
+
+    /// Puts the dialog in the stage its plan starts in, with the work that needs.
+    fn start_plan(&mut self) -> Task<Message> {
+        use update_view::Stage;
+        let Some(state) = &mut self.update_dialog else {
+            return Task::none();
+        };
+        match state.plan.clone() {
+            Some(UpdatePlan::SelfUpdate { .. } | UpdatePlan::OpenRelease) => {
+                state.stage = Stage::Checking;
+                self.check_latest()
+            }
+            Some(UpdatePlan::Privileged { .. }) => {
+                state.stage = Stage::ConfirmPrivileged;
+                Task::none()
+            }
+            Some(UpdatePlan::ShowCommand { command }) => {
+                state.stage = Stage::Command(command);
+                Task::none()
+            }
+            None => self.detect_for_update(),
+        }
+    }
+
+    fn update_update(&mut self, m: update_view::Msg) -> Task<Message> {
+        use update_view::{Msg, Stage};
+        let Some(state) = &mut self.update_dialog else {
+            return Task::none();
+        };
+        match m {
+            Msg::Detected { kind, plan, exe } => {
+                state.kind = Some(kind);
+                state.plan = Some(plan);
+                state.exe = exe;
+                self.start_plan()
+            }
+            Msg::Checked(Ok(release)) => {
+                state.stage = if release.is_newer() {
+                    Stage::Available(release)
+                } else {
+                    Stage::UpToDate
+                };
+                Task::none()
+            }
+            Msg::Checked(Err(e)) => {
+                state.stage = Stage::Error {
+                    message: update_view::error_text(&e),
+                    release_url: Some(update::RELEASES_URL.to_owned()),
+                };
+                Task::none()
+            }
+            Msg::Start => self.start_update(),
+            Msg::Progress(done, total) => {
+                if matches!(state.stage, Stage::Downloading { .. }) {
+                    // A finished download goes on to the install (apt asks for the password).
+                    state.stage = if total > 0 && done >= total {
+                        Stage::Installing
+                    } else {
+                        Stage::Downloading { done, total }
+                    };
+                }
+                Task::none()
+            }
+            Msg::Finished(Ok(Outcome::Restarted)) => self.exit(),
+            Msg::Finished(Ok(Outcome::RestartFailed)) => {
+                state.stage = Stage::RestartFailed;
+                Task::none()
+            }
+            Msg::Finished(Ok(Outcome::Unchanged)) => {
+                state.stage = Stage::UpToDate;
+                Task::none()
+            }
+            Msg::Finished(Err(update::UpdateError::Cancelled)) => {
+                // Back to where the user clicked.
+                state.stage = match (&state.plan, state.release.clone()) {
+                    (Some(UpdatePlan::Privileged { .. }), _) => Stage::ConfirmPrivileged,
+                    (_, Some(release)) => Stage::Available(release),
+                    _ => Stage::UpToDate,
+                };
+                self.push_toast_of(ToastKind::Info, t!("update.cancelled").into_owned(), None);
+                Task::none()
+            }
+            Msg::Finished(Err(e)) => {
+                let release_url = state.release.as_ref().map(|r| r.html_url.clone());
+                state.stage = Stage::Error {
+                    message: update_view::error_text(&e),
+                    release_url,
+                };
+                Task::none()
+            }
+            Msg::Retry => self.start_plan(),
+            Msg::Close => {
+                if state.can_close() {
+                    self.update_dialog = None;
+                }
+                Task::none()
+            }
+            Msg::Quit => self.exit(),
+        }
+    }
+
+    /// "Update and restart", "Update" or "Open release page".
+    fn start_update(&mut self) -> Task<Message> {
+        use update_view::{Msg, Stage};
+        let Some(state) = &mut self.update_dialog else {
+            return Task::none();
+        };
+        let system = self.system.clone();
+        match (state.plan.clone(), state.stage.clone()) {
+            (Some(UpdatePlan::OpenRelease), Stage::Available(release)) => {
+                self.update_dialog = None;
+                self.update(Message::OpenUrl(release.html_url))
+            }
+            (Some(UpdatePlan::SelfUpdate { install }), Stage::Available(release)) => {
+                let name = update::asset_name(&install, &release);
+                let total = release.asset(&name).map_or(0, |a| a.size);
+                state.stage = Stage::Downloading { done: 0, total };
+                state.release = Some(release.clone());
+                // The new version starts from the same place: the AppImage, or the executable
+                // the package put back.
+                let restart = match &install {
+                    update::SelfInstall::ReplaceAppImage { path } => Some(path.clone()),
+                    update::SelfInstall::AptInstall => state.exe.clone(),
+                };
+                let (tx, rx) = futures::channel::mpsc::unbounded();
+                let job = blocking(
+                    move || {
+                        let mut last = 0u64;
+                        update::self_update(
+                            &release,
+                            &install,
+                            system.http.as_ref(),
+                            system.runner.as_ref(),
+                            &system.cache,
+                            &mut |done, total| {
+                                // About every 256 KiB, and the end.
+                                if done >= last + 256 * 1024 || done >= total {
+                                    last = done;
+                                    let _ = tx.unbounded_send((done, total));
+                                }
+                            },
+                        )?;
+                        Ok(restart_into(system.runner.as_ref(), restart))
+                    },
+                    |r| Message::Update(Msg::Finished(r)),
+                );
+                let progress = Task::run(rx, |(done, total)| {
+                    Message::Update(Msg::Progress(done, total))
+                });
+                Task::batch([progress, job])
+            }
+            (Some(UpdatePlan::Privileged { package, args, .. }), Stage::ConfirmPrivileged) => {
+                state.stage = Stage::Installing;
+                let restart = state.exe.clone();
+                blocking(
+                    move || {
+                        let changed =
+                            update::privileged_upgrade(system.runner.as_ref(), &package, &args)?;
+                        Ok(if changed {
+                            restart_into(system.runner.as_ref(), restart)
+                        } else {
+                            Outcome::Unchanged
+                        })
+                    },
+                    |r| Message::Update(Msg::Finished(r)),
+                )
+            }
+            _ => Task::none(),
+        }
+    }
+
     fn load_images(&mut self) -> Task<Message> {
         self.images_load_seq += 1;
         let seq = self.images_load_seq;
@@ -1924,6 +2285,22 @@ impl App {
         };
         let body = match images::dialog(&self.images) {
             Some(card) => modal(body, card, Message::Images(images::Msg::Cancel)),
+            None => body,
+        };
+        let body = match &self.uninstall {
+            Some(state) => modal(
+                body,
+                uninstall_view::dialog(state),
+                Message::Uninstall(uninstall_view::Msg::Cancel),
+            ),
+            None => body,
+        };
+        let body = match &self.update_dialog {
+            Some(state) => modal(
+                body,
+                update_view::dialog(state),
+                Message::Update(update_view::Msg::Close),
+            ),
             None => body,
         };
         let body = match &self.palette {
@@ -7414,5 +7791,234 @@ mod tests {
         )));
         assert!(!app.terminal_focused);
         assert!(app.palette.is_some());
+    }
+}
+
+#[cfg(test)]
+mod install_dialog_tests {
+    use std::collections::HashMap;
+    use std::path::Path;
+
+    use super::test_support::settle;
+    use super::*;
+    use crate::docker::FakeClient;
+    use crate::install::InstallKind;
+    use crate::install::fakes::{FakeEnv, FakeRunner, temp_dir};
+    use crate::uninstall::UninstallPlan;
+    use crate::update::UpdateError;
+    use crate::update::fakes::{FakeHttp, release_with};
+    use crate::views::uninstall::Stage as UStage;
+    use crate::views::update::Stage;
+
+    /// An app whose system is fake: `env` decides the install, `runner` and `http` answer.
+    fn app_with(env: FakeEnv, runner: Arc<FakeRunner>, http: FakeHttp, dir: &Path) -> App {
+        let (mut app, _) = App::new(Arc::new(FakeClient::new()));
+        app.system = System {
+            env: Arc::new(env),
+            runner,
+            http: Arc::new(http),
+            home: dir.to_path_buf(),
+            cache: dir.join("cache"),
+        };
+        app
+    }
+
+    fn env(exe: &Path, appimage: Option<&Path>, programs: &[&str]) -> FakeEnv {
+        let mut vars = HashMap::from([("HOME".to_owned(), "/nowhere".to_owned())]);
+        let mut files = Vec::new();
+        if let Some(path) = appimage {
+            vars.insert("APPIMAGE".to_owned(), path.to_string_lossy().into_owned());
+            files.push(path.to_path_buf());
+        }
+        FakeEnv {
+            vars,
+            exe: Some(exe.to_path_buf()),
+            files,
+            programs: programs.iter().map(|p| (*p).to_owned()).collect(),
+            flatpak: false,
+        }
+    }
+
+    fn upd(m: update_view::Msg) -> Message {
+        Message::Update(m)
+    }
+
+    fn uni(m: uninstall_view::Msg) -> Message {
+        Message::Uninstall(m)
+    }
+
+    #[tokio::test]
+    async fn appimage_update_downloads_replaces_and_restarts() {
+        let dir = temp_dir("app-update-appimage");
+        let image = dir.join("doknyu.AppImage");
+        std::fs::write(&image, b"old").unwrap();
+        let (_, http) = release_with("99.0.0", b"new build", b"deb");
+        let runner = Arc::new(FakeRunner::default());
+        let mut app = app_with(env(&image, Some(&image), &[]), runner.clone(), http, &dir);
+
+        settle(&mut app, Message::Action(ActionId::CheckUpdate)).await;
+        let state = app.update_dialog.as_ref().unwrap();
+        assert!(matches!(&state.stage, Stage::Available(r) if r.version == "99.0.0"));
+        // Not while the dialog is open: one at a time.
+        assert!(!actions::available(&app, ActionId::Uninstall));
+
+        settle(&mut app, upd(update_view::Msg::Start)).await;
+        assert_eq!(std::fs::read(&image).unwrap(), b"new build");
+        assert_eq!(*runner.spawned.lock().unwrap(), vec![image.clone()]);
+        assert!(app.exiting);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn up_to_date_and_network_errors() {
+        let dir = temp_dir("app-update-latest");
+        let image = dir.join("doknyu.AppImage");
+        std::fs::write(&image, b"old").unwrap();
+        let (_, http) = release_with(update::CURRENT, b"x", b"y");
+        let mut app = app_with(env(&image, Some(&image), &[]), Arc::default(), http, &dir);
+        settle(&mut app, Message::Action(ActionId::CheckUpdate)).await;
+        assert_eq!(app.update_dialog.as_ref().unwrap().stage, Stage::UpToDate);
+
+        let http = FakeHttp::default().failing(
+            "https://api.github.com/repos/RafaelProfMgz/doknyu/releases/latest",
+            UpdateError::RateLimited,
+        );
+        let mut app = app_with(env(&image, Some(&image), &[]), Arc::default(), http, &dir);
+        settle(&mut app, Message::Action(ActionId::CheckUpdate)).await;
+        assert!(matches!(
+            &app.update_dialog.as_ref().unwrap().stage,
+            Stage::Error { message, .. } if *message == update_view::error_text(&UpdateError::RateLimited)
+        ));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn deb_update_cancelled_goes_back_and_toasts() {
+        let dir = temp_dir("app-update-deb");
+        let exe = Path::new("/usr/bin/doknyu");
+        let (_, http) = release_with("99.0.0", b"img", b"the deb");
+        let runner = Arc::new(FakeRunner::default());
+        runner.answer("dpkg-query", 0, "doknyu: /usr/bin/doknyu");
+        runner.answer("pkexec", 126, "");
+        let mut app = app_with(env(exe, None, &["dpkg-query"]), runner.clone(), http, &dir);
+        settle(&mut app, Message::Action(ActionId::CheckUpdate)).await;
+        settle(&mut app, upd(update_view::Msg::Start)).await;
+        let state = app.update_dialog.as_ref().unwrap();
+        assert!(matches!(&state.stage, Stage::Available(_)));
+        assert!(!app.exiting);
+        assert!(app.toasts.iter().any(|t| t.text == t!("update.cancelled")));
+        assert!(runner.spawned.lock().unwrap().is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn update_dialog_does_not_close_while_installing() {
+        let state = UpdateState {
+            stage: Stage::Installing,
+            ..UpdateState::default()
+        };
+        let (mut app, _) = App::new(Arc::new(FakeClient::new()));
+        app.update_dialog = Some(state);
+        settle(&mut app, upd(update_view::Msg::Close)).await;
+        settle(&mut app, Message::Action(ActionId::Escape)).await;
+        assert!(app.update_dialog.is_some());
+        app.update_dialog.as_mut().unwrap().stage = Stage::UpToDate;
+        settle(&mut app, Message::Action(ActionId::Escape)).await;
+        assert!(app.update_dialog.is_none());
+    }
+
+    #[tokio::test]
+    async fn homebrew_update_and_uninstall_only_show_commands() {
+        let dir = temp_dir("app-brew");
+        let exe = Path::new("/home/linuxbrew/.linuxbrew/Cellar/doknyu/0.1.0/bin/doknyu");
+        let http = FakeHttp::default();
+        let mut app = app_with(env(exe, None, &[]), Arc::default(), http, &dir);
+        settle(&mut app, Message::Action(ActionId::CheckUpdate)).await;
+        assert_eq!(
+            app.update_dialog.as_ref().unwrap().stage,
+            Stage::Command("brew upgrade doknyu".into())
+        );
+        settle(&mut app, upd(update_view::Msg::Close)).await;
+
+        settle(&mut app, Message::Action(ActionId::Uninstall)).await;
+        let state = app.uninstall.as_ref().unwrap();
+        assert_eq!(state.kind, Some(InstallKind::Homebrew));
+        assert_eq!(
+            state.plan,
+            Some(UninstallPlan::ShowCommand {
+                command: "brew uninstall doknyu".into()
+            })
+        );
+        // No preferences directory in this app: nothing for "Confirm" to run.
+        settle(&mut app, uni(uninstall_view::Msg::Confirm)).await;
+        assert!(!app.exiting);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn deb_uninstall_runs_pkexec_and_exits() {
+        let dir = temp_dir("app-uninstall-deb");
+        let exe = Path::new("/usr/bin/doknyu");
+        let runner = Arc::new(FakeRunner::default());
+        runner.answer("dpkg-query", 0, "doknyu: /usr/bin/doknyu");
+        runner.answer("pkexec", 0, "");
+        let mut app = app_with(
+            env(exe, None, &["dpkg-query", "pkexec"]),
+            runner.clone(),
+            FakeHttp::default(),
+            &dir,
+        );
+        settle(&mut app, Message::Action(ActionId::Uninstall)).await;
+        settle(&mut app, uni(uninstall_view::Msg::Confirm)).await;
+        assert!(app.exiting);
+        assert!(runner.calls().iter().any(|(p, args)| p == "pkexec"
+            && *args == ["apt-get", "remove", "-y", "doknyu"].map(String::from)));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn uninstall_cancel_and_failure_stay_open() {
+        let dir = temp_dir("app-uninstall-fail");
+        let exe = Path::new("/usr/bin/doknyu");
+        for (code, cancelled) in [(126, true), (100, false)] {
+            let runner = Arc::new(FakeRunner::default());
+            runner.answer("dpkg-query", 0, "doknyu: /usr/bin/doknyu");
+            runner.answer("pkexec", code, "");
+            let mut app = app_with(
+                env(exe, None, &["dpkg-query", "pkexec"]),
+                runner,
+                FakeHttp::default(),
+                &dir,
+            );
+            settle(&mut app, Message::Action(ActionId::Uninstall)).await;
+            settle(&mut app, uni(uninstall_view::Msg::Confirm)).await;
+            assert!(!app.exiting);
+            let stage = &app.uninstall.as_ref().unwrap().stage;
+            if cancelled {
+                assert_eq!(*stage, UStage::Ready);
+                assert!(
+                    app.toasts
+                        .iter()
+                        .any(|t| t.text == t!("uninstall.cancelled"))
+                );
+            } else {
+                assert!(matches!(stage, UStage::Failed(m) if m.contains("pkexec failed")));
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn uninstall_dialog_does_not_close_while_running() {
+        let (mut app, _) = App::new(Arc::new(FakeClient::new()));
+        let mut state = UninstallState::new(None);
+        state.stage = UStage::Running;
+        app.uninstall = Some(state);
+        settle(&mut app, uni(uninstall_view::Msg::Cancel)).await;
+        settle(&mut app, Message::Action(ActionId::Escape)).await;
+        assert!(app.uninstall.is_some());
+        app.uninstall.as_mut().unwrap().stage = UStage::Ready;
+        settle(&mut app, Message::Action(ActionId::Escape)).await;
+        assert!(app.uninstall.is_none());
     }
 }

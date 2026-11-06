@@ -269,6 +269,12 @@ pub mod text {
             color: Some(palette(t).faint),
         }
     }
+    /// Error messages inside dialogs.
+    pub fn danger(t: &Theme) -> Style {
+        Style {
+            color: Some(palette(t).danger),
+        }
+    }
 }
 
 /// Search box and other single-line inputs: no heavy frame, `accent` border while focused.

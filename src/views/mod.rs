@@ -8,5 +8,7 @@ pub mod palette;
 pub mod sidebar;
 pub mod status_bar;
 pub mod toolbar;
+pub mod uninstall;
+pub mod update;
 pub mod volumes;
 pub mod widgets;
