@@ -4,7 +4,7 @@
 %global app_id io.github.rafaelprofmgz.Doknyu
 
 Name:           doknyu
-Version:        0.1.0
+Version:        0.2.0
 Release:        1%{?dist}
 Summary:        Desktop manager for Docker containers: logs, stats, volumes, networks and a terminal
 
@@ -80,5 +80,8 @@ appstreamcli validate --no-net %{buildroot}%{_metainfodir}/%{app_id}.metainfo.xm
 %{_datadir}/icons/hicolor/*/apps/%{app_id}.*
 
 %changelog
+* Fri Nov 06 2026 RafaelProfMgz <RafaelProfMgz@users.noreply.github.com> - 0.2.0-1
+- Update to 0.2.0
+
 * Fri Oct 30 2026 RafaelProfMgz <RafaelProfMgz@users.noreply.github.com> - 0.1.0-1
 - Initial package

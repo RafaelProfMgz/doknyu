@@ -33,32 +33,33 @@
   </recommends>
   <screenshots>
     <screenshot type="default">
-      <image>https://raw.githubusercontent.com/RafaelProfMgz/doknyu/v0.1.0/docs/screenshots/list-dark.png</image>
+      <image>https://raw.githubusercontent.com/RafaelProfMgz/doknyu/v0.2.0/docs/screenshots/list-dark.png</image>
       <caption>Container list in the dark theme</caption>
       <caption xml:lang="pt-BR">Lista de containers no tema escuro</caption>
     </screenshot>
     <screenshot>
-      <image>https://raw.githubusercontent.com/RafaelProfMgz/doknyu/v0.1.0/docs/screenshots/stats-light.png</image>
+      <image>https://raw.githubusercontent.com/RafaelProfMgz/doknyu/v0.2.0/docs/screenshots/stats-light.png</image>
       <caption>Live container stats in the light theme</caption>
       <caption xml:lang="pt-BR">Estatísticas do container ao vivo no tema claro</caption>
     </screenshot>
     <screenshot>
-      <image>https://raw.githubusercontent.com/RafaelProfMgz/doknyu/v0.1.0/docs/screenshots/palette-dark.png</image>
+      <image>https://raw.githubusercontent.com/RafaelProfMgz/doknyu/v0.2.0/docs/screenshots/palette-dark.png</image>
       <caption>Command palette</caption>
       <caption xml:lang="pt-BR">Paleta de comandos</caption>
     </screenshot>
     <screenshot>
-      <image>https://raw.githubusercontent.com/RafaelProfMgz/doknyu/v0.1.0/docs/screenshots/volumes-dark.png</image>
+      <image>https://raw.githubusercontent.com/RafaelProfMgz/doknyu/v0.2.0/docs/screenshots/volumes-dark.png</image>
       <caption>Volumes</caption>
       <caption xml:lang="pt-BR">Volumes</caption>
     </screenshot>
     <screenshot>
-      <image>https://raw.githubusercontent.com/RafaelProfMgz/doknyu/v0.1.0/docs/screenshots/networks-dark.png</image>
+      <image>https://raw.githubusercontent.com/RafaelProfMgz/doknyu/v0.2.0/docs/screenshots/networks-dark.png</image>
       <caption>Networks</caption>
       <caption xml:lang="pt-BR">Redes</caption>
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.2.0" date="2026-11-06"/>
     <release version="0.1.0" date="2026-10-30"/>
   </releases>
 </component>
