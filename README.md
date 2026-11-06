@@ -26,7 +26,28 @@ Each release also has a `SHA256SUMS` file: `sha256sum --check --ignore-missing S
 **Debian, Ubuntu and derivatives (`.deb`)**
 
 ```sh
-sudo apt install ./doknyu_<version>-1_amd64.deb    # e.g. doknyu_0.1.0-1_amd64.deb
+sudo apt install ./doknyu_<version>-1_amd64.deb    # e.g. doknyu_0.2.0-1_amd64.deb
+```
+
+**Arch Linux and derivatives (pacman repository)**
+
+Add this to the end of `/etc/pacman.conf`:
+
+```ini
+[doknyu]
+SigLevel = Optional TrustAll
+Server = https://github.com/RafaelProfMgz/pacman-tap/releases/download/x86_64
+```
+
+Then run `sudo pacman -Sy doknyu-bin`. Updates come with `sudo pacman -Syu`. The repository is
+[RafaelProfMgz/pacman-tap](https://github.com/RafaelProfMgz/pacman-tap). Its packages are not
+signed yet, but each one is the release `.deb`, checked against `SHA256SUMS`.
+
+**Homebrew (Linux)**
+
+```sh
+brew tap RafaelProfMgz/tap
+brew install doknyu
 ```
 
 **Any distribution (AppImage, needs FUSE 2: `libfuse2` on Ubuntu 22.04/24.04)**
@@ -59,11 +80,16 @@ containers, images, volumes and networks stay as they are.
 | Installed with | Remove with |
 |---|---|
 | `.deb` | `sudo apt remove doknyu` |
+| pacman repository | `sudo pacman -R doknyu-bin`, then remove the `[doknyu]` block from `/etc/pacman.conf` |
+| Homebrew | `brew uninstall doknyu` |
 | AppImage | Delete the `.AppImage` file. If AppImageLauncher or Gear Lever integrated it, remove it from there (or delete its entry in `~/.local/share/applications/`). |
 | `cargo install --path .` (from source) | `cargo uninstall doknyu` |
 
 Your preferences live in `~/.config/doknyu` (or `$XDG_CONFIG_HOME/doknyu`); remove that folder too
 for a clean uninstall: `rm -rf ~/.config/doknyu`.
+
+You can also do it from the app: **Uninstall doknyu** at the bottom of the sidebar finds out how it
+was installed and removes it, or shows the command above.
 
 Flathub, AUR, COPR and nixpkgs packages are prepared in [`packaging/`](packaging/README.md) but not
 published yet; this table gains their rows as each one goes live.
@@ -120,14 +146,18 @@ Releases are built by `.github/workflows/release.yml` when a `v*` tag is pushed.
 
 doknyu é um app desktop para Linux que gerencia containers, logs, estatísticas, volumes, redes e
 um terminal embutido do Docker. Instale o `.deb` (`sudo apt install ./doknyu_*.deb`) ou o AppImage
-da [última release](https://github.com/RafaelProfMgz/doknyu/releases/latest). Para acessar o
+da [última release](https://github.com/RafaelProfMgz/doknyu/releases/latest). No Arch, use o
+repositório pacman (bloco `[doknyu]` em [Installation](#installation), depois
+`sudo pacman -Sy doknyu-bin`). Com Homebrew: `brew tap RafaelProfMgz/tap && brew install doknyu`. Para acessar o
 Docker, adicione seu usuário ao grupo `docker` (`sudo usermod -aG docker $USER`) e entre na sessão
 de novo. Para testar sem Docker: `cargo run --features fake`.
 
 Para desinstalar, use o comando da forma como você instalou (tabela completa em
 [Uninstalling](#uninstalling)): `.deb` → `sudo apt remove doknyu`; AppImage → apague o arquivo;
-compilado com `cargo install --path .` → `cargo uninstall doknyu`. Flathub, AUR, COPR e nixpkgs
-ainda não foram publicados. As preferências ficam em `~/.config/doknyu` (apague para
+compilado com `cargo install --path .` → `cargo uninstall doknyu`; pacman →
+`sudo pacman -R doknyu-bin`; Homebrew → `brew uninstall doknyu`. O app também desinstala e
+atualiza a si mesmo (rodapé da barra lateral). Flathub, AUR, COPR e nixpkgs ainda não foram
+publicados. As preferências ficam em `~/.config/doknyu` (apague para
 remover tudo). Seus containers, imagens e volumes do Docker não são afetados.
 
 ## License

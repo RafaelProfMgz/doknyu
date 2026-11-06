@@ -173,14 +173,14 @@ pub fn plan(kind: &InstallKind, has_program: &dyn Fn(&str) -> bool) -> UpdatePla
             args: ["dnf", "upgrade", "-y", package].map(String::from).to_vec(),
         },
         InstallKind::Rpm { package } => show(format!("sudo dnf upgrade -y {package}")),
-        InstallKind::Pacman { package } => show(if has_program("paru") {
-            format!("paru -S {package}")
+        // An AUR helper updates the AUR and the repositories (the [doknyu] pacman repository
+        // included); without one, pacman updates from the repository.
+        InstallKind::Pacman { .. } => show(if has_program("paru") {
+            "paru -Syu".to_owned()
         } else if has_program("yay") {
-            format!("yay -S {package}")
+            "yay -Syu".to_owned()
         } else {
-            format!(
-                "git clone https://aur.archlinux.org/{package}.git && cd {package} && makepkg -si"
-            )
+            "sudo pacman -Syu".to_owned()
         }),
         InstallKind::Flatpak => show(format!("flatpak update {APP_ID}")),
         InstallKind::Nix => show("nix profile upgrade doknyu".to_owned()),
@@ -657,12 +657,9 @@ mod tests {
             UpdatePlan::ShowCommand { command } => command,
             other => panic!("{other:?}"),
         };
-        assert_eq!(cmd(plan(&aur, &all)), "paru -S doknyu-bin");
-        assert_eq!(cmd(plan(&aur, &only("yay"))), "yay -S doknyu-bin");
-        assert_eq!(
-            cmd(plan(&aur, &none)),
-            "git clone https://aur.archlinux.org/doknyu-bin.git && cd doknyu-bin && makepkg -si"
-        );
+        assert_eq!(cmd(plan(&aur, &all)), "paru -Syu");
+        assert_eq!(cmd(plan(&aur, &only("yay"))), "yay -Syu");
+        assert_eq!(cmd(plan(&aur, &none)), "sudo pacman -Syu");
         assert_eq!(
             cmd(plan(&InstallKind::Flatpak, &none)),
             "flatpak update io.github.rafaelprofmgz.Doknyu"

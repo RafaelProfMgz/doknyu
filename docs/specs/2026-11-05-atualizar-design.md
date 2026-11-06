@@ -62,7 +62,7 @@ pub enum SelfInstall { ReplaceAppImage { path: PathBuf }, AptInstall }
 | `AppImage { path }` | `SelfUpdate { asset: "doknyu-x86_64.AppImage", ReplaceAppImage }` | sim |
 | `Deb { .. }` | `SelfUpdate { asset: "doknyu_<versão>-1_amd64.deb", AptInstall }` | sim |
 | `Rpm { package }` | `Privileged`: `pkexec dnf upgrade -y <package>` | não (o dnf usa a dele) |
-| `Pacman { package }` | `ShowCommand`: `paru -S <package>` se `paru` existe, senão `yay -S <package>`, senão `git clone https://aur.archlinux.org/<package>.git && cd <package> && makepkg -si` | não |
+| `Pacman { .. }` | `ShowCommand`: `paru -Syu` se `paru` existe, senão `yay -Syu`, senão `sudo pacman -Syu` (cobre o AUR e o repositório pacman `[doknyu]` do `RafaelProfMgz/pacman-tap`) | não |
 | `Flatpak` | `ShowCommand`: `flatpak update io.github.rafaelprofmgz.Doknyu` (o sandbox não tem permissão de rede, e nem precisa) | não |
 | `Nix` | `ShowCommand`: `nix profile upgrade doknyu`, com nota sobre NixOS/Home Manager | não |
 | `Homebrew` | `ShowCommand`: `brew upgrade doknyu` | não |
