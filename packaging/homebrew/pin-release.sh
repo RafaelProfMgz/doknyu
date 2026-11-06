@@ -27,7 +27,7 @@ fi
 URL="https://github.com/RafaelProfMgz/doknyu/archive/refs/tags/$TAG.tar.gz"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-curl -fsSL -o "$WORK/src.tar.gz" "$URL" || { echo "não consegui baixar $URL (a tag existe no GitHub?)" >&2; exit 1; }
+curl --proto "=https" --tlsv1.2 -fsSL -o "$WORK/src.tar.gz" "$URL" || { echo "não consegui baixar $URL (a tag existe no GitHub?)" >&2; exit 1; }
 SHA="$(sha256sum "$WORK/src.tar.gz" | cut -d' ' -f1)"
 
 sed -i "s|^  url \".*\"|  url \"$URL\"|; s|^  sha256 \".*\"|  sha256 \"$SHA\"|" "$FORMULA"
