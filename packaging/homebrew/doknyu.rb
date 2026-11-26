@@ -4,8 +4,8 @@
 class Doknyu < Formula
   desc "Desktop manager for Docker containers on Linux"
   homepage "https://github.com/RafaelProfMgz/doknyu"
-  url "https://github.com/RafaelProfMgz/doknyu/archive/refs/tags/v0.2.0.tar.gz"
-  sha256 "7bcdcf096fbb0a4991f20f184a4e722ccd40d388391cec8460ce29e8a948ac5a"
+  url "https://github.com/RafaelProfMgz/doknyu/archive/refs/tags/v0.3.0.tar.gz"
+  sha256 "5f18bdd75a86e966b59df154ff4b4e41865756aa9c584f33a321a717bd733611"
   license any_of: ["MIT", "Apache-2.0"]
   head "https://github.com/RafaelProfMgz/doknyu.git", branch: "main"
 
