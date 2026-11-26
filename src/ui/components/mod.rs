@@ -8,6 +8,7 @@ mod kbd;
 mod list;
 mod modal;
 mod panel_header;
+mod pill;
 mod search_field;
 mod sparkline;
 mod status_dot;
@@ -20,6 +21,7 @@ pub use kbd::{Shortcut, kbd};
 pub use list::{RowEvents, list_header, list_row};
 pub use modal::modal;
 pub use panel_header::panel_header;
+pub use pill::pill;
 pub use search_field::search_field;
 pub use sparkline::sparkline;
 pub use status_dot::{dot_color, status_dot};
@@ -44,6 +46,10 @@ mod tests {
         button::Status::Disabled,
     ];
 
+    fn s_any() -> button::Status {
+        button::Status::Hovered
+    }
+
     #[test]
     fn components_build_in_both_themes() {
         for p in [&DARK, &LIGHT] {
@@ -59,6 +65,10 @@ mod tests {
             let _ = style::container::bg(&t);
             let _ = style::container::surface(&t);
             let _ = style::container::card(&t);
+            let _ = style::container::chrome(&t);
+            let _ = style::container::pill(|p| p.orange)(&t);
+            let _ = style::button::tab(true)(&t, s_any());
+            let _ = style::button::tab(false)(&t, s_any());
             let _ = style::container::elevated(&t);
             let _ = style::container::scrim(&t);
             for (selected, hovered) in [(false, false), (false, true), (true, false), (true, true)]
@@ -135,6 +145,7 @@ mod tests {
             "value",
             |_| (),
         );
+        let _: Element<'_, ()> = pill("3".into(), |p| p.accent);
         let _: Element<'_, ()> = chip("Running".into(), true, ());
         let _: Element<'_, ()> = chip("Stopped".into(), false, ());
         let _: Element<'_, ()> = kbd(&Shortcut {

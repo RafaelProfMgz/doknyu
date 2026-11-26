@@ -68,7 +68,7 @@ pub enum Pane {
 }
 
 /// Share of the main column the list takes while the dock is open (list above, dock below).
-const DOCK_SPLIT_RATIO: f32 = 0.6;
+const DOCK_SPLIT_RATIO: f32 = 0.5;
 
 /// The list above and the dock below; the dock is only drawn while `App::dock` is set.
 fn initial_panes() -> pane_grid::State<Pane> {
@@ -2259,7 +2259,11 @@ impl App {
             ]
             .height(Length::Fill),
             rule::horizontal(BORDER_WIDTH).style(style::rule_border),
-            status_bar::view(&self.conn, &self.containers.items),
+            status_bar::view(
+                &self.conn,
+                &self.containers.items,
+                self.screen == Screen::Containers
+            ),
         ];
         let body: Element<'_, Message> = container(body)
             .width(Length::Fill)
@@ -3827,12 +3831,12 @@ mod tests {
     }
 
     #[test]
-    fn dock_starts_at_sixty_percent_and_resizing_is_kept() {
+    fn dock_starts_at_half_and_resizing_is_kept() {
         let fake = Arc::new(FakeClient::new());
         let mut app = app_with(&fake);
         let (split, ratio) = split_of(&app);
         assert_eq!(ratio, DOCK_SPLIT_RATIO);
-        assert_eq!(ratio, 0.6);
+        assert_eq!(ratio, 0.5);
         let _ = app.update(Message::PaneResized(pane_grid::ResizeEvent {
             split,
             ratio: 0.3,

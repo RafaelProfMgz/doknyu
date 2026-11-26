@@ -31,6 +31,12 @@ pub enum Icon {
     ArrowDownToLine,
     Lock,
     SquareTerminal,
+    Check,
+    Container,
+    Keyboard,
+    Cpu,
+    MemoryStick,
+    HardDrive,
 }
 
 impl Icon {
@@ -59,6 +65,12 @@ impl Icon {
         Icon::ArrowDownToLine,
         Icon::Lock,
         Icon::SquareTerminal,
+        Icon::Check,
+        Icon::Container,
+        Icon::Keyboard,
+        Icon::Cpu,
+        Icon::MemoryStick,
+        Icon::HardDrive,
     ];
 
     /// Glyph in the Lucide font (private use area).
@@ -88,6 +100,12 @@ impl Icon {
             Icon::ArrowDownToLine => '\u{e455}',
             Icon::Lock => '\u{e10b}',
             Icon::SquareTerminal => '\u{e20a}',
+            Icon::Check => '\u{e06c}',
+            Icon::Container => '\u{e4d5}',
+            Icon::Keyboard => '\u{e284}',
+            Icon::Cpu => '\u{e0a9}',
+            Icon::MemoryStick => '\u{e445}',
+            Icon::HardDrive => '\u{e0ed}',
         }
     }
 }
@@ -109,6 +127,6 @@ mod tests {
             assert!(('\u{E000}'..='\u{F8FF}').contains(&c), "{i:?} -> {c:?}");
             assert!(seen.insert(c), "{i:?} repeats {c:?}");
         }
-        assert_eq!(seen.len(), 24);
+        assert_eq!(seen.len(), 30);
     }
 }

@@ -58,7 +58,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
       install -Dm644 "assets/icons/hicolor/''${size}x''${size}/apps/$id.png" \
         -t "$out/share/icons/hicolor/''${size}x''${size}/apps"
     done
-    # The binary embeds IBM Plex (OFL-1.1) and Lucide (ISC); their texts ship with it.
+    # The binary embeds JetBrains Mono NL Nerd Font (OFL-1.1) and Lucide (ISC); their texts ship with it.
     install -Dm644 LICENSE-MIT LICENSE-APACHE -t $out/share/licenses/doknyu
     install -Dm644 assets/fonts/LICENSES.md $out/share/licenses/doknyu/LICENSES-fonts.md
   '';

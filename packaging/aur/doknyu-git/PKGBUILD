@@ -7,7 +7,7 @@ pkgrel=1
 pkgdesc='Desktop manager for Docker containers: logs, stats, volumes, networks and a terminal (git version)'
 arch=('x86_64')
 url='https://github.com/RafaelProfMgz/doknyu'
-# The binary also embeds IBM Plex (OFL-1.1) and Lucide (ISC); the texts are in LICENSES-fonts.md.
+# The binary also embeds JetBrains Mono NL Nerd Font (OFL-1.1) and Lucide (ISC); the texts are in LICENSES-fonts.md.
 license=('MIT OR Apache-2.0' 'OFL-1.1' 'ISC')
 # The GUI stack (Wayland, xkbcommon, Vulkan) is loaded with dlopen, so it is not in the ldd output
 # that namcap reads, but the window does not open without it.

@@ -5,8 +5,9 @@ use iced::{Background, Border, Color, Shadow, Theme, Vector, border};
 
 use crate::ui::theme::palette;
 use crate::ui::tokens::{
-    ALPHA_HOVER, ALPHA_PRESSED, ALPHA_SCRIM, ALPHA_SELECTION, ALPHA_SOFT, BORDER_WIDTH, NO_BORDER,
-    RADIUS, RADIUS_LG, SCROLLBAR_WIDTH, SHADOW_ALPHA, SHADOW_BLUR, SHADOW_OFFSET_Y,
+    ALPHA_HOVER, ALPHA_PRESSED, ALPHA_SCRIM, ALPHA_SELECTION, ALPHA_SOFT, BORDER_WIDTH,
+    FOCUS_RING_WIDTH, NO_BORDER, RADIUS, RADIUS_LG, RADIUS_PILL, SCROLLBAR_GAP, SCROLLBAR_WIDTH,
+    SHADOW_ALPHA, SHADOW_BLUR, SHADOW_OFFSET_Y,
 };
 
 fn rounded_border(color: Color, width: f32) -> Border {
@@ -29,7 +30,7 @@ pub mod button {
     use iced::widget::button::{Status, Style};
     use iced::{Background, Color, Shadow, Theme};
 
-    use super::{ALPHA_HOVER, ALPHA_PRESSED, ALPHA_SOFT, NO_BORDER, rounded_border};
+    use super::{ALPHA_HOVER, ALPHA_PRESSED, ALPHA_SOFT, NO_BORDER, RADIUS_PILL, rounded_border};
     use crate::ui::theme::palette;
     use crate::ui::tokens::{BORDER_WIDTH, Palette};
 
@@ -102,6 +103,23 @@ pub mod button {
         }
     }
 
+    /// A published port: a pill in the orange of numbers, a stronger tint while hovered.
+    pub fn port(t: &Theme, s: Status) -> Style {
+        let p = palette(t);
+        let tint = match s {
+            Status::Hovered | Status::Pressed => p.orange.scale_alpha(ALPHA_SOFT * 2.0),
+            Status::Active | Status::Disabled => p.orange.scale_alpha(ALPHA_SOFT),
+        };
+        Style {
+            background: Some(Background::Color(tint)),
+            border: iced::Border {
+                radius: RADIUS_PILL.into(),
+                ..rounded_border(Color::TRANSPARENT, NO_BORDER)
+            },
+            ..base(p.orange)
+        }
+    }
+
     /// Sidebar entry: a ghost button; the active one keeps the `selected` background.
     pub fn nav(active: bool) -> impl Fn(&Theme, Status) -> Style {
         move |t, s| {
@@ -112,6 +130,22 @@ pub mod button {
                 style.text_color = p.text;
             }
             style
+        }
+    }
+
+    /// Dock tab: text only, the active one in the accent over a soft tint, like a segmented
+    /// control. The tint (not only the color) marks it, for anyone who can't tell the hues apart.
+    pub fn tab(active: bool) -> impl Fn(&Theme, Status) -> Style {
+        move |t, s| {
+            let p = palette(t);
+            if active {
+                return Style {
+                    background: Some(Background::Color(p.accent.scale_alpha(ALPHA_SOFT))),
+                    text_color: p.accent,
+                    ..base(p.accent)
+                };
+            }
+            ghost(t, s)
         }
     }
 
@@ -139,7 +173,10 @@ pub mod button {
                 } else {
                     text_color
                 },
-                border: rounded_border(border_color, BORDER_WIDTH),
+                border: iced::Border {
+                    radius: RADIUS_PILL.into(),
+                    ..rounded_border(border_color, BORDER_WIDTH)
+                },
                 ..base(text_color)
             }
         }
@@ -150,9 +187,9 @@ pub mod container {
     use iced::widget::container::Style;
     use iced::{Background, Border, Color, Theme};
 
-    use super::{ALPHA_SCRIM, RADIUS, RADIUS_LG, rounded_border, shadow};
+    use super::{ALPHA_SCRIM, RADIUS, RADIUS_LG, RADIUS_PILL, rounded_border, shadow};
     use crate::ui::theme::palette;
-    use crate::ui::tokens::BORDER_WIDTH;
+    use crate::ui::tokens::{ALPHA_SOFT, BORDER_WIDTH, Palette};
 
     /// The window background.
     pub fn bg(t: &Theme) -> Style {
@@ -174,12 +211,42 @@ pub mod container {
         }
     }
 
+    /// The status bar: the darkest band, below the content.
+    pub fn chrome(t: &Theme) -> Style {
+        let p = palette(t);
+        Style {
+            text_color: Some(p.text),
+            background: Some(Background::Color(p.chrome)),
+            ..Style::default()
+        }
+    }
+
     /// A card on the background: the surface color inside a 1px border (the Stats cards).
     pub fn card(t: &Theme) -> Style {
         let p = palette(t);
         Style {
-            border: rounded_border(p.border, BORDER_WIDTH),
+            border: Border {
+                radius: RADIUS_LG.into(),
+                ..rounded_border(p.border, BORDER_WIDTH)
+            },
             ..surface(t)
+        }
+    }
+
+    /// A rounded label (count, port, state) in `color` over a soft tint of it. `color` picks
+    /// one of the palette's colors, so the pill follows the theme.
+    pub fn pill(color: fn(&Palette) -> Color) -> impl Fn(&Theme) -> Style {
+        move |t| {
+            let c = color(palette(t));
+            Style {
+                text_color: Some(c),
+                background: Some(Background::Color(c.scale_alpha(ALPHA_SOFT))),
+                border: Border {
+                    radius: RADIUS_PILL.into(),
+                    ..Border::default()
+                },
+                ..Style::default()
+            }
         }
     }
 
@@ -203,6 +270,17 @@ pub mod container {
         let p = palette(t);
         Style {
             text_color: Some(p.text),
+            border: rounded_border(p.border, BORDER_WIDTH),
+            ..Style::default()
+        }
+    }
+
+    /// A key in a shortcut hint: a raised cap on any band.
+    pub fn keycap(t: &Theme) -> Style {
+        let p = palette(t);
+        Style {
+            text_color: Some(p.muted),
+            background: Some(Background::Color(p.hover)),
             border: rounded_border(p.border, BORDER_WIDTH),
             ..Style::default()
         }
@@ -275,19 +353,44 @@ pub mod text {
             color: Some(palette(t).danger),
         }
     }
+
+    pub fn accent(t: &Theme) -> Style {
+        Style {
+            color: Some(palette(t).accent),
+        }
+    }
+
+    pub fn success(t: &Theme) -> Style {
+        Style {
+            color: Some(palette(t).success),
+        }
+    }
+
+    pub fn warning(t: &Theme) -> Style {
+        Style {
+            color: Some(palette(t).warning),
+        }
+    }
+
+    pub fn orange(t: &Theme) -> Style {
+        Style {
+            color: Some(palette(t).orange),
+        }
+    }
 }
 
-/// Search box and other single-line inputs: no heavy frame, `accent` border while focused.
+/// Search box and other single-line inputs: no heavy frame, a 2px `accent` ring while focused.
 pub fn text_input_field(t: &Theme, s: text_input::Status) -> text_input::Style {
     let p = palette(t);
-    let border_color = match s {
-        text_input::Status::Focused { .. } => p.accent,
-        text_input::Status::Hovered => p.muted,
-        text_input::Status::Active | text_input::Status::Disabled => p.border,
+    // Focus gets a thicker ring, not only another color.
+    let (border_color, width) = match s {
+        text_input::Status::Focused { .. } => (p.accent, FOCUS_RING_WIDTH),
+        text_input::Status::Hovered => (p.faint, BORDER_WIDTH),
+        text_input::Status::Active | text_input::Status::Disabled => (p.border, BORDER_WIDTH),
     };
     text_input::Style {
-        background: Background::Color(p.bg),
-        border: rounded_border(border_color, BORDER_WIDTH),
+        background: Background::Color(p.surface),
+        border: rounded_border(border_color, width),
         icon: p.muted,
         placeholder: p.faint,
         value: if s == text_input::Status::Disabled {
@@ -344,12 +447,14 @@ pub fn scrollable_thin(t: &Theme, s: scrollable::Status) -> scrollable::Style {
     }
 }
 
-/// Vertical scrolling with a thin scrollbar.
+/// Vertical scrolling with a thin scrollbar. The bar gets its own lane, so it never covers the
+/// end of a row (actions, shortcuts).
 pub fn thin_scrollbar() -> scrollable::Direction {
     scrollable::Direction::Vertical(
         scrollable::Scrollbar::new()
             .width(SCROLLBAR_WIDTH)
-            .scroller_width(SCROLLBAR_WIDTH),
+            .scroller_width(SCROLLBAR_WIDTH)
+            .spacing(SCROLLBAR_GAP),
     )
 }
 

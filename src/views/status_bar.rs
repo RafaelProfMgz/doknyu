@@ -7,7 +7,7 @@ use rust_i18n::t;
 use crate::actions::{self, ActionId};
 use crate::app::{Connection, Message};
 use crate::model::ContainerInfo;
-use crate::ui::components::{Shortcut, icon_button, kbd};
+use crate::ui::components::{Shortcut, icon_button, kbd, pill};
 use crate::ui::icons::Icon;
 use crate::ui::style;
 use crate::ui::theme::palette;
@@ -20,6 +20,30 @@ const PALETTE_SHORTCUT: Shortcut = Shortcut {
     shift: true,
     key: "P",
 };
+
+const fn key(key: &'static str) -> Shortcut {
+    Shortcut {
+        ctrl: false,
+        shift: false,
+        key,
+    }
+}
+
+/// The keys worth learning, shown while connected (they act on the lists): which key, the
+/// locale key of what it does, and whether it only works on the Containers screen.
+const HINTS: [(Shortcut, &str, bool); 4] = [
+    (key("↑↓"), "hints.navigate", false),
+    (key("Enter"), "hints.open", true),
+    (key("S"), "hints.start_stop", true),
+    (key("/"), "hints.search", false),
+];
+
+fn hint<'a>(shortcut: &Shortcut, what: String) -> Element<'a, Message> {
+    row![kbd(shortcut), label(what)]
+        .spacing(SPACE_1)
+        .align_y(Alignment::Center)
+        .into()
+}
 
 /// Containers that are up (running, paused or restarting) and the rest.
 pub fn counts(items: &[ContainerInfo]) -> (usize, usize) {
@@ -53,8 +77,13 @@ fn label<'a>(content: String) -> Element<'a, Message> {
     text(content).size(TEXT_SM).style(style::text::muted).into()
 }
 
-/// The bar. The counts only show while connected.
-pub fn view<'a>(conn: &Connection, items: &[ContainerInfo]) -> Element<'a, Message> {
+/// The bar. The counts and key hints only show while connected; `on_containers` adds the
+/// hints that only the container list answers to.
+pub fn view<'a>(
+    conn: &Connection,
+    items: &[ContainerInfo],
+    on_containers: bool,
+) -> Element<'a, Message> {
     let status = match conn {
         Connection::Ok => t!("status.connected").into_owned(),
         Connection::Checking => t!("status.checking").into_owned(),
@@ -63,17 +92,24 @@ pub fn view<'a>(conn: &Connection, items: &[ContainerInfo]) -> Element<'a, Messa
     let mut left = row![connection_dot(conn), label(status)]
         .spacing(SPACE_2)
         .align_y(Alignment::Center);
+    let mut hints = row![].spacing(SPACE_3).align_y(Alignment::Center);
     if *conn == Connection::Ok {
         let (running, stopped) = counts(items);
-        left = left.push(label(
+        left = left.push(pill(
             t!("status.counts", running = running, stopped = stopped).into_owned(),
+            |p| p.muted,
         ));
+        for (shortcut, what, containers_only) in &HINTS {
+            if on_containers || !containers_only {
+                hints = hints.push(hint(shortcut, t!(*what).into_owned()));
+            }
+        }
     }
 
     let palette_hint = tooltip(
-        button(kbd(&PALETTE_SHORTCUT))
+        button(hint(&PALETTE_SHORTCUT, t!("hints.palette").into_owned()))
             .on_press(Message::Action(ActionId::OpenPalette))
-            .padding(Padding::from([0.0, SPACE_1]))
+            .padding(Padding::from([SPACE_1 / 2.0, SPACE_1]))
             .style(style::button::ghost),
         container(text(t!("status.palette").into_owned()).size(TEXT_SM))
             .padding(Padding::from([SPACE_1, SPACE_2]))
@@ -86,6 +122,8 @@ pub fn view<'a>(conn: &Connection, items: &[ContainerInfo]) -> Element<'a, Messa
         row![
             left.spacing(SPACE_3),
             space().width(Length::Fill),
+            hints,
+            space().width(SPACE_3),
             icon_button(
                 Icon::PanelLeft,
                 Some(Message::Action(ActionId::ToggleSidebar)),
@@ -102,11 +140,11 @@ pub fn view<'a>(conn: &Connection, items: &[ContainerInfo]) -> Element<'a, Messa
         .spacing(SPACE_1)
         .align_y(Alignment::Center),
     )
-    .padding(Padding::from([0.0, SPACE_2]))
+    .padding(Padding::from([0.0, SPACE_3]))
     .width(Length::Fill)
     .height(STATUS_BAR_HEIGHT)
     .align_y(Alignment::Center)
-    .style(style::container::surface)
+    .style(style::container::chrome)
     .into()
 }
 
@@ -160,7 +198,45 @@ mod tests {
             Connection::Ok,
             Connection::Failed(DockerError::PermissionDenied),
         ] {
-            let _: Element<'_, Message> = view(&conn, &items);
+            for on_containers in [false, true] {
+                let _: Element<'_, Message> = view(&conn, &items, on_containers);
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod hint_tests {
+    use super::*;
+
+    #[test]
+    fn hints_are_translated_and_match_the_keymap() {
+        use crate::actions::ActionId;
+        use crate::keymap::resolve;
+        use iced::keyboard::key::Named;
+        use iced::keyboard::{Key, Modifiers};
+        let all = HINTS.iter().map(|(_, what, _)| *what);
+        for what in all.chain(["hints.palette"]) {
+            for locale in ["en", "pt-BR"] {
+                assert_ne!(t!(what, locale = locale), what, "missing {locale} {what}");
+            }
+        }
+        // The keys the bar advertises really do what it says.
+        let none = Modifiers::empty();
+        let named = |n| Key::Named(n);
+        let ch = |c: &str| Key::Character(c.into());
+        assert_eq!(
+            resolve(&named(Named::ArrowDown), none, false),
+            Some(ActionId::SelectNext)
+        );
+        assert_eq!(
+            resolve(&named(Named::Enter), none, false),
+            Some(ActionId::OpenSelected)
+        );
+        assert_eq!(
+            resolve(&ch("s"), none, false),
+            Some(ActionId::StartStopSelected)
+        );
+        assert_eq!(resolve(&ch("/"), none, false), Some(ActionId::FocusSearch));
     }
 }

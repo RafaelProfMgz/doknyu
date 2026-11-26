@@ -14,11 +14,13 @@ use crate::app::Message;
 use crate::error::DockerError;
 use crate::model::{ContainerInfo, ContainerState};
 use crate::ui::components::{
-    RowEvents, Shortcut, chip, icon_button, kbd, list_header, list_row, search_field, status_dot,
+    RowEvents, Shortcut, chip, dot_color, icon_button, kbd, list_header, list_row, search_field,
+    status_dot,
 };
 use crate::ui::fonts::{MONO, SANS_MEDIUM, SANS_SEMIBOLD};
 use crate::ui::icons::Icon;
 use crate::ui::style;
+use crate::ui::theme::palette;
 use crate::ui::tokens::{
     DOT_SIZE, ICON_BUTTON_SIZE, SPACE_1, SPACE_2, SPACE_4, SPACE_6, TEXT, TEXT_LG, TEXT_SM,
 };
@@ -222,7 +224,7 @@ fn msg(m: Msg) -> Message {
 const NAME_WIDTH: Length = Length::FillPortion(3);
 const IMAGE_WIDTH: Length = Length::FillPortion(3);
 const PORTS_WIDTH: Length = Length::FillPortion(2);
-const STATUS_WIDTH: f32 = 8.0 * SPACE_4;
+const STATUS_WIDTH: f32 = 12.0 * SPACE_4;
 /// Room for the widest set of actions (stop, restart, remove) and the spaces between them,
 /// the leading spacer of `row_actions` included.
 const ACTIONS_WIDTH: f32 = 3.0 * ICON_BUTTON_SIZE + 3.0 * SPACE_1;
@@ -322,9 +324,9 @@ fn row_view<'a>(
     let (shown, more) = split_ports(&all_ports);
     for &p in shown {
         ports = ports.push(
-            button(one_line(text(p.to_string()).size(TEXT_SM).font(MONO)))
-                .padding(0)
-                .style(style::button::link)
+            button(one_line(text(format!(":{p}")).size(TEXT_SM).font(MONO)))
+                .padding(Padding::from([SPACE_1 / 2.0, SPACE_2]))
+                .style(style::button::port)
                 .on_press(msg(Msg::OpenPort(p))),
         );
     }
@@ -343,6 +345,12 @@ fn row_view<'a>(
         t!("containers.working").into_owned()
     } else {
         c.status_text.clone()
+    };
+    // The status text takes the color of the dot; the words say the same, so color is a
+    // second cue, never the only one.
+    let state = c.state.clone();
+    let status_style = move |t: &iced::Theme| text::Style {
+        color: Some(dot_color(palette(t), &state)),
     };
 
     let show_actions = selected || hovered;
@@ -363,7 +371,7 @@ fn row_view<'a>(
         ),
         cell(ports, PORTS_WIDTH),
         cell(
-            one_line(text(status).size(TEXT_SM).style(style::text::faint)),
+            one_line(text(status).size(TEXT_SM).style(status_style)),
             Length::Fixed(STATUS_WIDTH)
         ),
     ]
@@ -448,18 +456,21 @@ pub fn view(state: &ContainersState) -> Element<'_, Message> {
             &state.query,
             |q| msg(Msg::Query(q)),
         ),
-        vec![
-            chip(
-                t!("containers.filter_running").into_owned(),
-                state.show_running,
-                msg(Msg::ToggleRunning),
-            ),
-            chip(
-                t!("containers.filter_stopped").into_owned(),
-                state.show_stopped,
-                msg(Msg::ToggleStopped),
-            ),
-        ],
+        {
+            let (running, stopped) = crate::views::status_bar::counts(&state.items);
+            vec![
+                chip(
+                    format!("{} {running}", t!("containers.filter_running")),
+                    state.show_running,
+                    msg(Msg::ToggleRunning),
+                ),
+                chip(
+                    format!("{} {stopped}", t!("containers.filter_stopped")),
+                    state.show_stopped,
+                    msg(Msg::ToggleStopped),
+                ),
+            ]
+        },
         visible.len(),
     );
 

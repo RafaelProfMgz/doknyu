@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use futures::{Stream, StreamExt};
 use iced::widget::{Column, center, column, container, row, scrollable, text};
-use iced::{Element, Length, Subscription};
+use iced::{Alignment, Color, Element, Length, Subscription};
 use rust_i18n::t;
 
 use super::{DetailState, Msg};
@@ -17,9 +17,20 @@ use crate::app::Message;
 use crate::docker::DockerClient;
 use crate::model::StatsSample;
 use crate::ui::components::{human_bytes, sparkline};
-use crate::ui::fonts::{MONO, SANS_MEDIUM};
+use crate::ui::fonts::{SANS_MEDIUM, SANS_SEMIBOLD};
+use crate::ui::icons::{Icon, icon};
 use crate::ui::style;
-use crate::ui::tokens::{SPACE_1, SPACE_2, SPACE_3, SPACE_4, TEXT_LG, TEXT_SM};
+use crate::ui::theme::palette;
+use crate::ui::tokens::{
+    Palette, SPACE_1, SPACE_2, SPACE_3, SPACE_4, TEXT, TEXT_LG, TEXT_SM, TEXT_XL,
+};
+
+/// Text in one of the palette's colors.
+fn tinted(color: fn(&Palette) -> Color) -> impl Fn(&iced::Theme) -> iced::widget::text::Style {
+    move |t| iced::widget::text::Style {
+        color: Some(color(palette(t))),
+    }
+}
 
 /// The stats messages of one container: a `StatsSample` per reading, then `StatsEnded`. Any
 /// error ends the stream the same way: the list reload tells whether the container is gone.
@@ -65,29 +76,45 @@ pub fn subscription(source: StatsSource) -> Subscription<Message> {
     })
 }
 
-/// One line of a card: an optional label, the value and, if there is one, its chart.
-type Line<'a> = (Option<String>, String, Option<Element<'a, Message>>);
+/// One line of a card: an optional label, the value, its color and, if there is one, its chart.
+type Line<'a> = (
+    Option<String>,
+    String,
+    fn(&Palette) -> Color,
+    Option<Element<'a, Message>>,
+);
 
-/// A titled card of lines, each with its main number and chart.
-fn card<'a>(title: String, lines: Vec<Line<'a>>) -> Element<'a, Message> {
-    let mut body: Column<'a, Message> = column![
-        text(title)
+/// A titled card of lines, each with its main number and chart. A card of one line shows the
+/// number big; with two, each line is a label and a number in the color of its chart, so the
+/// pairs read apart without a legend.
+fn card<'a>(glyph: Icon, title: String, lines: Vec<Line<'a>>) -> Element<'a, Message> {
+    let single = lines.len() == 1;
+    let header = row![
+        icon(glyph).size(TEXT).style(style::text::accent),
+        text(title.to_uppercase())
             .size(TEXT_SM)
-            .font(SANS_MEDIUM)
-            .style(style::text::muted)
+            .font(SANS_SEMIBOLD)
+            .style(style::text::accent),
     ]
-    .spacing(SPACE_1);
-    for (label, value, chart) in lines {
-        let value = text(value).size(TEXT_LG).font(MONO);
+    .spacing(SPACE_2)
+    .align_y(Alignment::Center);
+    let mut body: Column<'a, Message> = column![header].spacing(SPACE_2);
+    for (label, value, color, chart) in lines {
+        let value = text(value)
+            .size(if single { TEXT_XL } else { TEXT_LG })
+            .font(SANS_SEMIBOLD)
+            .style(tinted(color));
         body = body.push(match label {
             Some(label) => row![
                 text(label)
                     .size(TEXT_SM)
-                    .style(style::text::faint)
+                    .font(SANS_MEDIUM)
+                    .style(tinted(color))
                     .width(Length::Fill),
                 value,
             ]
             .spacing(SPACE_2)
+            .align_y(Alignment::Center)
             .into(),
             None => Element::from(value),
         });
@@ -95,8 +122,8 @@ fn card<'a>(title: String, lines: Vec<Line<'a>>) -> Element<'a, Message> {
             body = body.push(chart);
         }
     }
-    container(body)
-        .padding(SPACE_3)
+    container(body.spacing(SPACE_1))
+        .padding(SPACE_4)
         .width(Length::Fill)
         .style(style::container::card)
         .into()
@@ -104,28 +131,38 @@ fn card<'a>(title: String, lines: Vec<Line<'a>>) -> Element<'a, Message> {
 
 /// "total · rate/s" for a cumulative counter and its rate series; the rate is that of the
 /// latest second (0 until there are two samples).
-fn counter_line<'a>(label: String, total: u64, rates: &[f64]) -> Line<'a> {
+fn counter_line<'a>(
+    label: String,
+    total: u64,
+    rates: &[f64],
+    color: fn(&Palette) -> Color,
+) -> Line<'a> {
     let rate = rates.last().copied().unwrap_or(0.0) as u64;
     (
         Some(label),
         format!("{} · {}/s", human_bytes(total), human_bytes(rate)),
-        Some(sparkline(rates, None)),
+        color,
+        Some(sparkline(rates, None, color)),
     )
 }
 
 fn cards<'a>(d: &'a DetailState, last: &StatsSample) -> Element<'a, Message> {
     let cpu = card(
+        Icon::Cpu,
         t!("stats.cpu").into_owned(),
         vec![(
             None,
             format!("{:.1}%", last.cpu_percent),
+            |p| p.accent,
             Some(sparkline(
                 &d.stats.cpu_series(),
                 Some(100.0 * f64::from(d.cpus)),
+                |p| p.accent,
             )),
         )],
     );
     let memory = card(
+        Icon::MemoryStick,
         t!("stats.memory").into_owned(),
         vec![(
             None,
@@ -139,39 +176,47 @@ fn cards<'a>(d: &'a DetailState, last: &StatsSample) -> Element<'a, Message> {
             } else {
                 human_bytes(last.mem_used)
             },
+            |p| p.info,
             Some(sparkline(
                 &d.stats.mem_series(),
                 (last.mem_limit > 0).then_some(last.mem_limit as f64),
+                |p| p.info,
             )),
         )],
     );
     let network = card(
+        Icon::Network,
         t!("stats.network").into_owned(),
         vec![
             counter_line(
                 t!("stats.rx").into_owned(),
                 last.net_rx,
                 &d.stats.net_rx_rate_series(),
+                |p| p.cyan,
             ),
             counter_line(
                 t!("stats.tx").into_owned(),
                 last.net_tx,
                 &d.stats.net_tx_rate_series(),
+                |p| p.orange,
             ),
         ],
     );
     let disk = card(
+        Icon::HardDrive,
         t!("stats.disk").into_owned(),
         vec![
             counter_line(
                 t!("stats.read").into_owned(),
                 last.blk_read,
                 &d.stats.blk_read_rate_series(),
+                |p| p.cyan,
             ),
             counter_line(
                 t!("stats.write").into_owned(),
                 last.blk_write,
                 &d.stats.blk_write_rate_series(),
+                |p| p.orange,
             ),
         ],
     );
