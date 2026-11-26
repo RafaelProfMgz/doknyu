@@ -8,7 +8,7 @@ Version:        0.2.1
 Release:        1%{?dist}
 Summary:        Desktop manager for Docker containers: logs, stats, volumes, networks and a terminal
 
-# The project is MIT OR Apache-2.0; the binary embeds IBM Plex (OFL-1.1) and Lucide (ISC) and the
+# The project is MIT OR Apache-2.0; the binary embeds JetBrains Mono NL Nerd Font (OFL-1.1) and Lucide (ISC) and the
 # vendored crates. LICENSE.dependencies (generated in %%build) has the per-crate breakdown.
 License:        (MIT OR Apache-2.0) AND OFL-1.1 AND ISC AND CROSSCHECK_DEPS_LICENSE
 URL:            https://github.com/RafaelProfMgz/doknyu

@@ -32,7 +32,7 @@ class Doknyu < Formula
     [16, 24, 32, 48, 64, 128, 256, 512].each do |size|
       (share/"icons/hicolor/#{size}x#{size}/apps").install "assets/icons/hicolor/#{size}x#{size}/apps/#{id}.png"
     end
-    # The binary embeds IBM Plex (OFL-1.1) and Lucide (ISC); their texts ship with it.
+    # The binary embeds JetBrains Mono NL Nerd Font (OFL-1.1) and Lucide (ISC); their texts ship with it.
     (share/"licenses/doknyu").install "LICENSE-MIT", "LICENSE-APACHE"
     (share/"licenses/doknyu").install "assets/fonts/LICENSES.md" => "LICENSES-fonts.md"
   end

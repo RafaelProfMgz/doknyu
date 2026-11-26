@@ -65,7 +65,7 @@ mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/metainfo" "$APPDIR/usr/share/doc/d
 
 install -m 755 "$BIN" "$APPDIR/usr/bin/doknyu"
 install -m 644 "$ROOT/assets/$ID.metainfo.xml" "$APPDIR/usr/share/metainfo/"
-# Licenses travel with the binary: the OFL (IBM Plex) and ISC (Lucide) fonts embedded in it
+# Licenses travel with the binary: the OFL (JetBrains Mono NL Nerd Font) and ISC (Lucide) fonts embedded in it
 # require their license text to accompany the distribution.
 install -m 644 "$ROOT/LICENSE-MIT" "$ROOT/LICENSE-APACHE" "$ROOT/assets/fonts/LICENSES.md" \
     "$APPDIR/usr/share/doc/doknyu/"

@@ -183,7 +183,7 @@ Decisões (todas conferidas por `namcap`):
 - Docker só em `optdepends` (o app abre e mostra o onboarding sem ele; o terminal usa a ponte
   `doknyu --exec-bridge`, não a CLI `docker`).
 - `license=('MIT OR Apache-2.0' 'OFL-1.1' 'ISC')`: `MIT OR Apache-2.0` é a licença do projeto (expressão SPDX,
-  em vez de `('MIT' 'Apache-2.0')`, que o AUR leria como "as duas valem"); o binário embute as fontes IBM Plex
+  em vez de `('MIT' 'Apache-2.0')`, que o AUR leria como "as duas valem"); o binário embute as fontes JetBrains Mono NL Nerd Font
   (OFL) e o Lucide (ISC), cujo texto vai em `LICENSES-fonts.md`. Os textos ficam em
   `/usr/share/licenses/<pacote>/` (`LICENSE-MIT`, `LICENSE-APACHE`, `LICENSES-fonts.md`).
 - `options=('!lto')` nos pacotes que compilam (recomendação da ArchWiki para Rust: o LTO do makepkg

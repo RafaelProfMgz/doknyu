@@ -29,8 +29,7 @@ use crate::keymap::TERMINAL_RESERVED;
 use crate::ui::fonts::MONO;
 use crate::ui::style;
 use crate::ui::tokens::{
-    ANSI_MIX, Palette, SPACE_2, SPACE_3, SPACE_4, TERM_BRIGHT_MIX, TERM_DIM_MIX, TERM_LINE_SCALE,
-    TEXT,
+    Palette, SPACE_2, SPACE_3, SPACE_4, TERM_BRIGHT_MIX, TERM_DIM_MIX, TERM_LINE_SCALE, TEXT,
 };
 
 /// How the session starts: the PTY runs this executable as the exec bridge, which connects it to
@@ -63,14 +62,14 @@ fn mix(a: Color, b: Color, t: f32) -> Color {
     )
 }
 
-/// The 16 ANSI colors from the app palette, so the terminal follows the theme. The emulator has
-/// no color of its own for the cursor (it draws it in the text color), so there is no accent.
-/// There is no magenta or cyan in the palette: they are blends of its neighbors.
+/// The 16 ANSI colors from the app palette (Catppuccin, as its terminal themes map them), so
+/// the terminal follows the theme. The emulator has no color of its own for the cursor (it
+/// draws it in the text color).
 pub fn color_palette(p: &Palette) -> ColorPalette {
     let bright = |c: Color| hex(mix(c, p.text, TERM_BRIGHT_MIX));
     let dim = |c: Color| hex(mix(c, p.bg, TERM_DIM_MIX));
-    let magenta = mix(p.accent, p.danger, ANSI_MIX);
-    let cyan = mix(p.accent, p.success, ANSI_MIX);
+    let magenta = p.accent;
+    let cyan = p.cyan;
     ColorPalette {
         foreground: hex(p.text),
         background: hex(p.bg),
@@ -78,7 +77,7 @@ pub fn color_palette(p: &Palette) -> ColorPalette {
         red: hex(p.danger),
         green: hex(p.success),
         yellow: hex(p.warning),
-        blue: hex(p.accent),
+        blue: hex(p.info),
         magenta: hex(magenta),
         cyan: hex(cyan),
         white: hex(p.muted),
@@ -86,7 +85,7 @@ pub fn color_palette(p: &Palette) -> ColorPalette {
         bright_red: bright(p.danger),
         bright_green: bright(p.success),
         bright_yellow: bright(p.warning),
-        bright_blue: bright(p.accent),
+        bright_blue: bright(p.info),
         bright_magenta: bright(magenta),
         bright_cyan: bright(cyan),
         bright_white: hex(p.text),
@@ -96,7 +95,7 @@ pub fn color_palette(p: &Palette) -> ColorPalette {
         dim_red: dim(p.danger),
         dim_green: dim(p.success),
         dim_yellow: dim(p.warning),
-        dim_blue: dim(p.accent),
+        dim_blue: dim(p.info),
         dim_magenta: dim(magenta),
         dim_cyan: dim(cyan),
         dim_white: dim(p.muted),
@@ -355,7 +354,9 @@ mod tests {
             assert_eq!(c.red, hex(p.danger));
             assert_eq!(c.green, hex(p.success));
             assert_eq!(c.yellow, hex(p.warning));
-            assert_eq!(c.blue, hex(p.accent));
+            assert_eq!(c.blue, hex(p.info));
+            assert_eq!(c.magenta, hex(p.accent));
+            assert_eq!(c.cyan, hex(p.cyan));
         }
         assert_ne!(
             color_palette(&DARK).background,
@@ -405,13 +406,6 @@ mod tests {
                         && b.modifiers.control())
             );
         }
-    }
-
-    #[test]
-    fn magenta_and_cyan_blend_their_neighbors_by_the_token() {
-        let c = color_palette(&DARK);
-        assert_eq!(c.magenta, hex(mix(DARK.accent, DARK.danger, ANSI_MIX)));
-        assert_eq!(c.cyan, hex(mix(DARK.accent, DARK.success, ANSI_MIX)));
     }
 
     #[test]
