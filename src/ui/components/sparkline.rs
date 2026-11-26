@@ -1,10 +1,12 @@
-//! A small line chart of the latest samples, drawn on a canvas in the accent color.
+//! A small line chart of the latest samples, drawn on a canvas in one of the palette's colors.
 
 use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path, Stroke};
-use iced::{Element, Length, Point, Rectangle, Renderer, Theme, mouse};
+use iced::{Color, Element, Length, Point, Rectangle, Renderer, Theme, mouse};
 
 use crate::ui::theme::palette;
-use crate::ui::tokens::{ALPHA_SOFT, SPARKLINE_HEIGHT, SPARKLINE_STROKE};
+use crate::ui::tokens::{
+    ALPHA_SOFT, BORDER_WIDTH, Palette, SPARKLINE_GRID_LINES, SPARKLINE_HEIGHT, SPARKLINE_STROKE,
+};
 
 /// Heights as fractions of the chart (0 = bottom, 1 = top), one per value. `max` is the value
 /// at the top; without it (or when it is not positive) the largest value is. Nothing divides
@@ -28,6 +30,7 @@ pub fn heights(values: &[f64], max: Option<f64>) -> Vec<f32> {
 
 struct Sparkline {
     heights: Vec<f32>,
+    color: fn(&Palette) -> Color,
 }
 
 impl Sparkline {
@@ -67,8 +70,19 @@ impl<M> canvas::Program<M> for Sparkline {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
-        let accent = palette(theme).accent;
+        let p = palette(theme);
+        let accent = (self.color)(p);
         let mut frame = Frame::new(renderer, bounds.size());
+        // Faint guides, so the height of the line reads against something.
+        for i in 1..=SPARKLINE_GRID_LINES {
+            let y = bounds.height * i as f32 / (SPARKLINE_GRID_LINES + 1) as f32;
+            frame.stroke(
+                &Path::line(Point::new(0.0, y), Point::new(bounds.width, y)),
+                Stroke::default()
+                    .with_color(p.border)
+                    .with_width(BORDER_WIDTH),
+            );
+        }
         let points = self.points(bounds.width, bounds.height);
         if let (Some(first), Some(last)) = (points.first(), points.last()) {
             let area = Path::new(|b| {
@@ -97,10 +111,16 @@ impl<M> canvas::Program<M> for Sparkline {
     }
 }
 
-/// The chart of `values`. `max` is the value at the top; `None` scales by the largest value.
-pub fn sparkline<'a, M: 'a>(values: &[f64], max: Option<f64>) -> Element<'a, M> {
+/// The chart of `values` in `color`. `max` is the value at the top; `None` scales by the
+/// largest value.
+pub fn sparkline<'a, M: 'a>(
+    values: &[f64],
+    max: Option<f64>,
+    color: fn(&Palette) -> Color,
+) -> Element<'a, M> {
     Canvas::new(Sparkline {
         heights: heights(values, max),
+        color,
     })
     .width(Length::Fill)
     .height(SPARKLINE_HEIGHT)
@@ -115,18 +135,21 @@ mod tests {
     fn sparkline_handles_all_zero_values() {
         assert_eq!(heights(&[0.0, 0.0, 0.0], None), [0.0, 0.0, 0.0]);
         assert_eq!(heights(&[0.0, 0.0], Some(0.0)), [0.0, 0.0]);
-        let _: Element<'_, ()> = sparkline(&[0.0; 60], None);
-        let _: Element<'_, ()> = sparkline(&[0.0; 60], Some(0.0));
+        let _: Element<'_, ()> = sparkline(&[0.0; 60], None, |p| p.accent);
+        let _: Element<'_, ()> = sparkline(&[0.0; 60], Some(0.0), |p| p.info);
     }
 
     #[test]
     fn sparkline_handles_empty_single_and_bad_values() {
         assert!(heights(&[], None).is_empty());
-        let _: Element<'_, ()> = sparkline(&[], None);
-        let _: Element<'_, ()> = sparkline(&[5.0], None);
+        let _: Element<'_, ()> = sparkline(&[], None, |p| p.accent);
+        let _: Element<'_, ()> = sparkline(&[5.0], None, |p| p.accent);
         assert_eq!(heights(&[f64::NAN, f64::INFINITY, -3.0], None), [0.0; 3]);
         assert_eq!(heights(&[1.0], Some(f64::NAN)), [1.0]);
-        let line = Sparkline { heights: vec![0.5] };
+        let line = Sparkline {
+            heights: vec![0.5],
+            color: |p| p.accent,
+        };
         let points = line.points(100.0, 40.0);
         assert_eq!(points.len(), 2, "a single value is a flat line");
         assert_eq!(points[0].y, points[1].y);
@@ -144,6 +167,7 @@ mod tests {
     fn points_span_the_chart_with_the_top_up() {
         let line = Sparkline {
             heights: vec![0.0, 1.0],
+            color: |p| p.accent,
         };
         let points = line.points(100.0, 40.0);
         assert_eq!((points[0].x, points[0].y), (0.0, 40.0));

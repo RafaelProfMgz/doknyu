@@ -1,6 +1,6 @@
 pkgbase = doknyu
 	pkgdesc = Desktop manager for Docker containers: logs, stats, volumes, networks and a terminal
-	pkgver = 0.1.0
+	pkgver = 0.2.0
 	pkgrel = 1
 	url = https://github.com/RafaelProfMgz/doknyu
 	arch = x86_64
@@ -17,7 +17,7 @@ pkgbase = doknyu
 	depends = hicolor-icon-theme
 	optdepends = docker: manage local containers
 	options = !lto
-	source = doknyu-0.1.0.tar.gz::https://github.com/RafaelProfMgz/doknyu/archive/refs/tags/v0.1.0.tar.gz
-	sha256sums = 436d15b81fd9b08035a8553590a89f1e1cd15b07ffa5770088ca0f7145ab8d11
+	source = doknyu-0.2.0.tar.gz::https://github.com/RafaelProfMgz/doknyu/archive/refs/tags/v0.2.0.tar.gz
+	sha256sums = 7bcdcf096fbb0a4991f20f184a4e722ccd40d388391cec8460ce29e8a948ac5a
 
 pkgname = doknyu

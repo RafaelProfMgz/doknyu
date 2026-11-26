@@ -4,11 +4,11 @@
 %global app_id io.github.rafaelprofmgz.Doknyu
 
 Name:           doknyu
-Version:        0.2.0
+Version:        0.2.1
 Release:        1%{?dist}
 Summary:        Desktop manager for Docker containers: logs, stats, volumes, networks and a terminal
 
-# The project is MIT OR Apache-2.0; the binary embeds IBM Plex (OFL-1.1) and Lucide (ISC) and the
+# The project is MIT OR Apache-2.0; the binary embeds JetBrains Mono NL Nerd Font (OFL-1.1) and Lucide (ISC) and the
 # vendored crates. LICENSE.dependencies (generated in %%build) has the per-crate breakdown.
 License:        (MIT OR Apache-2.0) AND OFL-1.1 AND ISC AND CROSSCHECK_DEPS_LICENSE
 URL:            https://github.com/RafaelProfMgz/doknyu
@@ -80,6 +80,9 @@ appstreamcli validate --no-net %{buildroot}%{_metainfodir}/%{app_id}.metainfo.xm
 %{_datadir}/icons/hicolor/*/apps/%{app_id}.*
 
 %changelog
+* Fri Nov 06 2026 RafaelProfMgz <RafaelProfMgz@users.noreply.github.com> - 0.2.1-1
+- Update to 0.2.1
+
 * Fri Nov 06 2026 RafaelProfMgz <RafaelProfMgz@users.noreply.github.com> - 0.2.0-1
 - Update to 0.2.0
 

@@ -27,14 +27,14 @@ impl Shortcut {
     }
 }
 
-/// Small bordered hint with the shortcut.
+/// Small key cap with the shortcut.
 pub fn kbd<'a, M: 'a>(shortcut: &Shortcut) -> Element<'a, M> {
     container(
         text(shortcut.label())
             .size(TEXT_SM)
-            .style(style::text::faint),
+            .style(style::text::muted),
     )
     .padding(Padding::from([0.0, SPACE_1]))
-    .style(style::container::bordered)
+    .style(style::container::keycap)
     .into()
 }

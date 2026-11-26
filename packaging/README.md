@@ -6,6 +6,11 @@ Flathub, dar push em AUR, criar projeto no COPR etc. são passos do humano.
 - `appimage/`: AppImage e `.deb` (Fase 6, ver `.github/workflows/release.yml`).
 - `flatpak/`: Flatpak / Flathub (Fase 7, Tarefa 7.2; decisões em `docs/decisions/0002-flatpak.md`).
 - `aur/`: pacotes do AUR `doknyu`, `doknyu-bin` e `doknyu-git` (Fase 7, Tarefa 7.3).
+  Enquanto o AUR não aceita contas novas, o `doknyu-bin` é publicado num repositório pacman
+  próprio, [`RafaelProfMgz/pacman-tap`](https://github.com/RafaelProfMgz/pacman-tap): um workflow
+  lá pega este PKGBUILD da `develop`, ajusta para a última release, confere o `.deb` contra o
+  `SHA256SUMS`, roda `makepkg` + `repo-add` e publica na release `x86_64` daquele repositório
+  (diariamente ou à mão, em Actions → Publish).
 - `rpm/`: `.spec` do COPR (Fedora) (Fase 7, Tarefa 7.4).
 - `nix/` e `../flake.nix`: derivação para o nixpkgs e flake do repositório (Fase 7, Tarefa 7.4).
 - `homebrew/`: fórmula do tap `RafaelProfMgz/homebrew-tap` (Linux) (Fase 7, Tarefa 7.5).
@@ -178,7 +183,7 @@ Decisões (todas conferidas por `namcap`):
 - Docker só em `optdepends` (o app abre e mostra o onboarding sem ele; o terminal usa a ponte
   `doknyu --exec-bridge`, não a CLI `docker`).
 - `license=('MIT OR Apache-2.0' 'OFL-1.1' 'ISC')`: `MIT OR Apache-2.0` é a licença do projeto (expressão SPDX,
-  em vez de `('MIT' 'Apache-2.0')`, que o AUR leria como "as duas valem"); o binário embute as fontes IBM Plex
+  em vez de `('MIT' 'Apache-2.0')`, que o AUR leria como "as duas valem"); o binário embute as fontes JetBrains Mono NL Nerd Font
   (OFL) e o Lucide (ISC), cujo texto vai em `LICENSES-fonts.md`. Os textos ficam em
   `/usr/share/licenses/<pacote>/` (`LICENSE-MIT`, `LICENSE-APACHE`, `LICENSES-fonts.md`).
 - `options=('!lto')` nos pacotes que compilam (recomendação da ArchWiki para Rust: o LTO do makepkg
@@ -415,6 +420,7 @@ Nada disso é feito por agente.
 4. Teste numa máquina com Homebrew no Linux:
    ```sh
    brew tap RafaelProfMgz/tap
+   brew trust --formula rafaelprofmgz/tap/doknyu   # Homebrew 7+ recusa taps de terceiros sem isso
    brew install doknyu          # compila do fonte; leva vários minutos
    doknyu --version
    ```

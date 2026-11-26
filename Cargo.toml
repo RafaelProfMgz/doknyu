@@ -1,6 +1,6 @@
 [package]
 name = "doknyu"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.89"
 description = "Desktop manager for Docker containers on Linux"
@@ -72,7 +72,7 @@ assets = [
     ["assets/icons/hicolor/512x512/apps/io.github.rafaelprofmgz.Doknyu.png", "usr/share/icons/hicolor/512x512/apps/", "644"],
     ["LICENSE-MIT", "usr/share/doc/doknyu/", "644"],
     ["LICENSE-APACHE", "usr/share/doc/doknyu/", "644"],
-    # A OFL (IBM Plex) e a ISC (Lucide) exigem que o texto da licença acompanhe a distribuição.
+    # A OFL (JetBrains Mono NL Nerd Font) e a ISC (Lucide) exigem que o texto da licença acompanhe a distribuição.
     ["assets/fonts/LICENSES.md", "usr/share/doc/doknyu/", "644"],
 ]
 

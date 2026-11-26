@@ -47,7 +47,7 @@ modules:
       # Gerado por packaging/flatpak/pin-release.sh; não edite à mão.
       - type: git
         url: https://github.com/RafaelProfMgz/doknyu.git
-        tag: v0.1.0
-        commit: 1217bdf9b7a6e50857ef95b559f98a0af66fb4b1
+        tag: v0.2.0
+        commit: 25f165a3d332f6aadc0a1707a1854c5a03964975
       # END-SOURCE
       - cargo-sources.json

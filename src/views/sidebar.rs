@@ -8,12 +8,54 @@ use rust_i18n::t;
 
 use crate::actions::{self, ActionId};
 use crate::app::{Message, Screen};
-use crate::ui::fonts::SANS_MEDIUM;
+use crate::ui::components::pill;
+use crate::ui::fonts::{SANS_MEDIUM, SANS_SEMIBOLD};
 use crate::ui::icons::{Icon, icon};
 use crate::ui::style;
 use crate::ui::tokens::{
-    BORDER_WIDTH, ROW_HEIGHT, SIDEBAR_COLLAPSED, SIDEBAR_WIDTH, SPACE_1, SPACE_2, TEXT, TEXT_SM,
+    BORDER_WIDTH, ROW_HEIGHT, SIDEBAR_COLLAPSED, SIDEBAR_WIDTH, SPACE_1, SPACE_2, SPACE_3, SPACE_4,
+    TEXT, TEXT_LG, TEXT_SM,
 };
+
+/// The product name: a brand, the same in every language.
+const APP_NAME: &str = "doknyu";
+
+/// The app's name and tagline at the top of the column; only the mark when collapsed.
+fn brand(collapsed: bool) -> Element<'static, Message> {
+    let mark = icon(Icon::Container)
+        .size(TEXT_LG + 4.0)
+        .style(style::text::accent);
+    if collapsed {
+        return container(mark)
+            .center_x(Length::Fill)
+            .padding(Padding::from([SPACE_3, 0.0]))
+            .into();
+    }
+    let name = column![
+        text(APP_NAME).size(TEXT_LG).font(SANS_SEMIBOLD),
+        text(t!("sidebar.tagline").into_owned())
+            .size(TEXT_SM)
+            .style(style::text::faint),
+    ];
+    container(row![mark, name].spacing(SPACE_3).align_y(Alignment::Center))
+        .padding(Padding::from([SPACE_3, SPACE_2]))
+        .into()
+}
+
+/// A small uppercase title over a group of entries; hidden when collapsed.
+fn section(label: String, collapsed: bool) -> Element<'static, Message> {
+    if collapsed {
+        return space().height(SPACE_2).into();
+    }
+    container(
+        text(label.to_uppercase())
+            .size(TEXT_SM)
+            .font(SANS_MEDIUM)
+            .style(style::text::faint),
+    )
+    .padding(Padding::from([SPACE_2, SPACE_2]).bottom(SPACE_1))
+    .into()
+}
 
 fn entry(
     glyph: Icon,
@@ -26,21 +68,26 @@ fn entry(
     let content: Element<'static, Message> = if collapsed {
         center(icon(glyph)).into()
     } else {
+        let glyph = if active {
+            icon(glyph).style(style::text::accent)
+        } else {
+            icon(glyph)
+        };
         let mut line = row![
-            icon(glyph),
+            glyph,
             text(label.clone())
                 .size(TEXT)
                 .font(SANS_MEDIUM)
                 .width(Length::Fill),
         ]
-        .spacing(SPACE_2)
+        .spacing(SPACE_3)
         .align_y(Alignment::Center);
         if let Some(count) = count {
-            line = line.push(
-                text(count.to_string())
-                    .size(TEXT_SM)
-                    .style(style::text::faint),
-            );
+            line = line.push(if active {
+                pill(count.to_string(), |p| p.accent)
+            } else {
+                pill(count.to_string(), |p| p.muted)
+            });
         }
         // A fixed-height button keeps its content at the top; center it like the collapsed icon.
         container(line).center_y(Length::Fill).into()
@@ -77,7 +124,7 @@ fn footer_entry(
                     .style(style::text::muted)
                     .width(Length::Fill),
             ]
-            .spacing(SPACE_2)
+            .spacing(SPACE_3)
             .align_y(Alignment::Center),
         )
         .center_y(Length::Fill)
@@ -157,11 +204,21 @@ pub fn view(
         ),
     ]
     .spacing(SPACE_1);
-    let entries = column![entries, space().height(Length::Fill), footer];
+    let entries = column![
+        brand(collapsed),
+        section(t!("sidebar.section_resources").into_owned(), collapsed),
+        entries,
+        space().height(Length::Fill),
+        section(t!("sidebar.section_app").into_owned(), collapsed),
+        footer
+    ];
     let (width, padding) = if collapsed {
-        (SIDEBAR_COLLAPSED, SPACE_1)
+        (SIDEBAR_COLLAPSED, Padding::new(SPACE_1))
     } else {
-        (SIDEBAR_WIDTH, SPACE_2)
+        (
+            SIDEBAR_WIDTH,
+            Padding::from([SPACE_2, SPACE_2]).bottom(SPACE_4),
+        )
     };
     row![
         container(entries)

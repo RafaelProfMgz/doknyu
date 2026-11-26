@@ -4,24 +4,26 @@ Os arquivos desta pasta são embutidos no binário com `include_bytes!` (`src/ui
 
 | Arquivo | Origem | Versão | Licença |
 |---|---|---|---|
-| `IBMPlexSans-Regular.ttf`, `IBMPlexSans-Medium.ttf`, `IBMPlexSans-SemiBold.ttf` | <https://github.com/IBM/plex> (`packages/plex-sans/fonts/complete/ttf/`), commit `633f3200539c52ee0aba2dfd7f46921417a81877`, o mesmo release `@ibm/plex-sans` 1.1.0 | IBM Plex Sans 3.005 | SIL OFL 1.1 |
-| `IBMPlexMono-Regular.ttf` | <https://github.com/google/fonts> (`ofl/ibmplexmono/`) | IBM Plex Mono (estática) | SIL OFL 1.1 |
+| `JetBrainsMonoNLNerdFont-Regular.ttf`, `JetBrainsMonoNLNerdFont-Medium.ttf`, `JetBrainsMonoNLNerdFont-SemiBold.ttf` | <https://github.com/ryanoasis/nerd-fonts> (release `v3.4.0`, `JetBrainsMono.zip`), variante NL (sem ligaduras), família "Nerd Font" | JetBrains Mono NL 2.304, Nerd Fonts 3.4.0 | SIL OFL 1.1 |
 | `lucide.ttf` | pacote npm `lucide-static` (`font/lucide.ttf`) | **1.64.0** (fixada) | ISC (ícones derivados do Feather: MIT) |
 
-Nota: o `google/fonts` só tem o IBM Plex Sans em fonte variável (`IBMPlexSans[wdth,wght].ttf`);
-as TTF estáticas vêm do repositório oficial da IBM, que é a mesma fonte de upstream.
-
-Nomes de família internos (usados em `Font::with_name`): `IBM Plex Sans` (Regular 400, Medium 500
-e SemiBold 600, distinguidos pelo peso), `IBM Plex Mono` e `lucide`.
+Nome de família interno (usado em `Font::with_name`): `JetBrainsMonoNL Nerd Font` (Regular 400,
+Medium 500 e SemiBold 600, distinguidos pelo peso) e `lucide`. A mesma família serve à interface
+e ao texto monoespaçado (IDs, portas, logs, terminal), como no portkyu.
 
 Os codepoints dos ícones (`src/ui/icons.rs`) vêm de `font/info.json` do `lucide-static` 1.64.0.
 Ao atualizar o Lucide, confira o mapeamento de novo.
 
-## IBM Plex (SIL Open Font License 1.1)
+## JetBrains Mono NL / Nerd Fonts (SIL Open Font License 1.1)
 
-Copyright © 2017 IBM Corp. with Reserved Font Name "Plex"
+A JetBrains Mono é da JetBrains; os glifos extras do Nerd Fonts são incorporados sob as licenças
+dos seus projetos de origem, e a fonte resultante segue a OFL da original.
 
-This license is copied below, and is also available with a FAQ at: http://scripts.sil.org/OFL
+Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono)
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1.
+This license is copied below, and is also available with a FAQ at:
+https://scripts.sil.org/OFL
 
 
 -----------------------------------------------------------

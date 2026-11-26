@@ -1,18 +1,27 @@
 //! The bottom dock: header with the container name, tabs and window buttons, and the tab body.
 //! The tab bodies are in `views::detail`.
 
-use iced::widget::{column, container, row, text};
-use iced::{Alignment, Element, Length};
+use iced::widget::{button, column, container, row, rule, text};
+use iced::{Alignment, Element, Length, Padding};
 use rust_i18n::t;
 
 use crate::actions::{self, ActionId};
 use crate::app::{Dock, DockTab, Message};
 use crate::model::ContainerInfo;
-use crate::ui::components::{chip, icon_button, panel_header};
-use crate::ui::fonts::SANS_MEDIUM;
+use crate::ui::components::{icon_button, panel_header, status_dot};
+use crate::ui::fonts::{MONO, SANS_MEDIUM, SANS_SEMIBOLD};
 use crate::ui::icons::Icon;
 use crate::ui::style;
-use crate::ui::tokens::{SPACE_2, SPACE_4, TEXT};
+use crate::ui::tokens::{BORDER_WIDTH, SPACE_1, SPACE_2, SPACE_3, SPACE_4, TEXT, TEXT_SM};
+
+/// One tab of the dock: the active one is tinted in the accent.
+fn tab<'a>(label: String, active: bool, on_press: Message) -> Element<'a, Message> {
+    button(text(label).size(TEXT_SM).font(SANS_MEDIUM))
+        .padding(Padding::from([SPACE_1, SPACE_3]))
+        .style(style::button::tab(active))
+        .on_press(on_press)
+        .into()
+}
 use crate::views::detail::terminal::{self, TerminalState};
 use crate::views::detail::{DetailState, logs, stats};
 
@@ -35,16 +44,30 @@ pub fn view<'a>(
     detail: Option<&'a DetailState>,
     term: &'a TerminalState,
 ) -> Element<'a, Message> {
-    let mut title = row![
+    let mut title = row![].spacing(SPACE_2).align_y(Alignment::Center);
+    if let Some(c) = info {
+        title = title.push(status_dot(&c.state));
+    }
+    title = title.push(
         text(info.map_or(dock.container_id.as_str(), |c| c.name.as_str()))
             .size(TEXT)
-            .font(SANS_MEDIUM),
-    ]
-    .spacing(SPACE_2)
-    .align_y(Alignment::Center);
-    for tab in TABS {
-        title = title.push(chip(tab_label(tab), dock.tab == tab, Message::DockTab(tab)));
+            .font(SANS_SEMIBOLD),
+    );
+    if let Some(c) = info {
+        title = title.push(
+            text(c.image.as_str())
+                .size(TEXT_SM)
+                .font(MONO)
+                .style(style::text::faint),
+        );
     }
+    let mut tabs = row![].spacing(SPACE_1).align_y(Alignment::Center);
+    for t in TABS {
+        tabs = tabs.push(tab(tab_label(t), dock.tab == t, Message::DockTab(t)));
+    }
+    let title = title
+        .push(container(rule::vertical(BORDER_WIDTH).style(style::rule_border)).height(TEXT))
+        .push(tabs);
 
     let (size_icon, size_tip) = if dock.maximized {
         (Icon::Minimize2, t!("dock.restore"))

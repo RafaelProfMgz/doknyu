@@ -55,6 +55,62 @@ fn window_settings() -> iced::window::Settings {
     }
 }
 
+/// With the sample data (`--features fake`), `DOKNYU_SCREENSHOT=out.png` runs the actions in
+/// `DOKNYU_SCREENSHOT_ACTIONS` (comma-separated, e.g. `next,stats` or `volumes,light`), saves
+/// the window as a PNG and quits: how `docs/screenshots` are made.
+#[cfg(feature = "fake")]
+fn demo_screenshot() -> iced::Task<doknyu::app::Message> {
+    use doknyu::actions::ActionId;
+    use doknyu::app::Message;
+    use iced::{Task, window};
+    use std::time::Duration;
+
+    let Some(out) = std::env::var_os("DOKNYU_SCREENSHOT") else {
+        return Task::none();
+    };
+    let actions: Vec<ActionId> = std::env::var("DOKNYU_SCREENSHOT_ACTIONS")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|a| match a.trim() {
+            "volumes" => Some(ActionId::GoVolumes),
+            "networks" => Some(ActionId::GoNetworks),
+            "images" => Some(ActionId::GoImages),
+            "next" => Some(ActionId::SelectNext),
+            "open" => Some(ActionId::OpenSelected),
+            "logs" => Some(ActionId::DockLogs),
+            "stats" => Some(ActionId::DockStats),
+            "terminal" => Some(ActionId::DockTerminal),
+            "palette" => Some(ActionId::OpenPalette),
+            "sidebar" => Some(ActionId::ToggleSidebar),
+            "light" => Some(ActionId::ThemeLight),
+            "dark" => Some(ActionId::ThemeDark),
+            _ => None,
+        })
+        .collect();
+    let wait = |ms| Task::future(tokio::time::sleep(Duration::from_millis(ms)));
+    let steps = wait(1500)
+        .then(move |()| Task::batch(actions.iter().map(|a| Task::done(Message::Action(*a)))));
+    let save = wait(3500)
+        .then(|()| window::latest())
+        .and_then(window::screenshot)
+        .then(move |shot| {
+            let file = std::fs::File::create(&out).expect("screenshot file");
+            let mut png = png::Encoder::new(file, shot.size.width, shot.size.height);
+            png.set_color(png::ColorType::Rgba);
+            png.set_depth(png::BitDepth::Eight);
+            png.write_header()
+                .and_then(|mut w| w.write_image_data(&shot.rgba))
+                .expect("screenshot PNG");
+            iced::exit()
+        });
+    Task::batch([steps, save])
+}
+
+#[cfg(not(feature = "fake"))]
+fn demo_screenshot() -> iced::Task<doknyu::app::Message> {
+    iced::Task::none()
+}
+
 /// The line `doknyu --version` prints, when that is what the arguments ask for (`args[0]` is the
 /// program). Packages run it as a smoke test of the installed binary.
 fn version_line(args: &[String]) -> Option<String> {
@@ -90,7 +146,10 @@ fn main() -> iced::Result {
 
     let client = make_client();
     let mut app = iced::application(
-        move || App::new_with_config(client.clone(), prefs::config_dir()),
+        move || {
+            let (app, task) = App::new_with_config(client.clone(), prefs::config_dir());
+            (app, iced::Task::batch([task, demo_screenshot()]))
+        },
         App::update,
         App::view,
     )

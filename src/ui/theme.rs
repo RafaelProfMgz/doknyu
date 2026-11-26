@@ -83,8 +83,9 @@ mod tests {
 
     #[test]
     fn dark_palette_matches_spec() {
-        assert_eq!(DARK.bg, Color::from_rgb8(0x28, 0x2c, 0x33));
-        assert_eq!(DARK.accent, Color::from_rgb8(0x74, 0xad, 0xe8));
-        assert_eq!(LIGHT.accent, Color::from_rgb8(0x5c, 0x78, 0xe2));
+        // Catppuccin Mocha base and mauve; Latte mauve darkened for AA.
+        assert_eq!(DARK.bg, Color::from_rgb8(0x1e, 0x1e, 0x2e));
+        assert_eq!(DARK.accent, Color::from_rgb8(0xcb, 0xa6, 0xf7));
+        assert_eq!(LIGHT.accent, Color::from_rgb8(0x7e, 0x28, 0xee));
     }
 }
