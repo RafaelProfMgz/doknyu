@@ -47,8 +47,12 @@ signed yet, but each one is the release `.deb`, checked against `SHA256SUMS`.
 
 ```sh
 brew tap RafaelProfMgz/tap
+brew trust --formula rafaelprofmgz/tap/doknyu
 brew install doknyu
 ```
+
+Homebrew 7 refuses formulae from third-party taps until you trust them, hence the `brew trust` line.
+The formula builds from source, so the install takes several minutes.
 
 **Any distribution (AppImage, needs FUSE 2: `libfuse2` on Ubuntu 22.04/24.04)**
 
@@ -148,7 +152,7 @@ doknyu é um app desktop para Linux que gerencia containers, logs, estatísticas
 um terminal embutido do Docker. Instale o `.deb` (`sudo apt install ./doknyu_*.deb`) ou o AppImage
 da [última release](https://github.com/RafaelProfMgz/doknyu/releases/latest). No Arch, use o
 repositório pacman (bloco `[doknyu]` em [Installation](#installation), depois
-`sudo pacman -Sy doknyu-bin`). Com Homebrew: `brew tap RafaelProfMgz/tap && brew install doknyu`. Para acessar o
+`sudo pacman -Sy doknyu-bin`). Com Homebrew: `brew tap RafaelProfMgz/tap && brew trust --formula rafaelprofmgz/tap/doknyu && brew install doknyu`. Para acessar o
 Docker, adicione seu usuário ao grupo `docker` (`sudo usermod -aG docker $USER`) e entre na sessão
 de novo. Para testar sem Docker: `cargo run --features fake`.
 
