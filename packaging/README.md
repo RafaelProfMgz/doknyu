@@ -420,6 +420,7 @@ Nada disso é feito por agente.
 4. Teste numa máquina com Homebrew no Linux:
    ```sh
    brew tap RafaelProfMgz/tap
+   brew trust --formula rafaelprofmgz/tap/doknyu   # Homebrew 7+ recusa taps de terceiros sem isso
    brew install doknyu          # compila do fonte; leva vários minutos
    doknyu --version
    ```
